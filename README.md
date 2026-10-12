@@ -23,9 +23,10 @@ Firmware produced by this repo is branded **byte** and targets the Arcadyan **AW
 ## Preset Packages
 
 - **VPN / proxy:** `passwall`, `passwall2`, `openclash`
+- **DNS ad-blocking:** `adguardhome` (+ LuCI app)
 - **Modem:** `qmodem` (replaces 3GInfo Lite / modemband / SMS tools)
 - **System tools:** `htop`, `traffic monitor`, `RAM releaser`, `terminal access`
-- **Theme:** `footstrap` (default), Argon and Bootstrap also shipped
+- **Theme:** `vantage` (default), footstrap / Argon / Bootstrap also shipped
 - **Extras:** `SFTP (OpenSSH) support`
 
 ## Base
@@ -36,8 +37,8 @@ Firmware produced by this repo is branded **byte** and targets the Arcadyan **AW
 
 ## Default WiFi Settings
 
-- **SSID:** `AW1K` / `AW1K 5G`
-- **Password:** `nialwrt123`
+- **SSID:** `byte` / `byte 5g`
+- **Password:** `1234567890`
 
 ## Requirements
 

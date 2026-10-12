@@ -1,7 +1,7 @@
 
 config core 'main'
 	option lang 'en'
-	option mediaurlbase '/luci-static/footstrap'
+	option mediaurlbase '/luci-static/vantage'
 	option resourcebase '/luci-static/resources'
 	option ubuspath '/ubus/'
 
@@ -30,6 +30,7 @@ config internal 'themes'
 	option BootstrapDark '/luci-static/bootstrap-dark'
 	option BootstrapLight '/luci-static/bootstrap-light'
 	option Footstrap '/luci-static/footstrap'
+	option Vantage '/luci-static/vantage'
 
 config internal 'apply'
 	option rollback '90'

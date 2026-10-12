@@ -79,13 +79,16 @@ main_menu() {
 }
 
 update_feeds() {
-    echo -e "${BOLD_YELLOW}ADDING EXTERNAL FEEDS (QMODEM, PASSWALL2)${RESET}"
+    echo -e "${BOLD_YELLOW}ADDING EXTERNAL FEEDS (QMODEM, PASSWALL2, VANTAGE)${RESET}"
     # qmodem: modem management (replaces 3ginfo/modemband/sms-tool-js)
     grep -q '^src-git qmodem ' feeds.conf.default 2>/dev/null || \
         echo 'src-git qmodem https://github.com/FUjr/QModem.git;main' >> feeds.conf.default
     # passwall2 luci app; passwall v1 + all cores come from immortalwrt feeds
     grep -q '^src-git passwall_luci ' feeds.conf.default 2>/dev/null || \
         echo 'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall2.git;main' >> feeds.conf.default
+    # vantage theme + dashboard (external feed)
+    grep -q '^src-git vantage ' feeds.conf.default 2>/dev/null || \
+        echo 'src-git vantage https://github.com/anothaDev/luci-theme-vantage.git;main' >> feeds.conf.default
     # footstrap theme ships in immortalwrt/luci, no external feed needed
 
     echo -e "${BOLD_YELLOW}UPDATING FEEDS${RESET}"
@@ -192,7 +195,8 @@ get_version() {
 ci_check_packages() {
     local missing="" p
     for p in luci-app-passwall luci-app-passwall2 luci-app-openclash \
-             luci-theme-footstrap luci-app-qmodem-next qmodem; do
+             luci-theme-footstrap luci-theme-vantage luci-app-vantage \
+             luci-app-adguardhome adguardhome luci-app-qmodem-next qmodem; do
         grep -q "^CONFIG_PACKAGE_${p}=y$" .config || missing="$missing $p"
     done
     grep -q '^# CONFIG_USE_APK is not set$' .config || missing="$missing IPK(opkg)"
