@@ -1,1 +1,102 @@
+name: Build byte firmware (AW1000)
 
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: ImmortalWrt branch to build
+        required: false
+        default: openwrt-25.12
+  push:
+    branches: [main]
+    paths:
+      - preset
+      - aw1kbuilder.sh
+      - files/**
+      - .github/workflows/build.yml
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ImmortalWrt (ipk) for AW1000
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    env:
+      CI: "1"
+      TARGET_BRANCH: ${{ github.event.inputs.branch || 'openwrt-25.12' }}
+      SKIP_MENUCONFIG: "1"
+
+    steps:
+      - name: Checkout builder
+        uses: actions/checkout@v4
+        with:
+          path: builder
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext \
+            gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 \
+            libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
+            libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev libz-dev \
+            lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 \
+            python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c rsync scons \
+            squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+
+      - name: Cache downloads and ccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            builder/immortalwrt/dl
+            builder/immortalwrt/.ccache
+          key: aw1000-${{ env.TARGET_BRANCH }}-${{ github.run_id }}
+          restore-keys: |
+            aw1000-${{ env.TARGET_BRANCH }}-
+
+      - name: Build firmware
+        working-directory: builder
+        run: |
+          # The script clones immortalwrt/, appends feeds, applies preset + files,
+          # runs defconfig, and builds. Non-interactive because CI=1 and
+          # SKIP_MENUCONFIG=1 are exported at job level.
+          bash aw1kbuilder.sh
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          # Copy the target output tree (images + metadata), skipping the packages dir.
+          rsync -a --exclude 'packages' \
+            builder/immortalwrt/bin/targets/qualcommax/ipq807x/ out/ || true
+          find out -type f | sort
+          test -n "$(find out -name '*.bin' -o -name '*.itb')" || {
+            echo "No firmware images produced"; exit 1; }
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: byte-aw1000-${{ env.TARGET_BRANCH }}
+          path: out/*
+          if-no-files-found: error
+
+      - name: Publish release
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: byte-${{ env.TARGET_BRANCH }}-${{ github.run_number }}
+          name: byte ${{ env.TARGET_BRANCH }} (AW1000) build ${{ github.run_number }}
+          body: |
+            byte firmware for Arcadyan AW1000 (qualcommax/ipq807x).
+            ImmortalWrt ${{ env.TARGET_BRANCH }}, opkg/ipk packages.
+            Includes passwall, passwall2, openclash, qmodem, footstrap theme.
+          files: out/*

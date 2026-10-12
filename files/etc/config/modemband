@@ -1,8 +1,0 @@
-
-config modemband
-	option iface 'wwan'
-	option wanrestart '0'
-	option modemrestart '0'
-	option notify '0'
-	option set_port '/dev/ttyUSB3'
-

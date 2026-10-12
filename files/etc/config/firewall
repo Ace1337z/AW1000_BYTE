@@ -21,7 +21,8 @@ config zone
 	option forward 'REJECT'
 	option masq '1'
 	option mtu_fix '1'
-	list network 'wwan'
+	list network 'wwan0'
+	list network 'wwan1'
 
 config forwarding
 	option src 'lan'

@@ -1,6 +1,6 @@
 
 config system
-	option hostname 'NIALWRT'
+	option hostname 'byte'
 	option timezone '<+08>-8'
 	option ttylogin '0'
 	option log_size '128'

@@ -43,7 +43,7 @@ return baseclass.extend({
 		]);
 
 		const fields = [
-			[_('Firmware'), 'SHADOWTUNNEL'],
+			[_('Firmware'), 'byte'],
 			[_('Version'), versionString],
 			[_('Time'), datestr],
 			[_('Uptime'), info.uptime ? '%t'.format(info.uptime) : '?'],

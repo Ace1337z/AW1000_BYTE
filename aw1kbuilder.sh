@@ -14,7 +14,7 @@ BOLD_BLUE="${BOLD}${BLUE}"
 BOLD_MAGENTA="${BOLD}${MAGENTA}"
 
 main_menu() {
-    clear
+    clear 2>/dev/null || true
     echo -e "${BOLD_MAGENTA}##############################################${RESET}"
     echo -e "${BOLD_MAGENTA}             AW1K BUILD MENU                  ${RESET}"
     echo -e "${BOLD_MAGENTA}            TELEGRAM: @NIALVPN                ${RESET}"
@@ -24,8 +24,10 @@ main_menu() {
 
     distro="immortalwrt"
     repo="https://github.com/immortalwrt/immortalwrt.git"
-    preset_repo="https://github.com/nialwrt/aw1kbuilder.git"
+    preset_repo="https://github.com/Ace1337z/aw1kbuilder.git"
     preset_folder="aw1kbuilder"
+    # Latest OpenWrt (ImmortalWrt 25.12) by default; override with TARGET_BRANCH=...
+    target_branch="${TARGET_BRANCH:-openwrt-25.12}"
 
     deps=(
         ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential
@@ -41,10 +43,18 @@ main_menu() {
     SUDO=$(command -v sudo &>/dev/null && echo "sudo" || echo "")
 
     echo -e "${BOLD_YELLOW}UPDATING SYSTEM PACKAGES${RESET}"
-    $SUDO apt update -y && $SUDO apt full-upgrade -y || {
-        echo -e "${BOLD_RED}ERROR: SYSTEM UPDATE FAILED${RESET}"
-        exit 1
-    }
+    if [ -n "$CI" ]; then
+        # CI runners are ephemeral: skip the full-upgrade, keep the dep install.
+        $SUDO apt-get update -y || {
+            echo -e "${BOLD_RED}ERROR: APT UPDATE FAILED${RESET}"
+            exit 1
+        }
+    else
+        $SUDO apt update -y && $SUDO apt full-upgrade -y || {
+            echo -e "${BOLD_RED}ERROR: SYSTEM UPDATE FAILED${RESET}"
+            exit 1
+        }
+    fi
 
     echo -e "${BOLD_YELLOW}INSTALLING DEPENDENCIES FOR ${distro^^}${RESET}"
     $SUDO apt install -y "${deps[@]}" || {
@@ -69,17 +79,29 @@ main_menu() {
 }
 
 update_feeds() {
+    echo -e "${BOLD_YELLOW}ADDING EXTERNAL FEEDS (QMODEM, PASSWALL2)${RESET}"
+    # qmodem: modem management (replaces 3ginfo/modemband/sms-tool-js)
+    grep -q '^src-git qmodem ' feeds.conf.default 2>/dev/null || \
+        echo 'src-git qmodem https://github.com/FUjr/QModem.git;main' >> feeds.conf.default
+    # passwall2 luci app; passwall v1 + all cores come from immortalwrt feeds
+    grep -q '^src-git passwall_luci ' feeds.conf.default 2>/dev/null || \
+        echo 'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall2.git;main' >> feeds.conf.default
+    # footstrap theme ships in immortalwrt/luci, no external feed needed
+
     echo -e "${BOLD_YELLOW}UPDATING FEEDS${RESET}"
     ./scripts/feeds update -a && ./scripts/feeds install -a || {
         echo -e "${BOLD_RED}ERROR: FEEDS UPDATE FAILED${RESET}"
         return 1
     }
 
-    read -rp "${BOLD_BLUE}EDIT FEEDS IF NEEDED, THEN PRESS ENTER TO CONTINUE: ${RESET}"
-    ./scripts/feeds update -a && ./scripts/feeds install -a || {
-        echo -e "${BOLD_RED}ERROR: FEEDS INSTALL FAILED AFTER EDIT${RESET}"
-        return 1
-    }
+    # Interactive only: let the user edit feeds and re-run.
+    if [ -z "$CI" ]; then
+        read -rp "${BOLD_BLUE}EDIT FEEDS IF NEEDED, THEN PRESS ENTER TO CONTINUE: ${RESET}"
+        ./scripts/feeds update -a && ./scripts/feeds install -a || {
+            echo -e "${BOLD_RED}ERROR: FEEDS INSTALL FAILED AFTER EDIT${RESET}"
+            return 1
+        }
+    fi
 
     echo -e "${BOLD_GREEN}FEEDS UPDATED SUCCESSFULLY${RESET}"
 }
@@ -89,6 +111,15 @@ select_target() {
     git branch -a
     echo -e "${BOLD_BLUE}AVAILABLE TAGS:${RESET}"
     git tag | sort -V
+
+    # Non-interactive when TARGET_BRANCH is set (CI); otherwise prompt.
+    if [ -n "$target_branch" ]; then
+        if git checkout "$target_branch" &>/dev/null; then
+            echo -e "${BOLD_GREEN}CHECKED OUT TO ${target_branch}${RESET}"
+            return 0
+        fi
+        echo -e "${BOLD_RED}INVALID TARGET_BRANCH: ${target_branch}${RESET}"
+    fi
 
     while true; do
         read -rp "${BOLD_BLUE}ENTER BRANCH OR TAG TO CHECKOUT: ${RESET}" target_tag
@@ -103,32 +134,73 @@ select_target() {
 
 apply_preset() {
     echo -e "${BOLD_YELLOW}CLEANING OLD PRESET AND CONFIG${RESET}"
-    rm -rf ./files .config "$preset_folder"
-
-    echo -e "${BOLD_YELLOW}CLONING PRESET FROM $preset_repo${RESET}"
-    if git clone "$preset_repo" "$preset_folder"; then
-        echo -e "${BOLD_GREEN}PRESET CLONED${RESET}"
-        cp -r "$preset_folder/files" ./ 2>/dev/null && \
-            echo -e "${BOLD_GREEN}FILES COPIED${RESET}" || \
-            echo -e "${BOLD_RED}FILES NOT FOUND OR FAILED TO COPY${RESET}"
-        cp "$preset_folder/preset" .config 2>/dev/null && \
-            echo -e "${BOLD_GREEN}PRESET APPLIED${RESET}" || \
-            echo -e "${BOLD_RED}WARNING: PRESET NOT FOUND${RESET}"
-    else
-        echo -e "${BOLD_RED}FAILED TO CLONE PRESET${RESET}"
-        exit 1
+    rm -rf ./files .config
+    # Remove a previously cloned preset dir, but never the repo we are running from.
+    if [ -d "$preset_folder" ] && [ "$(realpath "$preset_folder")" != "$(realpath "$script_path/..")" ]; then
+        rm -rf "$preset_folder"
     fi
+
+    # When run from a checkout of this repo (CI), use the local preset/files.
+    if [ -f "$script_path/../preset" ] && [ -d "$script_path/../files" ]; then
+        preset_folder="$(realpath "$script_path/..")"
+        echo -e "${BOLD_GREEN}USING LOCAL PRESET: $preset_folder${RESET}"
+    else
+        echo -e "${BOLD_YELLOW}CLONING PRESET FROM $preset_repo${RESET}"
+        if ! git clone "$preset_repo" "$preset_folder"; then
+            echo -e "${BOLD_RED}FAILED TO CLONE PRESET${RESET}"
+            exit 1
+        fi
+        echo -e "${BOLD_GREEN}PRESET CLONED${RESET}"
+    fi
+
+    cp -r "$preset_folder/files" ./ 2>/dev/null && \
+        echo -e "${BOLD_GREEN}FILES COPIED${RESET}" || \
+        echo -e "${BOLD_RED}FILES NOT FOUND OR FAILED TO COPY${RESET}"
+    cp "$preset_folder/preset" .config 2>/dev/null && \
+        echo -e "${BOLD_GREEN}PRESET APPLIED${RESET}" || \
+        echo -e "${BOLD_RED}WARNING: PRESET NOT FOUND${RESET}"
 }
 
 run_menuconfig() {
+    if [ -n "$SKIP_MENUCONFIG" ]; then
+        echo -e "${BOLD_YELLOW}SKIPPING MENUCONFIG (SKIP_MENUCONFIG set)${RESET}"
+        return 0
+    fi
     echo -e "${BOLD_YELLOW}RUNNING MENUCONFIG${RESET}"
     make menuconfig
     echo -e "${BOLD_GREEN}CONFIGURATION SAVED${RESET}"
 }
 
+# Rename distro-branded output files to the "byte" firmware name.
+rename_output() {
+    local dir="bin/targets"
+    [ -d "$dir" ] || return 0
+    find "$dir" -type f \( -name '*ImmortalWrt*' -o -name '*immortalwrt*' \) | while read -r f; do
+        local d b nb
+        d="$(dirname "$f")"
+        b="$(basename "$f")"
+        nb="$(echo "$b" | sed -e 's/ImmortalWrt/byte/g' -e 's/immortalwrt/byte/g')"
+        [ "$b" = "$nb" ] || mv -f "$f" "$d/$nb"
+    done
+}
 get_version() {
     version_tag=$(git describe --tags --exact-match 2>/dev/null || echo "")
     version_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+}
+
+# CI-only: fail fast if the preset did not resolve the required packages.
+ci_check_packages() {
+    local missing="" p
+    for p in luci-app-passwall luci-app-passwall2 luci-app-openclash \
+             luci-theme-footstrap luci-app-qmodem-next qmodem; do
+        grep -q "^CONFIG_PACKAGE_${p}=y$" .config || missing="$missing $p"
+    done
+    grep -q '^# CONFIG_USE_APK is not set$' .config || missing="$missing IPK(opkg)"
+    if [ -n "$missing" ]; then
+        echo -e "${BOLD_RED}MISSING REQUIRED CONFIG:$missing${RESET}"
+        return 1
+    fi
+    echo -e "${BOLD_GREEN}ALL REQUIRED PACKAGES PRESENT IN .config${RESET}"
 }
 
 start_build() {
@@ -139,15 +211,23 @@ start_build() {
 
         if make -j"$(nproc)"; then
             dur=$(( $(date +%s) - start ))
+            rename_output
             echo -e "${BOLD_YELLOW}BUILD VERSION: ${version_branch}${version_tag}${RESET}"
             echo -e "${BOLD_BLUE}OUTPUT DIRECTORY: $(pwd)/bin/targets/${RESET}"
             printf "${BOLD_GREEN}BUILD COMPLETED IN %02dh %02dm %02ds${RESET}\n" \
                 $((dur / 3600)) $(((dur % 3600) / 60)) $((dur % 60))
-            rm -rf "$preset_folder"; rm -f -- "$script_path"
+            # Only clean up when running standalone (not from a repo checkout/CI).
+            if [ -z "$CI" ] && [ "$preset_folder" != "$(realpath "$script_path/..")" ]; then
+                rm -rf "$preset_folder"; rm -f -- "$script_path"
+            fi
             exit 0
         else
             echo -e "${BOLD_RED}BUILD FAILED. RETRYING WITH VERBOSE OUTPUT${RESET}"
             make -j1 V=s
+            if [ -n "$CI" ]; then
+                echo -e "${BOLD_RED}CI BUILD FAILED${RESET}"
+                exit 1
+            fi
             read -rp "${BOLD_RED}PLEASE FIX ERRORS AND PRESS ENTER TO RETRY: ${RESET}"
             make distclean
             update_feeds || return 1
@@ -160,16 +240,17 @@ start_build() {
 
 build_menu() {
     cd "$distro" || exit 1
-    update_feeds || exit 1
     select_target
+    update_feeds || exit 1
     apply_preset
     make defconfig
+    if [ -n "$CI" ]; then ci_check_packages || exit 1; fi
     run_menuconfig
     start_build
 }
 
 rebuild_menu() {
-    clear
+    clear 2>/dev/null || true
     echo -e "${BOLD_MAGENTA}##############################################${RESET}"
     echo -e "${BOLD_MAGENTA}             AW1K REBUILD MENU                ${RESET}"
     echo -e "${BOLD_MAGENTA}            TELEGRAM: @NIALVPN                ${RESET}"
@@ -191,8 +272,8 @@ rebuild_menu() {
                     exit 1
                 }
                 cd "$distro" || exit 1
-                update_feeds || exit 1
                 select_target
+                update_feeds || exit 1
                 apply_preset
                 make defconfig
                 run_menuconfig
@@ -226,7 +307,7 @@ rebuild_menu() {
 }
 
 main_menu
-if [ "$just_cloned" = "1" ]; then
+if [ -n "$CI" ] || [ "$just_cloned" = "1" ]; then
     build_menu
 else
     rebuild_menu
