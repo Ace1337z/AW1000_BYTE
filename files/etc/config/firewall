@@ -6,6 +6,8 @@ config defaults
 	option fullcone '1'
 	option synflood_protect '1'
 	option drop_invalid '1'
+	option flow_offloading '0'
+	option flow_offloading_hw '0'
 
 config zone
 	option name 'lan'

@@ -50,5 +50,5 @@ config led
 config led
 	option name 'PHONE'
 	option sysfs 'green:phone'
-	option trigger 'default-on'
+	option trigger 'none'
 

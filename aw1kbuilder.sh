@@ -86,9 +86,16 @@ update_feeds() {
     # passwall2 luci app; passwall v1 + all cores come from immortalwrt feeds
     grep -q '^src-git passwall_luci ' feeds.conf.default 2>/dev/null || \
         echo 'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall2.git;main' >> feeds.conf.default
-    # vantage theme + dashboard (external feed)
+    # vantage theme + dashboard (external feed); drop the old upstream URL if present
+    sed -i '\#^src-git vantage https://github.com/anothaDev/luci-theme-vantage.git#d' feeds.conf.default 2>/dev/null
     grep -q '^src-git vantage ' feeds.conf.default 2>/dev/null || \
-        echo 'src-git vantage https://github.com/anothaDev/luci-theme-vantage.git;main' >> feeds.conf.default
+        echo 'src-git vantage https://github.com/Ace1337z/luci-theme-vantage.git;main' >> feeds.conf.default
+    # NSS offload: qca-nss-drv + qca-nss-ecm (QSDK 12.5, kernel 6.12 patches)
+    grep -q '^src-git nss ' feeds.conf.default 2>/dev/null || \
+        echo 'src-git nss https://github.com/qosmio/nss-packages.git;NSS-12.5-K6.x' >> feeds.conf.default
+    # AW1000 RJ11 phone port: kmod-aw1000-fxs, fxsd, luci-app-fxs (packages live in openwrt/)
+    grep -q '^src-git fxs ' feeds.conf.default 2>/dev/null || \
+        echo 'src-git fxs https://github.com/Ace1337z/openwrt-aw1000-phone.git;main' >> feeds.conf.default
     # footstrap theme ships in immortalwrt/luci, no external feed needed
 
     echo -e "${BOLD_YELLOW}UPDATING FEEDS${RESET}"
@@ -159,6 +166,12 @@ apply_preset() {
     cp -r "$preset_folder/files" ./ 2>/dev/null && \
         echo -e "${BOLD_GREEN}FILES COPIED${RESET}" || \
         echo -e "${BOLD_RED}FILES NOT FOUND OR FAILED TO COPY${RESET}"
+    # NSS kernel patches + DTS files (target/linux/qualcommax overlay)
+    if [ -d "$preset_folder/nss" ]; then
+        cp -r "$preset_folder/nss/." ./ && \
+            echo -e "${BOLD_GREEN}NSS PATCHES APPLIED${RESET}" || \
+            echo -e "${BOLD_RED}NSS PATCH COPY FAILED${RESET}"
+    fi
     cp "$preset_folder/preset" .config 2>/dev/null && \
         echo -e "${BOLD_GREEN}PRESET APPLIED${RESET}" || \
         echo -e "${BOLD_RED}WARNING: PRESET NOT FOUND${RESET}"
@@ -196,8 +209,24 @@ ci_check_packages() {
     local missing="" p
     for p in luci-app-passwall luci-app-passwall2 luci-app-openclash \
              luci-theme-footstrap luci-theme-vantage luci-app-vantage \
-             luci-app-adguardhome adguardhome luci-app-qmodem-next qmodem; do
+             luci-app-adguardhome adguardhome luci-app-qmodem-next qmodem \
+             kmod-aw1000-fxs fxsd luci-app-fxs \
+             kmod-qca-nss-drv kmod-qca-nss-ecm nss-firmware \
+             kmod-qmi_wwan_q; do
         grep -q "^CONFIG_PACKAGE_${p}=y$" .config || missing="$missing $p"
+    done
+    # NSS ECM needs these drv features compiled in
+    for p in CONFIG_NSS_DRV_IPV6_ENABLE CONFIG_NSS_DRV_VIRT_IF_ENABLE \
+             CONFIG_NSS_DRV_PPPOE_ENABLE CONFIG_NSS_DRV_BRIDGE_ENABLE \
+             CONFIG_NSS_DRV_VLAN_ENABLE CONFIG_NSS_FIRMWARE_VERSION_12_5; do
+        grep -q "^${p}=y$" .config || missing="$missing $p"
+    done
+    # qmodem's vendor driver already provides qmi_wwan_q.ko; the packaged
+    # copies would collide on the same file during rootfs assembly.
+    for p in kmod-usb-net-qmi-wwan-quectel kmod-usb-net-qmi-wwan-fibocom; do
+        if grep -q "^CONFIG_PACKAGE_${p}=y$" .config; then
+            missing="$missing +${p}"
+        fi
     done
     grep -q '^# CONFIG_USE_APK is not set$' .config || missing="$missing IPK(opkg)"
     if [ -n "$missing" ]; then

@@ -24,9 +24,16 @@ Firmware produced by this repo is branded **byte** and targets the Arcadyan **AW
 
 - **VPN / proxy:** `passwall`, `passwall2`, `openclash`
 - **DNS ad-blocking:** `adguardhome` (+ LuCI app)
-- **Modem:** `qmodem` (replaces 3GInfo Lite / modemband / SMS tools)
+- **Modem:** `qmodem` (replaces 3GInfo Lite / modemband / SMS tools). It supplies the
+  Quectel/Fibocom/Simcom vendor QMI drivers, so the packaged
+  `kmod-usb-net-qmi-wwan-{quectel,fibocom}` copies are disabled — both ship the same
+  `qmi_wwan_q.ko`/`qmi_wwan_f.ko` and would collide at rootfs assembly. Dialing uses
+  qmodem's `quectel-CM-M`; `quectel-cm` + `luci-proto-quectel` are therefore off.
+- **Phone port:** `kmod-aw1000-fxs`, `fxsd`, `luci-app-fxs` — RJ11 port on the back panel (Services > Phone)
+- **NSS offload:** `kmod-qca-nss-drv`, `kmod-qca-nss-ecm`, `nss-firmware` (QSDK 12.5) — hardware NAT/bridge offload
 - **System tools:** `htop`, `traffic monitor`, `RAM releaser`, `terminal access`
-- **Theme:** `vantage` (default), footstrap / Argon / Bootstrap also shipped
+- **Theme:** `vantage` (default, from the [Ace1337z fork](https://github.com/Ace1337z/luci-theme-vantage)),
+  footstrap / Argon / Bootstrap also shipped
 - **Extras:** `SFTP (OpenSSH) support`
 
 ## Base
@@ -39,6 +46,44 @@ Firmware produced by this repo is branded **byte** and targets the Arcadyan **AW
 
 - **SSID:** `byte` / `byte 5g`
 - **Password:** `1234567890`
+
+## Phone port (RJ11)
+
+The three `fxs` packages come from the `fxs` feed
+([openwrt-aw1000-phone](https://github.com/Ace1337z/openwrt-aw1000-phone)).
+`fxsd` stays off until the SLIC DSP patch is present:
+
+1. Put `si3226x_patch.bin` in `/etc/fxs/` (Skyworks code, not redistributable — see
+   `tools/mkpatch.py` in that repo).
+2. Set the modem PCM interface to slave mode once:
+   `ubus call at-daemon sendat '{"at_port":"/dev/ttyUSB2","at_cmd":"AT+QDAI=x,1,0,4,0,0,1,1","timeout":3}'`
+3. Enable: `/etc/init.d/fxsd enable && /etc/init.d/fxsd start`
+
+The `PHONE` LED no longer defaults on; `fxsd` drives it while the port is active.
+
+## NSS hardware offload
+
+Wired NAT and bridge forwarding run on the two NSS cores instead of the CPU
+(`qca-nss-drv` + `qca-nss-ecm`, QSDK 12.5, firmware 12.5 "Release 210").
+
+- Feed: [qosmio/nss-packages](https://github.com/qosmio/nss-packages) branch `NSS-12.5-K6.x`
+  (the `XT-Martinez` fork predates kernel 6.12 support).
+- Kernel side: `nss/` carries the six `06xx` ECM patches, the `ipq8074-nss.dtsi`
+  node set, and the AW1000 DTS include. They are copied into
+  `target/linux/qualcommax/` at build time by `aw1kbuilder.sh`.
+- Software flow offload is disabled (`flow_offloading '0'`) so fw4 and ECM do not
+  fight over the same flows. `packet_steering` is off; ECM wants the IRQs where
+  the NSS firmware puts them.
+- `nf_conntrack_max` is raised to 65536 for proxy workloads.
+
+What this does **not** do: proxied traffic (`passwall`/`passwall2`) is TPROXY'd
+into a local socket, so it never reaches NSS — only direct traffic offloads. This
+is a property of transparent proxying, not a misconfiguration. Per-connection
+CPU cost for proxied flows is unchanged.
+
+The QSDK NSS driver and firmware are **not** GPL. Firmware blobs are
+redistributed by `nss-firmware` from the QCA SDK release; review the Qualcomm
+license before redistributing images built from this repo.
 
 ## Requirements
 
