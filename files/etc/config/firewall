@@ -20,11 +20,12 @@ config zone
 	option name 'wan'
 	option input 'REJECT'
 	option output 'ACCEPT'
-	option forward 'REJECT'
+	option forward 'DROP'
 	option masq '1'
 	option mtu_fix '1'
-	list network 'wwan0'
-	list network 'wwan1'
+	list network 'wan'
+	list network 'wan6'
+	list network 'wanv6'
 
 config forwarding
 	option src 'lan'

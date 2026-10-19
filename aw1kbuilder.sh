@@ -96,6 +96,11 @@ update_feeds() {
     # AW1000 RJ11 phone port: kmod-aw1000-fxs, fxsd, luci-app-fxs (packages live in openwrt/)
     grep -q '^src-git fxs ' feeds.conf.default 2>/dev/null || \
         echo 'src-git fxs https://github.com/Ace1337z/openwrt-aw1000-phone.git;main' >> feeds.conf.default
+    # dotycat packages: luci-app-aw1k-led (AW1000 LED controller), etc.
+    grep -q '^src-git dotycat ' feeds.conf.default 2>/dev/null || \
+        echo 'src-git dotycat https://github.com/dotywrt/dotycat-package.git;dotycat' >> feeds.conf.default
+    # luci-app-modeminfo is vendored as a local package (its repo has a
+    # root-level Makefile that the feeds scanner cannot index); see packages/.
     # footstrap theme ships in immortalwrt/luci, no external feed needed
 
     echo -e "${BOLD_YELLOW}UPDATING FEEDS${RESET}"
@@ -166,6 +171,12 @@ apply_preset() {
     cp -r "$preset_folder/files" ./ 2>/dev/null && \
         echo -e "${BOLD_GREEN}FILES COPIED${RESET}" || \
         echo -e "${BOLD_RED}FILES NOT FOUND OR FAILED TO COPY${RESET}"
+    # Local vendored packages (e.g. luci-app-modeminfo) copied into the tree.
+    if [ -d "$preset_folder/packages" ]; then
+        cp -r "$preset_folder/packages/." ./package/ && \
+            echo -e "${BOLD_GREEN}LOCAL PACKAGES COPIED${RESET}" || \
+            echo -e "${BOLD_RED}LOCAL PACKAGE COPY FAILED${RESET}"
+    fi
     # NSS kernel patches + DTS files (target/linux/qualcommax overlay)
     if [ -d "$preset_folder/nss" ]; then
         cp -r "$preset_folder/nss/." ./ && \
@@ -212,7 +223,8 @@ ci_check_packages() {
              luci-app-adguardhome adguardhome luci-app-qmodem-next qmodem \
              kmod-aw1000-fxs fxsd luci-app-fxs \
              kmod-qca-nss-drv kmod-qca-nss-ecm nss-firmware \
-             kmod-qmi_wwan_q; do
+             kmod-qmi_wwan_q luci-app-nft-ttl luci-app-modeminfo \
+             luci-app-aw1k-led luci-app-ramfree; do
         grep -q "^CONFIG_PACKAGE_${p}=y$" .config || missing="$missing $p"
     done
     # NSS ECM needs these drv features compiled in

@@ -1,0 +1,50 @@
+#!/bin/sh
+# NSS/ECM hardware offload toggle for the AW1000.
+#
+# Why this exists:
+#   NSS hardware offload forwards established flows entirely in the NSS engine,
+#   which BYPASSES netfilter. The TTL/HopLimit rewrite (luci-app-nft-ttl) is a
+#   netfilter rule, so while offload is active the TTL rewrite does NOT apply to
+#   offloaded (forwarded) traffic. NSS also has no in-hardware TTL support.
+#
+#   This device needs the TTL rewrite (tethering / carrier detection), so NSS
+#   offload is OFF by default. Turn it on only when you prefer raw speed over a
+#   correct TTL on the wire.
+#
+# Usage:
+#   nss-offload status   show current state
+#   nss-offload off      disable NSS/ECM offload (default; TTL rewrite applies)
+#   nss-offload on       enable NSS/ECM offload (fast; TTL rewrite is bypassed)
+
+ECM_INIT=/etc/init.d/qca-nss-ecm
+ACCEL=/sys/kernel/debug/ecm/ecm_classifier_default/accel_mode
+
+case "$1" in
+on)
+	[ -x "$ECM_INIT" ] || { echo "qca-nss-ecm is not installed"; exit 1; }
+	"$ECM_INIT" enable
+	"$ECM_INIT" start
+	# 0 = ECM_CLASSIFIER_ACCELERATION_MODE_ACCEL
+	[ -e "$ACCEL" ] && echo 0 > "$ACCEL"
+	echo "NSS offload ON - fast path active; TTL rewrite bypassed for offloaded flows"
+	;;
+off)
+	[ -e "$ACCEL" ] && echo 1 > "$ACCEL"   # 1 = ECM_CLASSIFIER_ACCELERATION_MODE_NO
+	if [ -x "$ECM_INIT" ]; then
+		"$ECM_INIT" stop
+		"$ECM_INIT" disable
+	fi
+	echo "NSS offload OFF - netfilter path active; TTL rewrite applies"
+	;;
+status)
+	if [ -d /sys/module/ecm ]; then
+		echo "ECM loaded; accel_mode=$(cat "$ACCEL" 2>/dev/null) (0=accel 1=no 2=dont-care)"
+	else
+		echo "ECM not loaded (NSS offload inactive; TTL rewrite applies)"
+	fi
+	;;
+*)
+	echo "usage: nss-offload on|off|status"
+	exit 1
+	;;
+esac

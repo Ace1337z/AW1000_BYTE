@@ -1,4 +1,3 @@
-
 config interface 'loopback'
 	option device 'lo'
 	option proto 'static'
@@ -26,3 +25,18 @@ config interface 'lan'
 	option ip6assign '60'
 	option defaultroute '0'
 
+config interface 'wan'
+	option device 'wwan0_1'
+	option proto 'dhcp'
+	option modem_config '4_1'
+	option defaultroute '1'
+	option metric '11'
+	option ifname 'wwan0_1'
+
+config interface 'wanv6'
+	option modem_config '4_1'
+	option proto 'dhcpv6'
+	option ifname '@wan'
+	option device '@wan'
+	option metric '11'
+	option extendprefix '1'
