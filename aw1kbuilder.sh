@@ -16,7 +16,7 @@ BOLD_MAGENTA="${BOLD}${MAGENTA}"
 main_menu() {
     clear 2>/dev/null || true
     echo -e "${BOLD_MAGENTA}##############################################${RESET}"
-    echo -e "${BOLD_MAGENTA}             AW1K BUILD MENU                  ${RESET}"
+    echo -e "${BOLD_MAGENTA}          BYTE by ACE BUILD MENU                ${RESET}"
     echo -e "${BOLD_MAGENTA}            TELEGRAM: @NIALVPN                ${RESET}"
     echo -e "${BOLD_MAGENTA}##############################################${RESET}"
     echo -e "${BOLD_BLUE}DISTRO: IMMORTALWRT${RESET}"
@@ -198,17 +198,42 @@ run_menuconfig() {
     echo -e "${BOLD_GREEN}CONFIGURATION SAVED${RESET}"
 }
 
-# Rename distro-branded output files to the "byte" firmware name.
+# Rename distro-branded output files to the "BYTE by ACE" firmware name.
+# VERSION_DIST is "BYTE by ACE"; filenames cannot contain spaces, so the build
+# sanitises it to the lowercase/dashed "byte-by-ace" image prefix.  We normalise
+# that to the canonical "BYTE_by_ACE" identifier and keep the checksum and
+# profiles.json metadata in sync with the renamed files.
 rename_output() {
     local dir="bin/targets"
+    local f b d nb
     [ -d "$dir" ] || return 0
-    find "$dir" -type f \( -name '*ImmortalWrt*' -o -name '*immortalwrt*' \) | while read -r f; do
-        local d b nb
+
+    # 1) Rename image + metadata files.
+    while IFS= read -r f; do
         d="$(dirname "$f")"
         b="$(basename "$f")"
-        nb="$(echo "$b" | sed -e 's/ImmortalWrt/byte/g' -e 's/immortalwrt/byte/g')"
+        nb="$(printf '%s' "$b" | sed \
+            -e 's/ImmortalWrt/BYTE_by_ACE/g' \
+            -e 's/immortalwrt/BYTE_by_ACE/g' \
+            -e 's/^byte-by-ace-/BYTE_by_ACE-/' \
+            -e 's/^byte-/BYTE_by_ACE-/')"
         [ "$b" = "$nb" ] || mv -f "$f" "$d/$nb"
-    done
+    done < <(find "$dir" -type f)
+
+    # 2) Fix image references inside profiles.json.
+    while IFS= read -r f; do
+        sed -i -e 's/byte-by-ace-/BYTE_by_ACE-/g' \
+               -e 's/"byte-/"BYTE_by_ACE-/g' "$f"
+    done < <(find "$dir" -name profiles.json)
+
+    # 3) Regenerate sha256sums so hashes reference the final file names.
+    while IFS= read -r f; do
+        d="$(dirname "$f")"
+        ( cd "$d" || exit 0
+          : > sha256sums
+          find . -maxdepth 1 -type f ! -name sha256sums -printf '%P\n' \
+              | LC_ALL=C sort | xargs -r sha256sum | sed 's/  / */' >> sha256sums )
+    done < <(find "$dir" -name sha256sums)
 }
 get_version() {
     version_tag=$(git describe --tags --exact-match 2>/dev/null || echo "")
@@ -297,7 +322,7 @@ build_menu() {
 rebuild_menu() {
     clear 2>/dev/null || true
     echo -e "${BOLD_MAGENTA}##############################################${RESET}"
-    echo -e "${BOLD_MAGENTA}             AW1K REBUILD MENU                ${RESET}"
+    echo -e "${BOLD_MAGENTA}          BYTE by ACE REBUILD MENU              ${RESET}"
     echo -e "${BOLD_MAGENTA}            TELEGRAM: @NIALVPN                ${RESET}"
     echo -e "${BOLD_MAGENTA}##############################################${RESET}"
     echo -e "${BOLD_BLUE}REBUILD MENU:${RESET}"

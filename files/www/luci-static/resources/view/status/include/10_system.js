@@ -43,7 +43,7 @@ return baseclass.extend({
 		]);
 
 		const fields = [
-			[_('Firmware'), 'byte'],
+			[_('Firmware'), 'BYTE by ACE'],
 			[_('Version'), versionString],
 			[_('Time'), datestr],
 			[_('Uptime'), info.uptime ? '%t'.format(info.uptime) : '?'],

@@ -1,4 +1,4 @@
-name: Build byte firmware (AW1000)
+name: Build BYTE by ACE firmware (AW1000)
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   build:
-    name: Build ImmortalWrt (ipk) for AW1000
+    name: Build BYTE by ACE (ImmortalWrt ipk) for AW1000
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
@@ -85,7 +85,7 @@ jobs:
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: byte-aw1000-${{ env.TARGET_BRANCH }}
+          name: BYTE_by_ACE-aw1000-${{ env.TARGET_BRANCH }}
           path: out/*
           if-no-files-found: error
 
@@ -93,10 +93,10 @@ jobs:
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: byte-${{ env.TARGET_BRANCH }}-${{ github.run_number }}
-          name: byte ${{ env.TARGET_BRANCH }} (AW1000) build ${{ github.run_number }}
+          tag_name: BYTE_by_ACE-${{ env.TARGET_BRANCH }}-${{ github.run_number }}
+          name: BYTE by ACE ${{ env.TARGET_BRANCH }} (AW1000) build ${{ github.run_number }}
           body: |
-            byte firmware for Arcadyan AW1000 (qualcommax/ipq807x).
+            BYTE by ACE firmware for Arcadyan AW1000 (qualcommax/ipq807x).
             ImmortalWrt ${{ env.TARGET_BRANCH }}, opkg/ipk packages.
             Includes passwall, passwall2, openclash, qmodem, footstrap theme.
           files: out/*

@@ -4,7 +4,7 @@
 
 AW1KBUILDER is a beginner-friendly OpenWrt build script designed for quick deployment and daily use. It comes with a full set of pre-configured packages and system tweaks, making it ideal for users who want a plug-and-play solution without needing to configure everything from scratch.
 
-Firmware produced by this repo is branded **byte** and targets the Arcadyan **AW1000** (`qualcommax/ipq807x`).
+Firmware produced by this repo is branded **BYTE by ACE** and targets the Arcadyan **AW1000** (`qualcommax/ipq807x`).
 
 ## Features
 
@@ -44,8 +44,8 @@ Firmware produced by this repo is branded **byte** and targets the Arcadyan **AW
 
 ## Default WiFi Settings
 
-- **SSID:** `byte` / `byte 5g`
-- **Password:** `1234567890`
+- **SSID:** `BYTE` (2.4 GHz) / `BYTE` (5 GHz) — both radios
+- **Password:** none (open network)
 
 ## Phone port (RJ11)
 
@@ -80,6 +80,25 @@ What this does **not** do: proxied traffic (`passwall`/`passwall2`) is TPROXY'd
 into a local socket, so it never reaches NSS — only direct traffic offloads. This
 is a property of transparent proxying, not a misconfiguration. Per-connection
 CPU cost for proxied flows is unchanged.
+
+### TTL vs NSS offload (important)
+
+The AW1000's only uplink is the cellular modem, and this build needs the TTL
+rewrite (carrier/tethering detection). **NSS hardware offload and the netfilter
+TTL rewrite are mutually exclusive on the same flow**: the NSS rule struct
+(`nss_ipv4_create`) has no TTL/hop-limit field, and once ECM offloads a flow its
+packets bypass netfilter — so the TTL rule in `/etc/nftables.d/ttl64.nft` is not
+applied to offloaded traffic.
+
+Therefore ECM is **installed but not started by default** (TTL priority). Use the
+bundled toggle to switch:
+
+- `nss-offload status` — show current state
+- `nss-offload on` — enable NSS/ECM offload (max speed; TTL rewrite bypassed on offloaded flows)
+- `nss-offload off` — disable NSS/ECM offload (default; TTL rewrite always applies)
+
+The TTL value itself is configurable in LuCI under **Tools → TTL Config**
+(`luci-app-nft-ttl`, default 64 for both IPv4 TTL and IPv6 Hop Limit).
 
 The QSDK NSS driver and firmware are **not** GPL. Firmware blobs are
 redistributed by `nss-firmware` from the QCA SDK release; review the Qualcomm
