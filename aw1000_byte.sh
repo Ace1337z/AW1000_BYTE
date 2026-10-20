@@ -291,12 +291,17 @@ ci_check_packages() {
     # copies would collide on the same file during rootfs assembly.
     # kmod-usb-net-qmi-wwan (upstream generic) also matches the RG500Q IDs
     # (0x2c7c:0x0800) and races qmi_wwan_q for /dev/cdc-wdm0, crashing the dial.
+    local forbidden=""
     for p in kmod-usb-net-qmi-wwan kmod-usb-net-qmi-wwan-quectel kmod-usb-net-qmi-wwan-fibocom; do
         if grep -q "^CONFIG_PACKAGE_${p}=y$" .config; then
-            missing="$missing +${p}"
+            forbidden="$forbidden $p"
         fi
     done
     grep -q '^# CONFIG_USE_APK is not set$' .config || missing="$missing IPK(opkg)"
+    if [ -n "$forbidden" ]; then
+        echo -e "${BOLD_RED}FORBIDDEN CONFIG (driver race with qmi_wwan_q):$forbidden${RESET}"
+        return 1
+    fi
     if [ -n "$missing" ]; then
         echo -e "${BOLD_RED}MISSING REQUIRED CONFIG:$missing${RESET}"
         return 1
