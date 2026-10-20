@@ -66,7 +66,9 @@ main_menu() {
 
     if [ ! -d "$distro" ]; then
         echo -e "${BOLD_YELLOW}CLONING REPO: $repo INTO $distro${RESET}"
-        git clone "$repo" "$distro" || {
+        # Fetch all branches: CI targets the ImmortalWrt release branch (e.g.
+        # openwrt-25.12), which is not the clone's default branch (main).
+        git clone --no-single-branch "$repo" "$distro" || {
             echo -e "${BOLD_RED}GIT CLONE FAILED. EXITING${RESET}"
             exit 1
         }
