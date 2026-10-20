@@ -146,7 +146,23 @@ select_target() {
             echo -e "${BOLD_GREEN}FETCHED AND CHECKED OUT TO ${target_branch}${RESET}"
             return 0
         fi
-        echo -e "${BOLD_RED}INVALID TARGET_BRANCH: ${target_branch}${RESET}"
+        # A stale/shallow leftover clone cannot reach the target branch.
+        # Throw it away and start over with a clean full clone (--no-single-branch
+        # pulls every branch, so openwrt-25.12 is guaranteed on the first clone).
+        echo -e "${BOLD_YELLOW}STALE CLONE WITHOUT ${target_branch}; RECLONING ${distro}${RESET}"
+        cd .. || exit 1
+        rm -rf "$distro"
+        git clone --no-single-branch "$repo" "$distro" || {
+            echo -e "${BOLD_RED}RECLONE FAILED. EXITING${RESET}"
+            exit 1
+        }
+        cd "$distro" || exit 1
+        git checkout "$target_branch" &>/dev/null || {
+            echo -e "${BOLD_RED}CHECKOUT FAILED AFTER RECLONE: ${target_branch}${RESET}"
+            exit 1
+        }
+        echo -e "${BOLD_GREEN}RECLONED AND CHECKED OUT TO ${target_branch}${RESET}"
+        return 0
     fi
 
     while true; do
