@@ -289,7 +289,9 @@ ci_check_packages() {
     done
     # qmodem's vendor driver already provides qmi_wwan_q.ko; the packaged
     # copies would collide on the same file during rootfs assembly.
-    for p in kmod-usb-net-qmi-wwan-quectel kmod-usb-net-qmi-wwan-fibocom; do
+    # kmod-usb-net-qmi-wwan (upstream generic) also matches the RG500Q IDs
+    # (0x2c7c:0x0800) and races qmi_wwan_q for /dev/cdc-wdm0, crashing the dial.
+    for p in kmod-usb-net-qmi-wwan kmod-usb-net-qmi-wwan-quectel kmod-usb-net-qmi-wwan-fibocom; do
         if grep -q "^CONFIG_PACKAGE_${p}=y$" .config; then
             missing="$missing +${p}"
         fi

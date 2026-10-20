@@ -2967,7 +2967,13 @@ CONFIG_PACKAGE_kmod-usb-net-cdc-ncm=y
 # CONFIG_PACKAGE_kmod-usb-net-mcs7830 is not set
 # CONFIG_PACKAGE_kmod-usb-net-pegasus is not set
 # CONFIG_PACKAGE_kmod-usb-net-pl is not set
-CONFIG_PACKAGE_kmod-usb-net-qmi-wwan=y
+# The upstream generic qmi_wwan (and its fibocom/quectel sub-packages) must
+# stay OFF: qmodem's vendor-qmi-wwan already builds kmod-qmi_wwan_q/f/s, and
+# the RG500Q matches the same 0x2c7c:0x0800 IDs in all of them. Loading both
+# makes the QMI channel get stolen mid-dial (cdc_wdm_fd=-1, "network interface
+# wwan0 not exist"), crashing quectel-CM and dropping the SIM registration.
+# Only kmod-qmi_wwan_q should own the modem (same choice as XT-Martinez feed).
+# CONFIG_PACKAGE_kmod-usb-net-qmi-wwan is not set
 # CONFIG_PACKAGE_kmod-usb-net-qmi-wwan-fibocom is not set
 # CONFIG_PACKAGE_kmod-usb-net-qmi-wwan-quectel is not set
 # CONFIG_PACKAGE_kmod-usb-net-rndis is not set
@@ -6853,7 +6859,7 @@ CONFIG_PACKAGE_wwan=y
 # CONFIG_PACKAGE_xdp-loader is not set
 # CONFIG_PACKAGE_xdpdump is not set
 # CONFIG_PACKAGE_xinetd is not set
-# CONFIG_PACKAGE_xray-core is not set
+CONFIG_PACKAGE_xray-core=y
 # CONFIG_PACKAGE_ztdns is not set
 # end of Network
 
