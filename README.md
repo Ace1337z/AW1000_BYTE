@@ -51,15 +51,28 @@ Firmware produced by this repo is branded **BYTE by ACE** and targets the Arcady
 
 The three `fxs` packages come from the `fxs` feed
 ([openwrt-aw1000-phone](https://github.com/Ace1337z/openwrt-aw1000-phone)).
-`fxsd` stays off until the SLIC DSP patch is present:
 
-1. Put `si3226x_patch.bin` in `/etc/fxs/` (Skyworks code, not redistributable — see
-   `tools/mkpatch.py` in that repo).
-2. Set the modem PCM interface to slave mode once:
-   `ubus call at-daemon sendat '{"at_port":"/dev/ttyUSB2","at_cmd":"AT+QDAI=x,1,0,4,0,0,1,1","timeout":3}'`
-3. Enable: `/etc/init.d/fxsd enable && /etc/init.d/fxsd start`
+The SLIC needs Skyworks' ProSLIC DSP patch after every reset. This build ships it
+pre-converted at `/etc/fxs/si3226x_patch.bin` (patch ID `0x05262017`,
+`si3226x_patch_C_FB_2017MAY26`), and `fxsd` is enabled on first boot, so the port
+works out of the box.
 
-The `PHONE` LED no longer defaults on; `fxsd` drives it while the port is active.
+To regenerate the patch file:
+
+1. `wget -O si3226x_patch_C_FB_2017MAY26.c \
+   https://raw.githubusercontent.com/olforu/study/03f601ff4e50a383d08443b06cb0f06fd1a1499b/proslic_api/patch_files/si3226x_patch_C_FB_2017MAY26.c`
+2. `python3 tools/mkpatch.py si3226x_patch_C_FB_2017MAY26.c si3226x_patch.bin`
+   (see `tools/mkpatch.py` in the fxs feed)
+3. Place the result at `files/etc/fxs/si3226x_patch.bin` in this repo.
+
+Set the modem PCM interface to slave mode once (fxsd's LuCI page does this, or):
+`ubus call at-daemon sendat '{"at_port":"/dev/ttyUSB2","at_cmd":"AT+QDAI=x,1,0,4,0,0,1,1","timeout":3}'`
+
+Enable/disable any time with `/etc/init.d/fxsd enable|start|stop`. The `PHONE` LED
+is driven by `fxsd` while the port is active.
+
+> The Skyworks patch is not redistributable; review the ProSLIC licence before
+> redistributing images built from this repo.
 
 ## NSS hardware offload
 
