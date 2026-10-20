@@ -1,0 +1,15 @@
+# Local build tree (created by aw1000_byte.sh)
+immortalwrt/
+aw1kbuilder/
+
+# Build/download caches
+dl/
+bin/
+staging_dir/
+build_dir/
+tmp/
+.ccache/
+
+# Editor/OS
+*.swp
+.DS_Store

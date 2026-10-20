@@ -24,8 +24,8 @@ main_menu() {
 
     distro="immortalwrt"
     repo="https://github.com/immortalwrt/immortalwrt.git"
-    preset_repo="https://github.com/Ace1337z/aw1kbuilder.git"
-    preset_folder="aw1kbuilder"
+    preset_repo="https://github.com/Ace1337z/AW1000_BYTE.git"
+    preset_folder="aw1000_byte"
     # Latest OpenWrt (ImmortalWrt 25.12) by default; override with TARGET_BRANCH=...
     target_branch="${TARGET_BRANCH:-openwrt-25.12}"
 
@@ -133,6 +133,14 @@ select_target() {
     if [ -n "$target_branch" ]; then
         if git checkout "$target_branch" &>/dev/null; then
             echo -e "${BOLD_GREEN}CHECKED OUT TO ${target_branch}${RESET}"
+            return 0
+        fi
+        # The directory may pre-exist (reused CI workspace / interrupted run)
+        # without the target branch fetched. Fetch it, then retry the checkout.
+        echo -e "${BOLD_YELLOW}BRANCH ${target_branch} NOT PRESENT - FETCHING${RESET}"
+        if git fetch --depth 1 origin "$target_branch" &>/dev/null && \
+           git checkout "$target_branch" &>/dev/null; then
+            echo -e "${BOLD_GREEN}FETCHED AND CHECKED OUT TO ${target_branch}${RESET}"
             return 0
         fi
         echo -e "${BOLD_RED}INVALID TARGET_BRANCH: ${target_branch}${RESET}"

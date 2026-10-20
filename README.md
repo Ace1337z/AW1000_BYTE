@@ -1,131 +1,147 @@
-# AW1KBUILDER
+# AW1000 BYTE
 
-## Overview
+**BYTE by ACE** — a beginner-friendly, feature-rich OpenWrt (ImmortalWrt) firmware
+for the **Arcadyan AW1000** (`qualcommax/ipq807x`). Fully pre-configured: flash and
+it just works — WiFi, cellular modem auto-dial, NSS hardware offload, the RJ11
+phone port, and a full proxy suite.
 
-AW1KBUILDER is a beginner-friendly OpenWrt build script designed for quick deployment and daily use. It comes with a full set of pre-configured packages and system tweaks, making it ideal for users who want a plug-and-play solution without needing to configure everything from scratch.
+---
 
-Firmware produced by this repo is branded **BYTE by ACE** and targets the Arcadyan **AW1000** (`qualcommax/ipq807x`).
+## Highlights
 
-## Features
+- **Brand:** `BYTE by ACE` (LuCI, terminal banner, release names)
+- **Target:** Arcadyan AW1000, `qualcommax/ipq807x`, ImmortalWrt `openwrt-25.12`, kernel 6.12
+- **WiFi:** SSID `BYTE` on both 2.4 GHz and 5 GHz — **no password** (open by default)
+- **Cellular:** qmodem with Quectel vendor QMI driver — auto-dials the SIM on boot
+- **Phone port:** RJ11 SLIC DSP patch **pre-shipped** — the desk-phone port works out of the box
+- **NSS hardware offload:** QSDK 12.5 (`qca-nss-drv` + `qca-nss-ecm`, firmware 12.5)
+- **TTL:** configurable via LuCI (Tools → TTL Config), default **64** on both IPv4/IPv6
+- **Speed:** BBR congestion control, CPU `performance` governor, large TCP buffers
+- **Package manager:** opkg / ipk (`CONFIG_USE_APK` off)
 
-- Beginner Friendly: Automates the entire build process — from dependencies to final firmware output.
-- Ready-to-use Preset: Comes with essential packages and system configurations tailored for optimal performance and modem support.
-- Customizable via Menuconfig: Offers flexibility to add, remove, or update packages and kernel versions via `make menuconfig`.
-- CI build: `.github/workflows/build.yml` builds the firmware on GitHub Actions and publishes a release.
+---
 
-## Preset Tweaks
+## Default WiFi
 
-- BBR congestion control
-- ZRAM swap enabled
-- CPU frequency scaling (all cores active)
-- TTL 64 (for modem/router compatibility)
+| Band | SSID | Encryption |
+|------|------|------------|
+| 2.4 GHz | `BYTE` | none (open) |
+| 5 GHz | `BYTE` | none (open) |
 
-## Preset Packages
+> **Note:** an open network. Set a password in LuCI (Network → Wireless) once connected.
 
-- **VPN / proxy:** `passwall`, `passwall2`, `openclash`
-- **DNS ad-blocking:** `adguardhome` (+ LuCI app)
-- **Modem:** `qmodem` (replaces 3GInfo Lite / modemband / SMS tools). It supplies the
-  Quectel/Fibocom/Simcom vendor QMI drivers, so the packaged
-  `kmod-usb-net-qmi-wwan-{quectel,fibocom}` copies are disabled — both ship the same
-  `qmi_wwan_q.ko`/`qmi_wwan_f.ko` and would collide at rootfs assembly. Dialing uses
-  qmodem's `quectel-CM-M`; `quectel-cm` + `luci-proto-quectel` are therefore off.
-- **Phone port:** `kmod-aw1000-fxs`, `fxsd`, `luci-app-fxs` — RJ11 port on the back panel (Services > Phone)
-- **NSS offload:** `kmod-qca-nss-drv`, `kmod-qca-nss-ecm`, `nss-firmware` (QSDK 12.5) — hardware NAT/bridge offload
-- **System tools:** `htop`, `traffic monitor`, `RAM releaser`, `terminal access`
-- **Theme:** `vantage` (default, from the [Ace1337z fork](https://github.com/Ace1337z/luci-theme-vantage)),
-  footstrap / Argon / Bootstrap also shipped
-- **Extras:** `SFTP (OpenSSH) support`
+---
 
-## Base
+## What's inside
 
-- ImmortalWrt `openwrt-25.12`
-- Kernel 6.12
-- **opkg / ipk** packages (`CONFIG_USE_APK` off) — not apk
+### Modem & cellular (`qmodem`)
+- Auto-dial on boot (`enable_dial 1`, `state enabled`), SIM PIN/APN configurable
+- Quectel `rg500q-ea` profile: `apn yes5g`, `pdp ipv4v6`, QMI data interface
+- `luci-app-qmodem-next` — live signal/registration/bands, AT console, SMS
+- Vendor QMI drivers (`qmodem_INCLUDE_vendor-qmi-wwan`), NSS-compatible
+- `net.dial*` interface: `wan` on `wwan0_1` (dhcp), `wanv6` (dhcpv6)
 
-## Default WiFi Settings
+### RJ11 phone port (`kmod-aw1000-fxs` + `fxsd` + `luci-app-fxs`)
+- Skyworks Si32261 SLIC DSP patch **shipped** at `/etc/fxs/si3226x_patch.bin`
+  (patch ID `0x05262017`, `si3226x_patch_C_FB_2017MAY26`)
+- `fxsd` enabled on first boot; modem PCM set to slave (`AT+QDAI`) automatically
+- Incoming/outgoing calls, dial tone, ringing, DTMF, Caller ID (Bellcore/ETSI/DTMF)
 
-- **SSID:** `BYTE` (2.4 GHz) / `BYTE` (5 GHz) — both radios
-- **Password:** none (open network)
+### NSS hardware offload & TTL
+- Wired NAT/bridge forwarding can run on the two NSS cores (QSDK 12.5)
+- **TTL vs offload:** NSS cannot rewrite TTL (its rule struct has no TTL field)
+  and offload bypasses netfilter — so they are mutually exclusive on the same
+  flow. TTL is prioritised by default; flip with `nss-offload on|off|status`.
+- TTL value configurable: LuCI → **Tools → TTL Config** (`luci-app-nft-ttl`)
 
-## Phone port (RJ11)
+### Proxy & ad-blocking
+- `passwall`, `passwall2`, `openclash` (TPROXY, local socket)
+- `adguardhome` + LuCI app
+- Cores: `xray-core`, `sing-box`, `hysteria`, `naiveproxy`,
+  `shadowsocks-rust`, `v2ray-plugin`, `xray-plugin`
+- `xray` binary is the `xray-stdstrx` 26.2.6 aarch64 static build
 
-The three `fxs` packages come from the `fxs` feed
-([openwrt-aw1000-phone](https://github.com/Ace1337z/openwrt-aw1000-phone)).
+### System
+- `luci-app-ramfree` (release RAM), `luci-app-cpufreq` (performance governor)
+- `luci-app-vantage` + `luci-theme-vantage` (default theme), `luci-theme-footstrap`
+- `luci-app-vnstat2`, `luci-app-ttyd`, `luci-app-package-manager`
+- ZRAM swap (lz4, 433 MB), TTL 64, BBR, large conntrack/buffers
+- `luci-app-aw1k-led` — LED controller for the AW1000 (power/5G/signal/wifi/internet/phone)
+- `luci-app-modeminfo` — modem information dashboard
 
-The SLIC needs Skyworks' ProSLIC DSP patch after every reset. This build ships it
-pre-converted at `/etc/fxs/si3226x_patch.bin` (patch ID `0x05262017`,
-`si3226x_patch_C_FB_2017MAY26`), and `fxsd` is enabled on first boot, so the port
-works out of the box.
+### Storage & USB
+- ext4, exfat, NTFS3, vfat filesystems; USB 3.0 (DWC3 + QCOM), storage + SCSI
+- `block-mount`, `automount`
 
-To regenerate the patch file:
+---
 
-1. `wget -O si3226x_patch_C_FB_2017MAY26.c \
-   https://raw.githubusercontent.com/olforu/study/03f601ff4e50a383d08443b06cb0f06fd1a1499b/proslic_api/patch_files/si3226x_patch_C_FB_2017MAY26.c`
-2. `python3 tools/mkpatch.py si3226x_patch_C_FB_2017MAY26.c si3226x_patch.bin`
-   (see `tools/mkpatch.py` in the fxs feed)
-3. Place the result at `files/etc/fxs/si3226x_patch.bin` in this repo.
+## Build (GitHub Actions)
 
-Set the modem PCM interface to slave mode once (fxsd's LuCI page does this, or):
-`ubus call at-daemon sendat '{"at_port":"/dev/ttyUSB2","at_cmd":"AT+QDAI=x,1,0,4,0,0,1,1","timeout":3}'`
+The `.github/workflows/build.yml` workflow builds the firmware on GitHub Actions and
+publishes a release (`BYTE_by_ACE-<branch>-<build>`).
 
-Enable/disable any time with `/etc/init.d/fxsd enable|start|stop`. The `PHONE` LED
-is driven by `fxsd` while the port is active.
+Trigger manually: **Actions → Build BYTE by ACE firmware (AW1000) → Run workflow**,
+or push to `main` (paths: `preset`, `aw1000_byte.sh`, `files/**`,
+`.github/workflows/build.yml`).
 
-> The Skyworks patch is not redistributable; review the ProSLIC licence before
-> redistributing images built from this repo.
+---
 
-## NSS hardware offload
-
-Wired NAT and bridge forwarding run on the two NSS cores instead of the CPU
-(`qca-nss-drv` + `qca-nss-ecm`, QSDK 12.5, firmware 12.5 "Release 210").
-
-- Feed: [qosmio/nss-packages](https://github.com/qosmio/nss-packages) branch `NSS-12.5-K6.x`
-  (the `XT-Martinez` fork predates kernel 6.12 support).
-- Kernel side: `nss/` carries the six `06xx` ECM patches, the `ipq8074-nss.dtsi`
-  node set, and the AW1000 DTS include. They are copied into
-  `target/linux/qualcommax/` at build time by `aw1kbuilder.sh`.
-- Software flow offload is disabled (`flow_offloading '0'`) so fw4 and ECM do not
-  fight over the same flows. `packet_steering` is off; ECM wants the IRQs where
-  the NSS firmware puts them.
-- `nf_conntrack_max` is raised to 65536 for proxy workloads.
-
-What this does **not** do: proxied traffic (`passwall`/`passwall2`) is TPROXY'd
-into a local socket, so it never reaches NSS — only direct traffic offloads. This
-is a property of transparent proxying, not a misconfiguration. Per-connection
-CPU cost for proxied flows is unchanged.
-
-### TTL vs NSS offload (important)
-
-The AW1000's only uplink is the cellular modem, and this build needs the TTL
-rewrite (carrier/tethering detection). **NSS hardware offload and the netfilter
-TTL rewrite are mutually exclusive on the same flow**: the NSS rule struct
-(`nss_ipv4_create`) has no TTL/hop-limit field, and once ECM offloads a flow its
-packets bypass netfilter — so the TTL rule in `/etc/nftables.d/ttl64.nft` is not
-applied to offloaded traffic.
-
-Therefore ECM is **installed but not started by default** (TTL priority). Use the
-bundled toggle to switch:
-
-- `nss-offload status` — show current state
-- `nss-offload on` — enable NSS/ECM offload (max speed; TTL rewrite bypassed on offloaded flows)
-- `nss-offload off` — disable NSS/ECM offload (default; TTL rewrite always applies)
-
-The TTL value itself is configurable in LuCI under **Tools → TTL Config**
-(`luci-app-nft-ttl`, default 64 for both IPv4 TTL and IPv6 Hop Limit).
-
-The QSDK NSS driver and firmware are **not** GPL. Firmware blobs are
-redistributed by `nss-firmware` from the QCA SDK release; review the Qualcomm
-license before redistributing images built from this repo.
-
-## Requirements
-
-- Internet connection
-- Ubuntu 22.04 LTS or newer
-- Adequate disk space and RAM
-- Basic terminal usage knowledge
-
-## Quick Installation
+## Build locally (Ubuntu 22.04+)
 
 ```bash
-wget https://raw.githubusercontent.com/Ace1337z/aw1kbuilder/main/aw1kbuilder.sh && chmod +x aw1kbuilder.sh && ./aw1kbuilder.sh
+git clone https://github.com/Ace1337z/AW1000_BYTE.git
+cd AW1000_BYTE
+bash aw1000_byte.sh
 ```
+
+Use the menu to select the target branch (`openwrt-25.12`) and start the build.
+Output lands in `immortalwrt/bin/targets/qualcommax/ipq807x/`.
+
+> The script clones ImmortalWrt with `--no-single-branch` so the release branch is
+> fetched; it applies the `files/` overlay, the `nss/` kernel patches, and the
+> `packages/` local feed, then runs `make defconfig` and builds.
+
+---
+
+## Structure
+
+```
+AW1000_BYTE/
+├── aw1000_byte.sh          # build entrypoint (menu + build orchestration)
+├── preset                  # full .config used by the build
+├── files/                  # rootfs overlay (configs, banner, scripts, patch)
+│   ├── etc/config/         # network, firewall, wireless, qmodem, fxs, nftttl, 5g-led
+│   ├── etc/fxs/            # si3226x_patch.bin (shipped SLIC DSP patch)
+│   ├── etc/nftables.d/     # TTL nft rules
+│   ├── etc/uci-defaults/   # first-boot setup (enable fxsd, PCM slave, etc.)
+│   └── usr/bin/            # nss-offload, xray (stdstrx 26.2.6)
+├── packages/               # local vendored feed (luci-app-modeminfo)
+├── nss/                    # NSS kernel patches + AW1000 DTS (copied into tree)
+└── .github/workflows/      # CI build + release
+```
+
+---
+
+## Notes & caveats
+
+- **NSS vs TTL** is a hard tradeoff on this device (all internet goes through the
+  modem): see the README section above. Default is TTL-priority; use
+  `nss-offload on` for max speed when TTL is not needed.
+- The Skyworks ProSLIC DSP patch is **not redistributable** — review the ProSLIC
+  licence before redistributing images built from this repo.
+- `fxsd` needs the modem PCM in slave mode; the first-boot script sets it. If you
+  reflash a modem later, re-run that command (or use the LuCI phone page).
+- QSDK NSS driver/firmware blobs are from the QCA SDK release; review the Qualcomm
+  licence before redistributing.
+
+---
+
+## Credits
+
+- [ImmortalWrt](https://github.com/immortalwrt/immortalwrt) — base distro
+- [Perz3us/openwrt-aw1000-phone](https://github.com/Perz3us/openwrt-aw1000-phone) — RJ11 phone driver
+- [FUjr/QModem](https://github.com/FUjr/QModem) — cellular modem management
+- [qosmio/nss-packages](https://github.com/qosmio/nss-packages) — NSS offload packages
+- [dotywrt/dotycat-package](https://github.com/dotywrt/dotycat-package) — aw1k-led
+- [BootLoopLover/xray-stdstrx](https://github.com/BootLoopLover/xray-stdstrx) — xray binary
+- [SolomonRicky/luci-app-modeminfo](https://github.com/Ace1337z/luci-app-modeminfo) — modeminfo

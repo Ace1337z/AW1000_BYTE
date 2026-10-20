@@ -11,7 +11,7 @@ on:
     branches: [main]
     paths:
       - preset
-      - aw1kbuilder.sh
+      - aw1000_byte.sh
       - files/**
       - .github/workflows/build.yml
 
@@ -70,7 +70,7 @@ jobs:
           # The script clones immortalwrt/, appends feeds, applies preset + files,
           # runs defconfig, and builds. Non-interactive because CI=1 and
           # SKIP_MENUCONFIG=1 are exported at job level.
-          bash aw1kbuilder.sh
+          bash aw1000_byte.sh
 
       - name: Collect artifacts
         run: |
