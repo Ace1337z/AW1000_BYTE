@@ -1,28 +1,25 @@
 #!/bin/sh
-# Enable the AW1000 RJ11 phone port on first boot.
+# Bring up the AW1000 RJ11 phone port on FIRST boot only.
 #
-# 1) Set the modem PCM interface to slave mode (fxsd's wait_modem() blocks until
-#    AT+QDAI reports slave). Retry for up to ~120s for the modem to come up.
-# 2) Enable + start fxsd now that /etc/fxs/si3226x_patch.bin is shipped.
+# fxsd needs:
+#   - /etc/fxs/si3226x_patch.bin (shipped) present, and
+#   - the modem PCM interface in slave mode (AT+QDAI 2nd field = 1), else
+#     fxsd's wait_modem() blocks forever and the phone won't work.
+#
+# The per-boot heavy lifting (PCM check, stale-guard clear, fxsd start) runs
+# from /etc/rc.local in the background every boot. Here we only mark fxsd
+# enabled and re-assert the wan default route once on first boot.
 
-ATPORT="/dev/ttyUSB2"
-QDAI="AT+QDAI=x,1,0,4,0,0,1,1"
-
-i=0
-until [ "$i" -ge 40 ]; do
-	if [ -e "$ATPORT" ] && \
-	   ubus call at-daemon sendat "{\"at_port\":\"$ATPORT\",\"at_cmd\":\"AT+QDAI?\",\"timeout\":2}" 2>/dev/null | grep -qi "0,4,0,0,1,1"; then
-		break
-	fi
-	i=$((i+1))
-	sleep 3
-done
-# Set it to slave regardless (idempotent); ignore failure if modem still down.
-ubus call at-daemon sendat "{\"at_port\":\"$ATPORT\",\"at_cmd\":\"$QDAI\",\"timeout\":3}" >/dev/null 2>&1
-
-if [ -x /etc/init.d/fxsd ] && [ -s /etc/fxs/si3226x_patch.bin ]; then
+echo "[fxsd] first-boot: enabling fxsd (phone port)"
+if [ -x /etc/init.d/fxsd ]; then
 	/etc/init.d/fxsd enable 2>/dev/null
-	/etc/init.d/fxsd start 2>/dev/null
+fi
+
+# Ensure the modem dial interface remains the default route (qmodem can
+# leave network.wan.defaultroute unset on a fresh UCI).
+if ! uci -q get network.wan.defaultroute 2>/dev/null | grep -q '^1$'; then
+	uci set network.wan.defaultroute='1'
+	uci commit network
 fi
 
 exit 0

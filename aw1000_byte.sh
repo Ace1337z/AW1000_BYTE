@@ -82,9 +82,12 @@ main_menu() {
 
 update_feeds() {
     echo -e "${BOLD_YELLOW}ADDING EXTERNAL FEEDS (QMODEM, PASSWALL2, VANTAGE)${RESET}"
-    # qmodem: modem management (replaces 3ginfo/modemband/sms-tool-js)
+    # qmodem: modem management (replaces 3ginfo/modemband/sms-tool-js).
+    # Pinned to e00a306 (2026-10-20): "Resolve nested QMI data interfaces
+    # without rejecting parent devices" - fixes dial stalling on QMAP modems
+    # that expose net/wwan0/net/wwan0_1 (two net dirs).
     grep -q '^src-git qmodem ' feeds.conf.default 2>/dev/null || \
-        echo 'src-git qmodem https://github.com/FUjr/QModem.git;main' >> feeds.conf.default
+        echo 'src-git qmodem https://github.com/FUjr/QModem.git^e00a30645228aec929d3265c383ef29866eada9c' >> feeds.conf.default
     # passwall2 luci app; passwall v1 + all cores come from immortalwrt feeds
     grep -q '^src-git passwall_luci ' feeds.conf.default 2>/dev/null || \
         echo 'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall2.git;main' >> feeds.conf.default
