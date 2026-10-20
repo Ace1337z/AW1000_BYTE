@@ -36,7 +36,8 @@ phone port, and a full proxy suite.
 
 ### Modem & cellular (`qmodem`)
 - Auto-dial on boot (`enable_dial 1`, `state enabled`), SIM PIN/APN configurable
-- Quectel `rg500q-ea` profile: `apn yes5g`, `pdp ipv4v6`, QMI data interface
+- Quectel `rg500q-ea` profile: **auto APN** (auto-negotiated from the SIM/carrier — works
+  on any telco, not Telstra-specific), `pdp ipv4v6`, QMI data interface
 - `luci-app-qmodem-next` — live signal/registration/bands, AT console, SMS
 - Vendor QMI drivers (`qmodem_INCLUDE_vendor-qmi-wwan`), NSS-compatible
 - `net.dial*` interface: `wan` on `wwan0_1` (dhcp), `wanv6` (dhcpv6)
