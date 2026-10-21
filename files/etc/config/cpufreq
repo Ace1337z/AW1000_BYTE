@@ -1,9 +1,13 @@
 
 config settings 'cpufreq'
+	# performance: never scale down, so the first packet after idle is not
+	# delayed by a frequency ramp. You asked for speed over power saving.
 	option governor0 'performance'
-	option minfreq0 '1017600'
+	# Pin min = max. With only the governor set, the governor is still free to
+	# sit at the low OPP and ramp on demand; pinning removes that ramp
+	# latency entirely. Slightly higher idle power, zero ramp stalls.
+	option minfreq0 '2208000'
 	option maxfreq0 '2208000'
 
 config settings 'global'
 	option set '1'
-

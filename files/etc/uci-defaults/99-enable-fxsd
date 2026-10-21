@@ -30,6 +30,12 @@ if [ -x /etc/init.d/byte-ttl ]; then
 	/etc/init.d/byte-ttl start 2>/dev/null
 fi
 
+# Spread modem packet processing across all four cores (RPS/XPS on wwan*).
+if [ -x /etc/init.d/byte-affinity ]; then
+	/etc/init.d/byte-affinity enable 2>/dev/null
+	/etc/init.d/byte-affinity start 2>/dev/null
+fi
+
 # NSS/ECM flow offload bypasses netfilter, so offloaded flows would keep their
 # original TTL and defeat the rewrite above. Keep it installed (so
 # /usr/bin/nss-offload can turn it on) but off by default on first boot.

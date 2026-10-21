@@ -1,0 +1,94 @@
+#!/bin/sh /etc/rc.common
+# BYTE by ACE - spread modem packet processing across all CPU cores.
+#
+# The AW1000's USB modem subscribes every data interrupt to a single core
+# (observed: all xhci-hcd:usb3 interrupts landing on cpu2 with
+# smp_affinity=4). With passwall doing userspace crypto on top, one core
+# saturates long before the link does - that is the 500 Mbit/s ceiling
+# people hit while the other three cores sit idle.
+#
+# OpenWrt's stock set-irq-affinity only walks devices listed in
+# /etc/board.json (lan/wan switch ports); wwan0_1 is never covered. This
+# service closes that gap and re-applies on netifd events, because the
+# wwan interfaces are created after boot when qmodem dials.
+#
+# RPS/RFS does not bypass netfilter, so the TTL rewrite still applies.
+
+START=96
+STOP=12
+USE_PROCD=1
+
+RPS_MASK=0f          # all four cores
+RPS_FLOW=4096
+
+apply() {
+	# Global RFS table. Without this rps_flow_cnt is inert.
+	echo "$RPS_FLOW" > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null
+
+	for dev in /sys/class/net/*; do
+		name=${dev##*/}
+		# Only the modem data interfaces and the LAN bridge matter here;
+		# touching wlan*/eth* would fight the NSS/ath11k steering.
+		case "$name" in
+			wwan*|rmnet*) ;;
+			*) continue ;;
+		esac
+
+		for q in "$dev"/queues/rx-*/rps_cpus; do
+			[ -e "$q" ] || continue
+			echo "$RPS_MASK" > "$q" 2>/dev/null
+		done
+		for q in "$dev"/queues/rx-*/rps_flow_cnt; do
+			[ -e "$q" ] || continue
+			echo "$RPS_FLOW" > "$q" 2>/dev/null
+		done
+		# Transmit-side steering: keeps xmit softirq off the same core as rx.
+		for q in "$dev"/queues/tx-*/xps_cpus; do
+			[ -e "$q" ] || continue
+			echo "$RPS_MASK" > "$q" 2>/dev/null
+		done
+	done
+
+	# Spread the USB host controller IRQs if they are still pinned to one
+	# core. Writes are ignored where the IRQ does not allow affinity.
+	for irq in /proc/irq/*/smp_affinity; do
+		[ -e "$irq" ] || continue
+		n=${irq#/proc/irq/}; n=${n%/smp_affinity}
+		owner=$(cat "/proc/irq/$n/../$n" 2>/dev/null)
+		case "$owner" in
+			*xhci*|*usb*) echo "$RPS_MASK" > "$irq" 2>/dev/null ;;
+		esac
+	done
+
+	logger -t byte-affinity "rps/xps=$RPS_MASK on wwan*, rfs=$RPS_FLOW"
+}
+
+start_service() {
+	apply
+	procd_open_instance
+	procd_set_param command /bin/sh -c '
+		while true; do
+			sleep 15
+			/etc/init.d/byte-affinity reload
+		done'
+	procd_set_param respawn 3600 5 0
+	procd_close_instance
+}
+
+reload_service() {
+	apply
+}
+
+stop_service() {
+	for dev in /sys/class/net/wwan*; do
+		for q in "$dev"/queues/rx-*/rps_cpus; do
+			[ -e "$q" ] && echo 0 > "$q" 2>/dev/null
+		done
+	done
+	logger -t byte-affinity "cleared"
+}
+
+service_triggers() {
+	procd_add_reload_trigger "network"
+	procd_add_raw_trigger "interface.*" 2000 /etc/init.d/byte-affinity reload
+}

@@ -26,6 +26,14 @@ if [ -x /etc/init.d/byte-ttl ]; then
 		/etc/init.d/byte-ttl start 2>/dev/null
 fi
 
+# RPS/XPS across all cores for the modem interfaces; also re-runs on netifd
+# events because wwan0_1 only appears once qmodem dials.
+if [ -x /etc/init.d/byte-affinity ]; then
+	/etc/init.d/byte-affinity enable 2>/dev/null
+	/etc/init.d/byte-affinity running >/dev/null 2>&1 || \
+		/etc/init.d/byte-affinity start 2>/dev/null
+fi
+
 (
 	ATPORT="/dev/ttyUSB2"
 	QDAI_SLAVE="AT+QDAI=x,1,0,4,0,0,1,1"
