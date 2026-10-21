@@ -343,6 +343,16 @@ ci_check_packages() {
     [ -x "$repo_root/files/etc/init.d/byte-ttl" ] || missing="$missing byte-ttl-init"
     grep -q 'oifname' "$repo_root/files/etc/nftables.d/ttl64.nft" 2>/dev/null || \
         missing="$missing TTL-RULE(oifname)"
+    # qmodem AT plumbing. override_at_port/sms_at_port pointing at
+    # /dev/ttyUSB2 makes tom_modem hang there on the RG500Q: the qmodem
+    # "WAN" panel then shows empty Manufacturer/Revision/Temperature and
+    # Connect Status "No" while the uplink is actually up. use_ubus=1 routes
+    # AT through at-daemon, which this image does not ship.
+    grep -q "option use_ubus '0'" "$repo_root/files/etc/config/qmodem" 2>/dev/null || \
+        missing="$missing qmodem-use_ubus0"
+    if grep -qE "^[[:space:]]*option (override_at_port|sms_at_port) " "$repo_root/files/etc/config/qmodem" 2>/dev/null; then
+        forbidden="$forbidden qmodem-ttyUSB2-override"
+    fi
     grep -q '^# CONFIG_USE_APK is not set$' .config || missing="$missing IPK(opkg)"
     if [ -n "$forbidden" ]; then
         echo -e "${BOLD_RED}FORBIDDEN CONFIG (see reasons in aw1000_byte.sh):$forbidden${RESET}"
