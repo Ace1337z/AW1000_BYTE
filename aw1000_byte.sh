@@ -340,12 +340,12 @@ ci_check_packages() {
         missing="$missing TTL64(qmodem_ttl.ttl4)"
     grep -qE "^[[:space:]]*option enable '1'$" "$repo_root/files/etc/config/qmodem_ttl" 2>/dev/null || \
         missing="$missing TTL-ENABLED(qmodem_ttl.enable)"
-    [ -x "$repo_root/nss/etc/init.d/byte-ttl" ] || missing="$missing byte-ttl-init"
+    [ -x "$repo_root/files/etc/init.d/byte-ttl" ] || missing="$missing byte-ttl-init"
     grep -q 'oifname' "$repo_root/files/etc/nftables.d/ttl64.nft" 2>/dev/null || \
         missing="$missing TTL-RULE(oifname)"
     grep -q '^# CONFIG_USE_APK is not set$' .config || missing="$missing IPK(opkg)"
     if [ -n "$forbidden" ]; then
-        echo -e "${BOLD_RED}FORBIDDEN CONFIG (driver race with qmi_wwan_q):$forbidden${RESET}"
+        echo -e "${BOLD_RED}FORBIDDEN CONFIG (see reasons in aw1000_byte.sh):$forbidden${RESET}"
         return 1
     fi
     if [ -n "$missing" ]; then
