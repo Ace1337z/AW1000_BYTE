@@ -8,6 +8,14 @@ config wifi-device 'radio0'
 	option country 'US'
 	option disabled '0'
 	option cell_density '0'
+	# Max legal EIRP for the regulatory domain. The driver clamps this to the
+	# country table's limit, so it is safe to ask for the maximum.
+	option txpower '30'
+	# 80 MHz at 149 sits high in the band: least likely to overlap neighbours
+	# and uses the UNII-3 range where MY permits higher power.
+	option beacon_int '100'
+	option rts '2347'
+	option frag '2346'
 
 config wifi-iface 'default_radio0'
 	option device 'radio0'
@@ -15,6 +23,9 @@ config wifi-iface 'default_radio0'
 	option mode 'ap'
 	option ssid 'BYTE'
 	option encryption 'none'
+	# 802.11k/v/r steer clients to the best AP/band (both radios share SSID).
+	option ieee80211k '1'
+	option ieee80211v '1'
 
 config wifi-device 'radio1'
 	option type 'mac80211'
@@ -25,6 +36,12 @@ config wifi-device 'radio1'
 	option country 'US'
 	option disabled '0'
 	option cell_density '0'
+	option txpower '30'
+	# 2.4 GHz: 20 MHz only (40 MHz here hurts in practice and buries the
+	# band in interference). Channel 1 avoids the common channel-6 default.
+	option beacon_int '100'
+	option rts '2347'
+	option frag '2346'
 
 config wifi-iface 'default_radio1'
 	option device 'radio1'
@@ -32,4 +49,5 @@ config wifi-iface 'default_radio1'
 	option mode 'ap'
 	option ssid 'BYTE'
 	option encryption 'none'
-
+	option ieee80211k '1'
+	option ieee80211v '1'

@@ -293,13 +293,17 @@ get_version() {
 # CI-only: fail fast if the preset did not resolve the required packages.
 ci_check_packages() {
     local missing="" p
-    for p in luci-app-passwall luci-app-passwall2 luci-app-openclash \
+    # openclash / adguardhome are intentionally not shipped (size); the
+    # proxy stack is passwall + passwall2 with the Xray core only.
+    for p in luci-app-passwall luci-app-passwall2 \
              luci-theme-footstrap luci-theme-vantage luci-app-vantage \
-             luci-app-adguardhome adguardhome luci-app-qmodem qmodem \
+             luci-app-qmodem qmodem \
              kmod-aw1000-fxs fxsd luci-app-fxs \
              kmod-qca-nss-drv nss-firmware \
              kmod-qmi_wwan_q luci-app-modeminfo \
-             luci-app-aw1k-led luci-app-ramfree; do
+             luci-app-aw1k-led luci-app-ramfree \
+             xray-core luci-app-tailscale-community tailscale \
+             luci-app-filemanager; do
         grep -q "^CONFIG_PACKAGE_${p}=y$" .config || missing="$missing $p"
     done
     # NSS ECM needs these drv features compiled in
@@ -329,6 +333,12 @@ ci_check_packages() {
     if grep -q "^CONFIG_PACKAGE_kmod-qca-nss-ecm=y$" .config; then
         forbidden="$forbidden kmod-qca-nss-ecm"
     fi
+    # Size: these must stay out of the image.
+    for p in sing-box hysteria naiveproxy xray-plugin v2ray-plugin \
+             luci-theme-argon luci-app-openclash adguardhome \
+             luci-app-adguardhome; do
+        grep -q "^CONFIG_PACKAGE_${p}=y$" .config && forbidden="$forbidden $p"
+    done
     [ -e package/feeds/nss/qca-nss-ecm ] && forbidden="$forbidden qca-nss-ecm-tree"
     # TTL must default to 64 on the modem uplink - this is the single most
     # important behaviour of the image (tethering detection).
