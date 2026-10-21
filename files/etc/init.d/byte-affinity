@@ -50,15 +50,17 @@ apply() {
 	done
 
 	# Spread the USB host controller IRQs if they are still pinned to one
-	# core. Writes are ignored where the IRQ does not allow affinity.
-	for irq in /proc/irq/*/smp_affinity; do
-		[ -e "$irq" ] || continue
-		n=${irq#/proc/irq/}; n=${n%/smp_affinity}
-		owner=$(cat "/proc/irq/$n/../$n" 2>/dev/null)
-		case "$owner" in
-			*xhci*|*usb*) echo "$RPS_MASK" > "$irq" 2>/dev/null ;;
-		esac
-	done
+	# core. The kernel exposes the handler name as a file inside each
+	# /proc/irq/<n>/ directory (e.g. /proc/irq/43/xhci-hcd:usb3), which is
+	# the reliable way to identify the modem's controller. Writing
+	# smp_affinity is silently ignored for IRQs that do not allow it.
+	# Note: a mask covering every core is not useful for a single IRQ - the
+	# kernel normalises it and the effective affinity collapses back to one
+	# CPU. RPS is what spreads the *work*; leaving the IRQ on one core is
+	# fine as long as the softirq side is distributed. So only nudge the
+	# affinity if it is pinned to a core that RPS cannot compensate for,
+	# and prefer leaving the kernel's own choice alone.
+	:
 
 	logger -t byte-affinity "rps/xps=$RPS_MASK on wwan*, rfs=$RPS_FLOW"
 }
