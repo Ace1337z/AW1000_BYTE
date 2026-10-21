@@ -12,6 +12,11 @@
 # This runs on every boot and on a timer, and re-creates the two sections with
 # exactly the schema qmodem's set_if() would create, so the WAN page always has
 # a normal editable DHCP interface.
+#
+# To opt out (e.g. you want a different uplink interface layout), either set
+#   uci set qmodem.4_1.state=disabled
+# or replace network.wan with your own section that does NOT carry
+# modem_config '4_1' - both stop this script without fighting it.
 
 MODEM_CFG="${1:-4_1}"
 IFACE="wan"
@@ -23,6 +28,10 @@ METRIC="11"
 # Only act when this modem instance is configured on the box.
 [ "$(uci -q get "qmodem.$MODEM_CFG")" = "modem-device" ] || exit 0
 [ "$(uci -q get "qmodem.$MODEM_CFG.state")" = "disabled" ] && exit 0
+
+# Follow the metric qmodem itself would use, instead of hardcoding 11.
+m=$(uci -q get "qmodem.$MODEM_CFG.metric")
+case "$m" in ''|*[!0-9]*) ;; *) METRIC="$m" ;; esac
 
 # Nothing to do in the common case, and this keeps the timer cheap.
 uci -q get "network.$IFACE" >/dev/null 2>&1 &&

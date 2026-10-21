@@ -3,6 +3,15 @@
 # - force the modem PCM to slave mode (AT+QDAI 2nd field = 1) so call audio
 #   works; restart the modem once when it was master
 # - start fxsd now that the SLIC patch is present
+# - make sure the WAN uplink self-heal service is running (uci-defaults only
+#   runs on a factory-fresh config, so a sysupgrade that keeps /etc/config
+#   would otherwise never enable it)
+if [ -x /etc/init.d/qmodem-iface-heal ]; then
+	/etc/init.d/qmodem-iface-heal enable 2>/dev/null
+	/etc/init.d/qmodem-iface-heal running >/dev/null 2>&1 || \
+		/etc/init.d/qmodem-iface-heal start 2>/dev/null
+fi
+
 (
 	ATPORT="/dev/ttyUSB2"
 	QDAI_SLAVE="AT+QDAI=x,1,0,4,0,0,1,1"
