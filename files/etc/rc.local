@@ -12,6 +12,20 @@ if [ -x /etc/init.d/qmodem-iface-heal ]; then
 		/etc/init.d/qmodem-iface-heal start 2>/dev/null
 fi
 
+# TTL 64 on modem egress must be active on every boot, including after a
+# sysupgrade that preserved /etc/config (uci-defaults only runs once).
+# ECM is stopped first: it bypasses netfilter and would leak the real TTL.
+if [ -x /etc/init.d/qca-nss-ecm ]; then
+	/etc/init.d/qca-nss-ecm enabled >/dev/null 2>&1 && {
+		/etc/init.d/qca-nss-ecm disable 2>/dev/null
+	}
+fi
+if [ -x /etc/init.d/byte-ttl ]; then
+	/etc/init.d/byte-ttl enable 2>/dev/null
+	/etc/init.d/byte-ttl running >/dev/null 2>&1 || \
+		/etc/init.d/byte-ttl start 2>/dev/null
+fi
+
 (
 	ATPORT="/dev/ttyUSB2"
 	QDAI_SLAVE="AT+QDAI=x,1,0,4,0,0,1,1"

@@ -1,0 +1,136 @@
+#!/bin/sh /etc/rc.common
+# BYTE by ACE - TTL / HopLimit normalisation for the AW1000 modem uplink.
+#
+# This is modelled on the qmodem_ttl service running on the known-good AW1000
+# reference (DOTYWRT), which uses meta_mode 'wwan_only':
+#
+#   chain mangle_forward {
+#       type filter hook forward priority mangle; policy accept;
+#       oifname "wwan0_1" ip ttl set 64
+#       ...
+#   }
+#
+# Why not luci-app-nft-ttl: that package writes a postrouting rule keyed on
+# `iifname br-lan` and rewrites /etc/nftables.d/ttl64.nft unconditionally, so
+# whatever we ship gets replaced at boot with a rule hooked in the wrong place.
+# Hooking `forward` and matching the OUTPUT interface is the correct spot for
+# "everything leaving through the modem gets TTL 64" and it also leaves traffic
+# that never touches the modem alone.
+#
+# NSS/ECM flow offload bypasses netfilter entirely, so offloaded flows would
+# keep their original TTL. ECM is therefore kept off by default (see
+# /usr/bin/nss-offload). TTL correctness takes priority over offload speed.
+
+START=95
+STOP=13
+USE_PROCD=1
+
+. /lib/functions.sh
+
+NFT=/usr/sbin/nft
+NFT_DIR=/etc/nftables.d
+NFT_FILE="$NFT_DIR/ttl64.nft"
+
+start_service() {
+	config_load qmodem_ttl
+	config_get enable 'main' 'enable' '1'
+	[ "$enable" = "1" ] || return 0
+	apply_rules
+}
+
+apply_rules() {
+	config_load qmodem_ttl
+	config_get ttl4 'main' 'ttl4' '64'
+	config_get hl6  'main' 'hl6'  '64'
+	config_get mode 'main' 'meta_mode' 'wwan_only'
+
+	logger -t byte-ttl "mode=$mode ipv4_ttl=$ttl4 ipv6_hl=$hl6"
+
+	mkdir -p "$NFT_DIR"
+
+	# Collect whatever modem data interfaces exist right now. On a fresh boot
+	# wwan0_1 may not exist yet, so always include the two known names.
+	WWAN_IFS=""
+	for i in /sys/class/net/*; do
+		n=$(basename "$i")
+		case "$n" in wwan*) WWAN_IFS="$WWAN_IFS $n" ;; esac
+	done
+	case " $WWAN_IFS " in
+		*" wwan0 "*) ;;
+		*) WWAN_IFS="$WWAN_IFS wwan0" ;;
+	esac
+	case " $WWAN_IFS " in
+		*" wwan0_1 "*) ;;
+		*) WWAN_IFS="$WWAN_IFS wwan0_1" ;;
+	esac
+
+	case "$mode" in
+	lan)
+		cat > "$NFT_FILE" <<-EOF
+		chain mangle_postrouting {
+		    type filter hook postrouting priority mangle; policy accept;
+		    iifname "br-lan" ip ttl != $ttl4 ip ttl set $ttl4 counter
+		    iifname "br-lan" ip6 hoplimit != $hl6 ip6 hoplimit set $hl6 counter
+		}
+		EOF
+		;;
+	global)
+		cat > "$NFT_FILE" <<-EOF
+		chain mangle_prerouting {
+		    type filter hook prerouting priority mangle; policy accept;
+		    ip ttl != $ttl4 ip ttl set $ttl4 counter
+		    ip6 hoplimit != $hl6 ip6 hoplimit set $hl6 counter
+		}
+
+		chain mangle_postrouting {
+		    type filter hook postrouting priority mangle; policy accept;
+		    ip ttl != $ttl4 ip ttl set $ttl4 counter
+		    ip6 hoplimit != $hl6 ip6 hoplimit set $hl6 counter
+		}
+
+		chain mangle_forward {
+		    type filter hook forward priority mangle; policy accept;
+		    ip ttl != $ttl4 ip ttl set $ttl4 counter
+		    ip6 hoplimit != $hl6 ip6 hoplimit set $hl6 counter
+		}
+		EOF
+		;;
+	*)
+		# Default and 'wwan_only': only rewrite on modem egress.
+		{
+			echo "chain mangle_forward {"
+			echo "    type filter hook forward priority mangle; policy accept;"
+			for i in $WWAN_IFS; do
+				echo "    oifname \"$i\" ip ttl set $ttl4 comment \"BYTE TTL $ttl4 on $i\""
+				echo "    oifname \"$i\" ip6 hoplimit set $hl6 comment \"BYTE HL $hl6 on $i\""
+			done
+			echo "}"
+		} > "$NFT_FILE"
+		;;
+	esac
+
+	$NFT -f "$NFT_FILE" 2>/dev/null
+	/etc/init.d/firewall reload 2>/dev/null || /etc/init.d/firewall restart 2>/dev/null
+
+	# Software fast-path classifiers forward packets without consulting
+	# netfilter, which would leak the original TTL on those flows.
+	for m in shortcut_fe_cm fast_classifier; do
+		if lsmod 2>/dev/null | grep -q "^${m} "; then
+			rmmod "$m" 2>/dev/null && logger -t byte-ttl "unloaded $m (bypasses TTL)"
+		fi
+	done
+}
+
+stop_service() {
+	rm -f "$NFT_FILE"
+	/etc/init.d/firewall reload 2>/dev/null
+	logger -t byte-ttl "TTL rules removed"
+}
+
+service_triggers() {
+	procd_add_reload_trigger "qmodem_ttl"
+}
+
+reload_service() {
+	apply_rules
+}

@@ -31,7 +31,6 @@ config interface 'wan'
 	option modem_config '4_1'
 	option defaultroute '1'
 	option metric '11'
-	option ifname 'wwan0_1'
 
 config interface 'wanv6'
 	option modem_config '4_1'

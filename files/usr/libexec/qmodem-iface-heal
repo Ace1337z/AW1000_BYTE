@@ -52,13 +52,23 @@ fi
 
 changed=0
 
-# Resolve the real data interface the same way qmodem's set_if() does, so we
-# never hardcode wwan0_1. modem_netdev.sh needs no SIM and no live PDP.
+# Resolve the real data interface the same way qmodem 2.8.9's set_if() does
+# (find ... -name net | tail -1, then ls). Falls back to wwan0_1.
 NETDEV=""
-if [ -x /usr/share/qmodem/modem_netdev.sh ]; then
-	NETDEV=$(QMODEM_UCI=uci /usr/share/qmodem/modem_netdev.sh "$MODEM_CFG" 2>/dev/null)
+MPATH=$(uci -q get "qmodem.$MODEM_CFG.path" 2>/dev/null)
+if [ -n "$MPATH" ]; then
+	MPATH=$(readlink -f "$MPATH" 2>/dev/null)
+	if [ -n "$MPATH" ] && [ -d "$MPATH" ]; then
+		NETDIR=$(find "$MPATH" -name net 2>/dev/null | tail -1)
+		if [ -n "$NETDIR" ]; then
+			NETDEV=$(ls "$NETDIR" 2>/dev/null | head -1)
+		fi
+	fi
 fi
-[ -n "$NETDEV" ] || NETDEV="wwan0_1"
+# Only accept a sane interface name.
+case "$NETDEV" in
+	''|*[!A-Za-z0-9_.:-]*) NETDEV="wwan0_1" ;;
+esac
 
 # ---- IPv4 uplink ----------------------------------------------------------
 # Only create when absent. A 'wan' that exists but has a different

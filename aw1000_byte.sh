@@ -83,14 +83,19 @@ main_menu() {
 update_feeds() {
     echo -e "${BOLD_YELLOW}ADDING EXTERNAL FEEDS (QMODEM, PASSWALL2, VANTAGE)${RESET}"
     # qmodem: modem management (replaces 3ginfo/modemband/sms-tool-js).
-    # Pinned to e00a306 (2026-10-20): "Resolve nested QMI data interfaces
-    # without rejecting parent devices" - fixes dial stalling on QMAP modems
-    # that expose net/wwan0/net/wwan0_1 (two net dirs).
+    # Pinned to v2.8.9 (052f84477) - the exact version running on the working
+    # DOTYWRT AW1000. The 3.x line introduced the "qmodem_runtime" netifd
+    # protocol and host_ipv4_owner handling, which can leave network.wan with
+    # a proto LuCI has no form for (the WAN page then shows no preset). 2.8.9
+    # always writes a plain proto=dhcp interface.
     grep -q '^src-git qmodem ' feeds.conf.default 2>/dev/null || \
-        echo 'src-git qmodem https://github.com/FUjr/QModem.git^e00a30645228aec929d3265c383ef29866eada9c' >> feeds.conf.default
-    # passwall2 luci app; passwall v1 + all cores come from immortalwrt feeds
+        echo 'src-git qmodem https://github.com/FUjr/QModem.git^052f84477' >> feeds.conf.default
+    # passwall2 luci app, pinned to 26.4.10 (4b4b84dc1) - the version proven
+    # working on the DOTYWRT AW1000. Newer passwall2 hardcodes
+    # xray_min_version="26.7.11" AND injects version.min into every generated
+    # config, which makes older xray refuse to start; 26.4.10 has neither.
     grep -q '^src-git passwall_luci ' feeds.conf.default 2>/dev/null || \
-        echo 'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall2.git;main' >> feeds.conf.default
+        echo 'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall2.git^4b4b84dc1' >> feeds.conf.default
     # vantage theme + dashboard (external feed); drop the old upstream URL if present
     sed -i '\#^src-git vantage https://github.com/anothaDev/luci-theme-vantage.git#d' feeds.conf.default 2>/dev/null
     grep -q '^src-git vantage ' feeds.conf.default 2>/dev/null || \
@@ -274,10 +279,10 @@ ci_check_packages() {
     local missing="" p
     for p in luci-app-passwall luci-app-passwall2 luci-app-openclash \
              luci-theme-footstrap luci-theme-vantage luci-app-vantage \
-             luci-app-adguardhome adguardhome luci-app-qmodem-next qmodem \
+             luci-app-adguardhome adguardhome luci-app-qmodem qmodem \
              kmod-aw1000-fxs fxsd luci-app-fxs \
              kmod-qca-nss-drv kmod-qca-nss-ecm nss-firmware \
-             kmod-qmi_wwan_q luci-app-nft-ttl luci-app-modeminfo \
+             kmod-qmi_wwan_q luci-app-modeminfo \
              luci-app-aw1k-led luci-app-ramfree; do
         grep -q "^CONFIG_PACKAGE_${p}=y$" .config || missing="$missing $p"
     done
@@ -297,6 +302,20 @@ ci_check_packages() {
             forbidden="$forbidden $p"
         fi
     done
+    # luci-app-nft-ttl rewrites /etc/nftables.d/ttl64.nft with a postrouting
+    # rule keyed on iifname; our byte-ttl owns that file instead.
+    if grep -q "^CONFIG_PACKAGE_luci-app-nft-ttl=y$" .config; then
+        forbidden="$forbidden luci-app-nft-ttl"
+    fi
+    # TTL must default to 64 on the modem uplink - this is the single most
+    # important behaviour of the image (tethering detection).
+    grep -qE "^\s*option ttl4 '64'$" files/etc/config/qmodem_ttl 2>/dev/null || \
+        missing="$missing TTL64(qmodem_ttl.ttl4)"
+    grep -qE "^\s*option enable '1'$" files/etc/config/qmodem_ttl 2>/dev/null || \
+        missing="$missing TTL-ENABLED(qmodem_ttl.enable)"
+    [ -x nss/etc/init.d/byte-ttl ] || missing="$missing byte-ttl-init"
+    grep -q 'oifname' files/etc/nftables.d/ttl64.nft 2>/dev/null || \
+        missing="$missing TTL-RULE(oifname)"
     grep -q '^# CONFIG_USE_APK is not set$' .config || missing="$missing IPK(opkg)"
     if [ -n "$forbidden" ]; then
         echo -e "${BOLD_RED}FORBIDDEN CONFIG (driver race with qmi_wwan_q):$forbidden${RESET}"

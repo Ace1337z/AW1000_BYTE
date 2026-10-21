@@ -1,17 +1,18 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=xray-core
-# Bumped from the feed's 26.3.27 (too old): luci-app-passwall2 26.10.1
-# hardcodes xray_min_version="26.7.11" and injects version.min=26.7.11 into
-# every generated config, so an older xray refuses to start with
-# "this config must be run on version 26.7.11 or higher". 26.7.11 is the
-# minimum xray that satisfies passwall2's generated configs.
-PKG_VERSION:=26.7.11
+# Pinned to 26.3.27 to match the working DOTYWRT AW1000 (xray-core
+# 26.3.27-r1). It is paired with luci-app-passwall2 26.4.10, which does not
+# inject version.min into generated configs. 26.7.11 is rejected by nothing
+# here, but the whole point is to mirror a known-good stack: passwall2
+# 26.10.20 requires >=26.7.11 while 26.7.11+ additionally refuses vless
+# without TLS for public addresses, which breaks plaintext ws nodes.
+PKG_VERSION:=26.3.27
 PKG_RELEASE:=1
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/XTLS/Xray-core/tar.gz/v$(PKG_VERSION)?
-PKG_HASH:=7c191254c0d8cc8be7673904739fc7329b601947da5377ef85900a0cd0a85e23
+PKG_HASH:=992a4997e6bb846d11469435d687f99ef812fcde1e0a009bb8e95189ea20331d
 
 PKG_MAINTAINER:=Tianling Shen <cnsztl@immortalwrt.org>
 PKG_LICENSE:=MPL-2.0

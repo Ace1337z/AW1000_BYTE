@@ -23,6 +23,21 @@ if [ -x /etc/init.d/qmodem-iface-heal ]; then
 	/etc/init.d/qmodem-iface-heal start 2>/dev/null
 fi
 
+# TTL 64 on the modem uplink is the point of the image; make sure the service
+# is enabled even when /etc/config survived a sysupgrade untouched.
+if [ -x /etc/init.d/byte-ttl ]; then
+	/etc/init.d/byte-ttl enable 2>/dev/null
+	/etc/init.d/byte-ttl start 2>/dev/null
+fi
+
+# NSS/ECM flow offload bypasses netfilter, so offloaded flows would keep their
+# original TTL and defeat the rewrite above. Keep it installed (so
+# /usr/bin/nss-offload can turn it on) but off by default on first boot.
+if [ -x /etc/init.d/qca-nss-ecm ]; then
+	/etc/init.d/qca-nss-ecm stop 2>/dev/null
+	/etc/init.d/qca-nss-ecm disable 2>/dev/null
+fi
+
 # Ensure the modem dial interface remains the default route (qmodem can
 # leave network.wan.defaultroute unset on a fresh UCI).
 if uci -q get network.wan >/dev/null 2>&1; then

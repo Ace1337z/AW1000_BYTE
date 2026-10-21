@@ -2689,8 +2689,12 @@ CONFIG_PACKAGE_kmod-phy-aquantia=y
 # CONFIG_PACKAGE_kmod-phylink is not set
 CONFIG_PACKAGE_kmod-qca-nss-dp=y
 CONFIG_PACKAGE_kmod-qca-nss-drv=y
+CONFIG_PACKAGE_kmod-qca-nss-drv-bridge-mgr=y
+CONFIG_PACKAGE_kmod-qca-nss-drv-vlan-mgr=y
+CONFIG_PACKAGE_kmod-qca-nss-drv-wifi-meshmgr=y
 CONFIG_PACKAGE_kmod-qca-nss-ecm=y
 CONFIG_PACKAGE_nss-firmware=y
+CONFIG_PACKAGE_nss-firmware-ipq807x=y
 CONFIG_NSS_FIRMWARE_VERSION_12_5=y
 CONFIG_NSS_MEM_PROFILE_HIGH=y
 CONFIG_NSS_DRV_BRIDGE_ENABLE=y
@@ -5289,8 +5293,11 @@ CONFIG_PACKAGE_luci-app-rclone_INCLUDE_rclone-ng=y
 # CONFIG_PACKAGE_luci-app-siitwizard is not set
 # CONFIG_PACKAGE_luci-app-smartdns is not set
 # CONFIG_PACKAGE_luci-app-sms-tool-js is not set
-CONFIG_PACKAGE_luci-app-qmodem-next=y
-CONFIG_PACKAGE_luci-app-nft-ttl=y
+CONFIG_PACKAGE_luci-app-qmodem=y
+# CONFIG_PACKAGE_luci-app-nft-ttl is not set
+# TTL is handled by our own /etc/init.d/byte-ttl: the vendor package
+# rewrites /etc/nftables.d/ttl64.nft with a postrouting/iifname rule that
+# is not the right hook for this.
 CONFIG_PACKAGE_luci-app-modeminfo=y
 CONFIG_PACKAGE_luci-app-aw1k-led=y
 # CONFIG_PACKAGE_luci-app-snmpd is not set
@@ -6356,14 +6363,19 @@ CONFIG_PACKAGE_openssh-sftp-server=y
 # CONFIG_PACKAGE_modemband is not set
 # CONFIG_PACKAGE_quectel-cm is not set
 CONFIG_PACKAGE_qmodem=y
-CONFIG_PACKAGE_qmodem_INCLUDE_SEAL=y
-CONFIG_PACKAGE_qmodem_INCLUDE_ndisc6=y
-CONFIG_PACKAGE_qmodem_INCLUDE_vendor-qmi-wwan=y
-# CONFIG_PACKAGE_qmodem_VENDOR_MHI_PCIe_DRIVER is not set
-CONFIG_PACKAGE_qmodem_USE_TOM_CUSTOMIZED_QUECTEL_CM=y
-# CONFIG_PACKAGE_qmodem_INCLUDE_ADD_PCI_SUPPORT is not set
-# CONFIG_PACKAGE_qmodem_INCLUDE_ADD_MTK_T7XX_SUPPORT is not set
-# CONFIG_PACKAGE_qmodem_INCLUDE_ADD_QFIREHOSE_SUPPORT is not set
+# qmodem is pinned to v2.8.9, whose option namespace is
+# PACKAGE_luci-app-qmodem_* (the 3.x line renamed it to PACKAGE_qmodem_*).
+# Keep the vendor QMI driver selection and the TOM quectel-CM variant, and
+# leave the generic upstream qmi_wwan off so it cannot race qmi_wwan_q for
+# /dev/cdc-wdm0.
+CONFIG_PACKAGE_luci-app-qmodem_INCLUDE_vendor-qmi-wwan=y
+CONFIG_PACKAGE_luci-app-qmodem_USE_TOM_CUSTOMIZED_QUECTEL_CM=y
+# CONFIG_PACKAGE_luci-app-qmodem_INCLUDE_generic-qmi-wwan is not set
+# CONFIG_PACKAGE_luci-app-qmodem_INCLUDE_ADD_PCI_SUPPORT is not set
+# CONFIG_PACKAGE_luci-app-qmodem_INCLUDE_ADD_MTK_T7XX_SUPPORT is not set
+# CONFIG_PACKAGE_luci-app-qmodem_INCLUDE_ADD_QFIREHOSE_SUPPORT is not set
+# CONFIG_PACKAGE_luci-app-qmodem_USING_QWRT_QUECTEL_CM_5G is not set
+# CONFIG_PACKAGE_luci-app-qmodem_USING_NORMAL_QUECTEL_CM is not set
 # CONFIG_PACKAGE_sendat is not set
 # CONFIG_PACKAGE_umbim is not set
 # CONFIG_PACKAGE_uqmi is not set

@@ -1,5 +1,7 @@
-chain postrouting {
-    type filter hook postrouting priority mangle; policy accept;
-    iifname "br-lan" ip ttl set 64 comment "Reset TTL for br-lan IPv4"
-    iifname "br-lan" ip6 hoplimit set 64 comment "Reset HopLimit for br-lan IPv6"
+chain mangle_forward {
+    type filter hook forward priority mangle; policy accept;
+    oifname "wwan0_1" ip ttl set 64 comment "Reset TTL on modem egress (IPv4)"
+    oifname "wwan0_1" ip6 hoplimit set 64 comment "Reset HopLimit on modem egress (IPv6)"
+    oifname "wwan0" ip ttl set 64 comment "Reset TTL on modem parent egress (IPv4)"
+    oifname "wwan0" ip6 hoplimit set 64 comment "Reset HopLimit on modem parent egress (IPv6)"
 }
