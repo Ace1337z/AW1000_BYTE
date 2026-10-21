@@ -1,7 +1,14 @@
 #!/bin/bash
 set -e
 
-script_path="$(realpath "$0")"
+# Absolute path of this script. NOTE: `realpath "$0"` is wrong here - when the
+# script is started as `bash aw1000_byte.sh`, $0 is "aw1000_byte.sh" and
+# realpath returns ".../builder/aw1000_byte.sh" only if the file exists at that
+# exact relative path, but under some invocations $0 is the interpreter name.
+# Use the containing directory instead, which is what every caller needs.
+script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+[ -n "$script_dir" ] || script_dir="$(pwd)"
+script_path="$script_dir/$(basename "$0")"
 
 RESET='\033[0m'
 BOLD='\033[1m'
@@ -185,13 +192,13 @@ apply_preset() {
     echo -e "${BOLD_YELLOW}CLEANING OLD PRESET AND CONFIG${RESET}"
     rm -rf ./files .config
     # Remove a previously cloned preset dir, but never the repo we are running from.
-    if [ -d "$preset_folder" ] && [ "$(realpath "$preset_folder")" != "$(realpath "$script_path/..")" ]; then
+    if [ -d "$preset_folder" ] && [ "$(realpath "$preset_folder")" != "$(realpath "$script_dir")" ]; then
         rm -rf "$preset_folder"
     fi
 
     # When run from a checkout of this repo (CI), use the local preset/files.
-    if [ -f "$script_path/../preset" ] && [ -d "$script_path/../files" ]; then
-        preset_folder="$(realpath "$script_path/..")"
+    if [ -f "$script_dir/preset" ] && [ -d "$script_dir/files" ]; then
+        preset_folder="$(realpath "$script_dir")"
         echo -e "${BOLD_GREEN}USING LOCAL PRESET: $preset_folder${RESET}"
     else
         echo -e "${BOLD_YELLOW}CLONING PRESET FROM $preset_repo${RESET}"
@@ -310,8 +317,8 @@ ci_check_packages() {
     # TTL must default to 64 on the modem uplink - this is the single most
     # important behaviour of the image (tethering detection).
     # NOTE: ci_check_packages runs with CWD=immortalwrt, so repo paths must be
-    # resolved via $script_path/.. rather than assumed relative.
-    local repo_root="$(realpath "$script_path/.." 2>/dev/null)"
+    # resolved via $script_dir rather than assumed relative.
+    local repo_root="$(realpath "$script_dir" 2>/dev/null)"
     [ -n "$repo_root" ] || repo_root="$(realpath .)"
     grep -qE "^[[:space:]]*option ttl4 '64'$" "$repo_root/files/etc/config/qmodem_ttl" 2>/dev/null || \
         missing="$missing TTL64(qmodem_ttl.ttl4)"
@@ -346,7 +353,7 @@ start_build() {
             printf "${BOLD_GREEN}BUILD COMPLETED IN %02dh %02dm %02ds${RESET}\n" \
                 $((dur / 3600)) $(((dur % 3600) / 60)) $((dur % 60))
             # Only clean up when running standalone (not from a repo checkout/CI).
-            if [ -z "$CI" ] && [ "$preset_folder" != "$(realpath "$script_path/..")" ]; then
+            if [ -z "$CI" ] && [ "$preset_folder" != "$(realpath "$script_dir")" ]; then
                 rm -rf "$preset_folder"; rm -f -- "$script_path"
             fi
             exit 0
