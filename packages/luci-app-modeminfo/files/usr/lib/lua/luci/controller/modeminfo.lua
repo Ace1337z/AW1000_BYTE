@@ -96,7 +96,7 @@ function update_cron(refresh_rate)
     
     -- Add new cron job with the selected refresh rate
     if refresh_rate then
-        local cron_job = "*/" .. refresh_rate .. " * * * * /bin/bash /usr/bin/modeminfo > /dev/null 2>&1"
+        local cron_job = "*/" .. refresh_rate .. " * * * * /bin/sh /usr/bin/modeminfo > /dev/null 2>&1"
         luci.sys.call(string.format('(crontab -l ; echo "%s") | crontab -', cron_job))
     end
 end
@@ -130,7 +130,7 @@ end
 
 function get_modem_info()
     -- Run the modem info script and capture the output
-    luci.sys.call("/bin/bash /usr/bin/modeminfo")
+    luci.sys.call("/bin/sh /usr/bin/modeminfo")
 
     -- Read the modem info from /tmp/modeminfo and return it as JSON
     local modeminfo = {}
@@ -148,4 +148,3 @@ function get_modem_info()
     luci.http.prepare_content("application/json")
     luci.http.write_json(modeminfo)
 end
-
