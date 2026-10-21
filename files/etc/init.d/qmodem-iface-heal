@@ -1,8 +1,17 @@
 #!/bin/sh /etc/rc.common
-# Keeps the modem uplink interfaces present. qmodem deletes network.wan /
-# network.wanv6 on every hang/redial (modem_dial.sh:flush_ip_cb) and only
-# recreates them if the dial worker reaches set_if(). This service re-creates
-# them within ~20s of any deletion so LuCI never shows a preset-less WAN.
+# Keeps the modem uplink interfaces present.
+#
+# qmodem deletes network.wan / network.wanv6 on every hang (modem_dial.sh
+# hang -> flush_if -> flush_ip_cb) and only recreates them if the dial worker
+# later reaches set_if(). When it does not - SIM not ready, netdev not
+# enumerable yet, dial respawn throttled - LuCI shows a WAN interface with no
+# preset and it has to be recreated by hand.
+#
+# A 20s timer is not enough on its own: qmodem_network starts at START=99 and
+# its stop path deletes the sections, so after any service restart there is a
+# window where the WAN page is empty. Poll quickly for the first 2 minutes
+# after boot (when the modem is still coming up and the fxsd PCM setup may
+# reset it with AT+CFUN=1,1), then back off to a slow steady-state poll.
 
 START=95
 STOP=15
@@ -11,6 +20,14 @@ USE_PROCD=1
 start_service() {
 	procd_open_instance
 	procd_set_param command /bin/sh -c '
+		# Fast poll while the modem is still settling after boot.
+		i=0
+		while [ "$i" -lt 60 ]; do
+			/usr/libexec/qmodem-iface-heal 4_1
+			sleep 2
+			i=$((i+1))
+		done
+		# Steady state: catch a LuCI "hang"/"redial" or a service restart.
 		while true; do
 			/usr/libexec/qmodem-iface-heal 4_1
 			sleep 20
