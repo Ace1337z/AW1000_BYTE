@@ -1,0 +1,104 @@
+#!/bin/sh
+# Ensure the modem's uplink interfaces always exist in /etc/config/network.
+#
+# qmodem's hang() -> flush_if() DELETES every network section whose
+# modem_config matches the modem (see modem_dial.sh:flush_ip_cb). It does that
+# on any stop/redial/hang, including the stop_service path procd takes when the
+# qmodem_network service is restarted. If the dial worker then never reaches
+# set_if() (because the modem is unplugged, the SIM is missing, or the dial
+# process is respawn-throttled), 'wan' and 'wanv6' stay missing and LuCI shows
+# an interface with no preset that the user has to recreate by hand.
+#
+# This runs on every boot and on a timer, and re-creates the two sections with
+# exactly the schema qmodem's set_if() would create, so the WAN page always has
+# a normal editable DHCP interface.
+
+MODEM_CFG="${1:-4_1}"
+IFACE="wan"
+IFACE6="wanv6"
+METRIC="11"
+
+[ -f /etc/config/network ] || exit 0
+
+# Only act when this modem instance is configured on the box.
+[ "$(uci -q get "qmodem.$MODEM_CFG")" = "modem-device" ] || exit 0
+[ "$(uci -q get "qmodem.$MODEM_CFG.state")" = "disabled" ] && exit 0
+
+# Nothing to do in the common case, and this keeps the timer cheap.
+uci -q get "network.$IFACE" >/dev/null 2>&1 &&
+	uci -q get "network.$IFACE6" >/dev/null 2>&1 && exit 0
+
+# qmodem serialises its own UCI writes on this lock (instance.sh). Take it for
+# the whole read-modify-commit so we can never interleave with set_if() and
+# leave a half-written section behind.
+mkdir -p /var/lock
+exec 8>/var/lock/qmodem-config.lock
+flock -x 8 || exit 0
+
+# Re-check under the lock: qmodem may have recreated them while we waited.
+if uci -q get "network.$IFACE" >/dev/null 2>&1 &&
+	uci -q get "network.$IFACE6" >/dev/null 2>&1; then
+	exit 0
+fi
+
+changed=0
+
+# Resolve the real data interface the same way qmodem's set_if() does, so we
+# never hardcode wwan0_1. modem_netdev.sh needs no SIM and no live PDP.
+NETDEV=""
+if [ -x /usr/share/qmodem/modem_netdev.sh ]; then
+	NETDEV=$(QMODEM_UCI=uci /usr/share/qmodem/modem_netdev.sh "$MODEM_CFG" 2>/dev/null)
+fi
+[ -n "$NETDEV" ] || NETDEV="wwan0_1"
+
+# ---- IPv4 uplink ----------------------------------------------------------
+# Only create when absent. A 'wan' that exists but has a different
+# modem_config belongs to the user (they may have made their own), so we leave
+# it completely alone rather than stealing it.
+if ! uci -q get "network.$IFACE" >/dev/null; then
+	uci set "network.$IFACE=interface"
+	uci set "network.$IFACE.proto=dhcp"
+	uci set "network.$IFACE.device=$NETDEV"
+	uci set "network.$IFACE.ifname=$NETDEV"
+	uci set "network.$IFACE.modem_config=$MODEM_CFG"
+	uci set "network.$IFACE.defaultroute=1"
+	uci set "network.$IFACE.metric=$METRIC"
+	changed=1
+	logger -t qmodem-heal "recreated network.$IFACE on $NETDEV"
+fi
+
+# ---- IPv6 uplink (piggybacks on $IFACE) -----------------------------------
+if ! uci -q get "network.$IFACE6" >/dev/null; then
+	uci set "network.$IFACE6=interface"
+	uci set "network.$IFACE6.proto=dhcpv6"
+	uci set "network.$IFACE6.ifname=@$IFACE"
+	uci set "network.$IFACE6.device=@$IFACE"
+	uci set "network.$IFACE6.modem_config=$MODEM_CFG"
+	uci set "network.$IFACE6.metric=$METRIC"
+	uci set "network.$IFACE6.extendprefix=1"
+	changed=1
+	logger -t qmodem-heal "recreated network.$IFACE6"
+fi
+
+if [ "$changed" = "1" ]; then
+	uci commit network
+	# Keep the firewall wan zone pointing at the interfaces.
+	zone=$(uci -q show firewall | sed -n "s/^firewall\.\(.*\)\.name='wan'$/\1/p")
+	zone=${zone%% *}
+	if [ -n "$zone" ]; then
+		for n in "$IFACE" "$IFACE6"; do
+			case " $(uci -q get "firewall.$zone.network") " in
+				*" $n "*) ;;
+				*) uci add_list "firewall.$zone.network=$n"; fw=1 ;;
+			esac
+		done
+		[ "${fw:-0}" = 1 ] && uci commit firewall
+	fi
+	# Release the qmodem lock before reloading netifd: the reload can take a
+	# while and must not block qmodem's own dial-time config writes.
+	flock -u 8 2>/dev/null; exec 8>&-
+	/etc/init.d/network reload >/dev/null 2>&1
+	logger -t qmodem-heal "uplink interfaces restored"
+fi
+
+exit 0

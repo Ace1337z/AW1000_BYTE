@@ -15,11 +15,21 @@ if [ -x /etc/init.d/fxsd ]; then
 	/etc/init.d/fxsd enable 2>/dev/null
 fi
 
+# qmodem deletes network.wan / network.wanv6 on every hang/redial and only
+# recreates them if the dial worker gets that far, which left LuCI showing a
+# WAN interface with no preset. This service re-creates them within ~20s.
+if [ -x /etc/init.d/qmodem-iface-heal ]; then
+	/etc/init.d/qmodem-iface-heal enable 2>/dev/null
+	/etc/init.d/qmodem-iface-heal start 2>/dev/null
+fi
+
 # Ensure the modem dial interface remains the default route (qmodem can
 # leave network.wan.defaultroute unset on a fresh UCI).
-if ! uci -q get network.wan.defaultroute 2>/dev/null | grep -q '^1$'; then
-	uci set network.wan.defaultroute='1'
-	uci commit network
+if uci -q get network.wan >/dev/null 2>&1; then
+	if ! uci -q get network.wan.defaultroute 2>/dev/null | grep -q '^1$'; then
+		uci set network.wan.defaultroute='1'
+		uci commit network
+	fi
 fi
 
 exit 0
