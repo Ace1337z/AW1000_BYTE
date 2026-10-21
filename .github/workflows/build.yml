@@ -91,12 +91,33 @@ jobs:
 
       - name: Publish release
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: BYTE_by_ACE-${{ env.TARGET_BRANCH }}-${{ github.run_number }}
-          name: BYTE by ACE ${{ env.TARGET_BRANCH }} (AW1000) build ${{ github.run_number }}
-          body: |
-            BYTE by ACE firmware for Arcadyan AW1000 (qualcommax/ipq807x).
-            ImmortalWrt ${{ env.TARGET_BRANCH }}, opkg/ipk packages.
-            Includes passwall, passwall2, openclash, qmodem, footstrap theme.
-          files: out/*
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: BYTE_by_ACE-${{ env.TARGET_BRANCH }}-${{ github.run_number }}
+          TITLE: BYTE by ACE ${{ env.TARGET_BRANCH }} (AW1000) build ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          # A previous run may have left a bare tag without a release object,
+          # in which case `gh release create` fails. Delete a release-less tag
+          # first (a real release and its assets are left untouched).
+          if gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" >/dev/null 2>&1; then
+            if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "tag $TAG exists without a release; removing the stale tag"
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" || true
+            fi
+          fi
+
+          gh release create "$TAG" out/* \
+            -R "$GITHUB_REPOSITORY" \
+            --title "$TITLE" \
+            --notes "BYTE by ACE firmware for Arcadyan AW1000 (qualcommax/ipq807x).
+          ImmortalWrt ${{ env.TARGET_BRANCH }}, opkg/ipk packages.
+          Includes passwall, passwall2, openclash, qmodem, footstrap theme."
+
+          # Never trust the upload: confirm the release really carries the image.
+          count=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets \
+                    --jq '[.assets[] | select(.name | test("squashfs-sysupgrade.bin$"))] | length')
+          echo "sysupgrade assets on release: $count"
+          test "$count" -ge 1 || { echo "::error::release $TAG has no sysupgrade image"; exit 1; }
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[] | "  \(.name)  \(.size) bytes"'
