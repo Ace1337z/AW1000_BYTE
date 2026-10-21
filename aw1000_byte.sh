@@ -288,7 +288,7 @@ ci_check_packages() {
              luci-theme-footstrap luci-theme-vantage luci-app-vantage \
              luci-app-adguardhome adguardhome luci-app-qmodem qmodem \
              kmod-aw1000-fxs fxsd luci-app-fxs \
-             kmod-qca-nss-drv kmod-qca-nss-ecm nss-firmware \
+             kmod-qca-nss-drv nss-firmware \
              kmod-qmi_wwan_q luci-app-modeminfo \
              luci-app-aw1k-led luci-app-ramfree; do
         grep -q "^CONFIG_PACKAGE_${p}=y$" .config || missing="$missing $p"
