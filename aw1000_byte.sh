@@ -89,13 +89,13 @@ update_feeds() {
     # a proto LuCI has no form for (the WAN page then shows no preset). 2.8.9
     # always writes a plain proto=dhcp interface.
     grep -q '^src-git qmodem ' feeds.conf.default 2>/dev/null || \
-        echo 'src-git qmodem https://github.com/FUjr/QModem.git^052f84477' >> feeds.conf.default
+        echo 'src-git qmodem https://github.com/FUjr/QModem.git^052f8447770014fbcbcad895f56a618a9d5537a4' >> feeds.conf.default
     # passwall2 luci app, pinned to 26.4.10 (4b4b84dc1) - the version proven
     # working on the DOTYWRT AW1000. Newer passwall2 hardcodes
     # xray_min_version="26.7.11" AND injects version.min into every generated
     # config, which makes older xray refuse to start; 26.4.10 has neither.
     grep -q '^src-git passwall_luci ' feeds.conf.default 2>/dev/null || \
-        echo 'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall2.git^4b4b84dc1' >> feeds.conf.default
+        echo 'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall2.git^4b4b84dc120bb37592ea51e7107ce4fe0083420f' >> feeds.conf.default
     # vantage theme + dashboard (external feed); drop the old upstream URL if present
     sed -i '\#^src-git vantage https://github.com/anothaDev/luci-theme-vantage.git#d' feeds.conf.default 2>/dev/null
     grep -q '^src-git vantage ' feeds.conf.default 2>/dev/null || \
@@ -309,12 +309,16 @@ ci_check_packages() {
     fi
     # TTL must default to 64 on the modem uplink - this is the single most
     # important behaviour of the image (tethering detection).
-    grep -qE "^\s*option ttl4 '64'$" files/etc/config/qmodem_ttl 2>/dev/null || \
+    # NOTE: ci_check_packages runs with CWD=immortalwrt, so repo paths must be
+    # resolved via $script_path/.. rather than assumed relative.
+    local repo_root="$(realpath "$script_path/.." 2>/dev/null)"
+    [ -n "$repo_root" ] || repo_root="$(realpath .)"
+    grep -qE "^[[:space:]]*option ttl4 '64'$" "$repo_root/files/etc/config/qmodem_ttl" 2>/dev/null || \
         missing="$missing TTL64(qmodem_ttl.ttl4)"
-    grep -qE "^\s*option enable '1'$" files/etc/config/qmodem_ttl 2>/dev/null || \
+    grep -qE "^[[:space:]]*option enable '1'$" "$repo_root/files/etc/config/qmodem_ttl" 2>/dev/null || \
         missing="$missing TTL-ENABLED(qmodem_ttl.enable)"
-    [ -x nss/etc/init.d/byte-ttl ] || missing="$missing byte-ttl-init"
-    grep -q 'oifname' files/etc/nftables.d/ttl64.nft 2>/dev/null || \
+    [ -x "$repo_root/nss/etc/init.d/byte-ttl" ] || missing="$missing byte-ttl-init"
+    grep -q 'oifname' "$repo_root/files/etc/nftables.d/ttl64.nft" 2>/dev/null || \
         missing="$missing TTL-RULE(oifname)"
     grep -q '^# CONFIG_USE_APK is not set$' .config || missing="$missing IPK(opkg)"
     if [ -n "$forbidden" ]; then
