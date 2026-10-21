@@ -35,7 +35,7 @@ if [ -x /etc/init.d/byte-affinity ]; then
 fi
 
 (
-	ATPORT="/dev/ttyUSB2"
+	ATPORT="/dev/ttyUSB3"
 	QDAI_SLAVE="AT+QDAI=x,1,0,4,0,0,1,1"
 
 	# Stale guard left by a reboot keeps fxsd from starting; clear it.
@@ -43,34 +43,45 @@ fi
 		/etc/init.d/fxsd clear_guard 2>/dev/null
 	fi
 
-	# Wait (background) for qmodem to dial and the at-daemon to register.
+	# qmodem 2.8.9 uses the direct AT path (tom_modem/sms_tool), not a
+	# ubus at-daemon - that daemon only exists in qmodem 3.x and this image
+	# does not ship it. Waiting for it here meant this whole block was dead
+	# code and the PCM was never checked or forced to slave mode.
+	at_q() {
+		command -v sms_tool >/dev/null 2>&1 || return 1
+		timeout 6 sms_tool -d "$ATPORT" at "$1" 2>/dev/null | tr -d '\r'
+	}
+
+	# Wait for the modem's AT port to answer before touching PCM.
+	# sms_tool's output for a bare "AT" is only the command echo - it does
+	# not include OK on this modem - so probe with a command that has a real
+	# response and test for that instead.
 	i=0
-	while ! ubus list at-daemon >/dev/null 2>&1 && [ "$i" -lt 120 ]; do
-		sleep 5
+	while [ "$i" -lt 60 ]; do
+		if [ -c "$ATPORT" ] && at_q "AT+QDAI?" | grep -q '+QDAI:'; then
+			break
+		fi
+		sleep 2
 		i=$((i+1))
 	done
 
-	if ubus list at-daemon >/dev/null 2>&1; then
-		resp=$(ubus call at-daemon sendat "{\"at_port\":\"$ATPORT\",\"at_cmd\":\"AT+QDAI?\",\"timeout\":3}" 2>/dev/null)
-		field2=$(printf '%s' "$resp" | grep -oE '\+QDAI: [^,]+,[^,]+' | cut -d, -f2)
-		case "$field2" in
-			1)
-				logger -t fxsd "modem PCM already in slave mode"
-				;;
-			0)
-				logger -t fxsd "modem PCM is master; setting slave + restarting modem"
-				ubus call at-daemon sendat "{\"at_port\":\"$ATPORT\",\"at_cmd\":\"$QDAI_SLAVE\",\"timeout\":3}" >/dev/null 2>&1
-				sleep 8
-				ubus call at-daemon sendat "{\"at_port\":\"$ATPORT\",\"at_cmd\":\"$QDAI_SLAVE\",\"timeout\":3}" >/dev/null 2>&1
-				ubus call at-daemon sendat "{\"at_port\":\"$ATPORT\",\"at_cmd\":\"AT+CFUN=1,1\",\"timeout\":3}" >/dev/null 2>&1
-				;;
-			*)
-				logger -t fxsd "could not read AT+QDAI; skipping PCM setup"
-				;;
-		esac
-	else
-		logger -t fxsd "at-daemon never came up; skipping PCM setup"
-	fi
+	resp=$(at_q "AT+QDAI?")
+	field2=$(printf '%s' "$resp" | grep -oE '\+QDAI: [^,]+,[^,]+' | cut -d, -f2)
+	case "$field2" in
+		1)
+			logger -t fxsd "modem PCM already in slave mode"
+			;;
+		0)
+			logger -t fxsd "modem PCM is master; setting slave + restarting modem"
+			at_q "$QDAI_SLAVE" >/dev/null
+			sleep 8
+			at_q "$QDAI_SLAVE" >/dev/null
+			at_q "AT+CFUN=1,1" >/dev/null
+			;;
+		*)
+			logger -t fxsd "could not read AT+QDAI; skipping PCM setup"
+			;;
+	esac
 
 	# Start fxsd once the patch is present and PCM is (attempted) slave.
 	if [ -x /etc/init.d/fxsd ] && [ -s /etc/fxs/si3226x_patch.bin ]; then
