@@ -2689,9 +2689,6 @@ CONFIG_PACKAGE_kmod-phy-aquantia=y
 # CONFIG_PACKAGE_kmod-phylink is not set
 CONFIG_PACKAGE_kmod-qca-nss-dp=y
 CONFIG_PACKAGE_kmod-qca-nss-drv=y
-CONFIG_PACKAGE_kmod-qca-nss-drv-bridge-mgr=y
-CONFIG_PACKAGE_kmod-qca-nss-drv-vlan-mgr=y
-CONFIG_PACKAGE_kmod-qca-nss-drv-wifi-meshmgr=y
 # CONFIG_PACKAGE_kmod-qca-nss-ecm is not set
 # ECM 12.5.2024.11.06 does not compile against kernel 6.12.112:
 #   frontends/cmn/ecm_bond_notifier.c: invalid use of undefined type
@@ -2701,7 +2698,6 @@ CONFIG_PACKAGE_kmod-qca-nss-drv-wifi-meshmgr=y
 # bypasses netfilter so it would defeat the TTL rewrite. NSS WiFi/bridge
 # acceleration comes from qca-nss-drv and does not need ECM.
 CONFIG_PACKAGE_nss-firmware=y
-CONFIG_PACKAGE_nss-firmware-ipq807x=y
 CONFIG_NSS_FIRMWARE_VERSION_12_5=y
 CONFIG_NSS_MEM_PROFILE_HIGH=y
 CONFIG_NSS_DRV_BRIDGE_ENABLE=y

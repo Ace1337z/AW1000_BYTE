@@ -227,6 +227,15 @@ apply_preset() {
     cp "$preset_folder/preset" .config 2>/dev/null && \
         echo -e "${BOLD_GREEN}PRESET APPLIED${RESET}" || \
         echo -e "${BOLD_RED}WARNING: PRESET NOT FOUND${RESET}"
+
+    # qca-nss-ecm 12.5.2024.11.06 cannot compile against kernel 6.12.112
+    # (struct bond_cb was reworked), and ECM offload bypasses netfilter so it
+    # would defeat the TTL-64 rewrite anyway. A "# CONFIG_... is not set" line
+    # in the preset proved unreliable across fresh feed checkouts, so remove
+    # the package from the tree outright: with no Makefile there is nothing
+    # for defconfig or `make world` to enable.
+    rm -rf package/feeds/nss/qca-nss-ecm feeds/nss/qca-nss-ecm
+    echo -e "${BOLD_GREEN}qca-nss-ecm REMOVED FROM TREE${RESET}"
 }
 
 run_menuconfig() {
@@ -314,6 +323,13 @@ ci_check_packages() {
     if grep -q "^CONFIG_PACKAGE_luci-app-nft-ttl=y$" .config; then
         forbidden="$forbidden luci-app-nft-ttl"
     fi
+    # ECM must not be built: it does not compile on kernel 6.12.112 and it
+    # would bypass the TTL rewrite. apply_preset deletes the package, so any
+    # reappearance means the deletion did not happen.
+    if grep -q "^CONFIG_PACKAGE_kmod-qca-nss-ecm=y$" .config; then
+        forbidden="$forbidden kmod-qca-nss-ecm"
+    fi
+    [ -e package/feeds/nss/qca-nss-ecm ] && forbidden="$forbidden qca-nss-ecm-tree"
     # TTL must default to 64 on the modem uplink - this is the single most
     # important behaviour of the image (tethering detection).
     # NOTE: ci_check_packages runs with CWD=immortalwrt, so repo paths must be
