@@ -49,18 +49,10 @@ apply() {
 		done
 	done
 
-	# Spread the USB host controller IRQs if they are still pinned to one
-	# core. The kernel exposes the handler name as a file inside each
-	# /proc/irq/<n>/ directory (e.g. /proc/irq/43/xhci-hcd:usb3), which is
-	# the reliable way to identify the modem's controller. Writing
-	# smp_affinity is silently ignored for IRQs that do not allow it.
-	# Note: a mask covering every core is not useful for a single IRQ - the
-	# kernel normalises it and the effective affinity collapses back to one
-	# CPU. RPS is what spreads the *work*; leaving the IRQ on one core is
-	# fine as long as the softirq side is distributed. So only nudge the
-	# affinity if it is pinned to a core that RPS cannot compensate for,
-	# and prefer leaving the kernel's own choice alone.
-	:
+	# Deliberately NOT touching IRQ affinity. Testing on the live modem showed
+	# that writing an all-cores mask to a single IRQ (e.g. IRQ 43,
+	# xhci-hcd:usb3) makes the kernel collapse effective_affinity back to one
+	# CPU, so it achieves nothing. RPS below is what distributes the work.
 
 	logger -t byte-affinity "rps/xps=$RPS_MASK on wwan*, rfs=$RPS_FLOW"
 }
