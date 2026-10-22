@@ -386,6 +386,16 @@ ci_check_packages() {
     grep -qE "^[[:space:]]*option enable '1'$" "$repo_root/files/etc/config/qmodem_ttl" 2>/dev/null || \
         missing="$missing TTL-ENABLED(qmodem_ttl.enable)"
     [ -x "$repo_root/files/etc/init.d/byte-ttl" ] || missing="$missing byte-ttl-init"
+    # The image must trust the key the repo is signed with, otherwise every
+    # index fails verification while opkg still reports "Updated list". That
+    # only works if key-build is in the tree BEFORE base-files runs, so the
+    # CI step that installs it must precede the firmware build.
+    [ -s "$repo_root/key-build.pub" ] || missing="$missing repo-key(key-build.pub missing from builder repo)"
+    [ -s "$repo_root/repo-key/key-build.pub" ] || missing="$missing repo-key/key-build.pub"
+    if ! cmp -s "$repo_root/key-build.pub" "$repo_root/repo-key/key-build.pub" 2>/dev/null; then
+        [ -s "$repo_root/key-build.pub" ] && forbidden="$forbidden KEY_MISMATCH(top-level key-build.pub != repo-key/)"
+    fi
+
     # The cellular MTU must stay pinned: qmodem creates the interface at the
     # kernel default of 1500, which an LTE/NR bearer cannot carry, so
     # full-size packets get dropped upstream (PMTU blackhole) while small ones
