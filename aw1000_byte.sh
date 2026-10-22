@@ -401,6 +401,21 @@ ci_check_packages() {
             forbidden="$forbidden FEED_WITHOUT_REPO_DIR($f)"
     done
 
+    # A package listed as both "=y" and "is not set" in the preset resolves to
+    # whichever appears last, so an appended block silently loses to an older
+    # negative line. That is how build 30 failed: 14 required packages were
+    # "=y" in the preset yet absent from .config. Catch the contradiction
+    # before it reaches defconfig.
+    local repo_root_check conflicted
+    repo_root_check="$(realpath "$script_dir" 2>/dev/null)"
+    [ -n "$repo_root_check" ] || repo_root_check="$(realpath .)"
+    conflicted=$(grep -oE '^CONFIG_PACKAGE_[A-Za-z0-9_-]+=y$' "$repo_root_check/preset" 2>/dev/null |
+        sed 's/^CONFIG_PACKAGE_//; s/=y$//' |
+        while read -r pn; do
+            grep -qx "# CONFIG_PACKAGE_${pn} is not set" "$repo_root_check/preset" && echo "$pn"
+        done | tr '\n' ' ')
+    [ -z "$conflicted" ] || forbidden="$forbidden PRESET_CONFLICT($(echo $conflicted | tr ' ' ','))"
+
     # The distfeeds must point at the self-hosted opkg repo. ImmortalWrt 25.12
     # publishes only .apk feeds (opkg asks for Packages.gz, the mirror serves
     # packages.adb), so any downloads.immortalwrt.org URL makes every feed fail
