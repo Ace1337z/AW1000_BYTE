@@ -43,23 +43,39 @@ want() { # <ipk path>
 	# name_version_arch.ipk; version may contain underscores, so cut at _arch
 	name=${base%%_*}
 
-	# On-demand set: built into the repo so users can `opkg install` them,
-	# but deliberately NOT in the image (size, and openclash's redirect rules
-	# would bypass the nftables TTL chain). Published regardless of manifest.
-	if grep -qx "$name" "$repo/repo/ondemand.txt" 2>/dev/null; then
-		return 0
+	# 0) Never republish what is already in the image. opkg only needs the feed
+	#    for things it does NOT have, and republishing an installed package
+	#    just bloats the feed (mihomo-meta 20M, xray-core 10M, tailscale 10M
+	#    are all installed) and risks an "upgrade" to the same version.
+	if [ -s /tmp/repo-allow.$$ ] && grep -qx "$name" /tmp/repo-allow.$$; then
+		return 1
 	fi
 
-	[ -s /tmp/repo-allow.$$ ] || return 0
-	grep -qx "$name" /tmp/repo-allow.$$ || return 1
-	# Explicitly never publish the size-trimmed set, manifest or not.
+	# 1) Kernel-pinned kmods. These MUST come from this build: a kmod built
+	#    against a different kernel makes opkg refuse with "Not downgrading
+	#    package kernel". Cheap (~3 MB) and CDN-friendly.
 	case "$name" in
-		sing-box|hysteria|naiveproxy| \
-		xray-plugin|v2ray-plugin|luci-theme-argon| \
-		shadowsocks-rust-sslocal|shadowsocks-rust-ssserver|simple-obfs-client)
-			return 1 ;;
+		kmod-*) return 0 ;;
 	esac
-	return 0
+
+	# 2) Packages that only exist in this project (not in ImmortalWrt 24.10.6):
+	#    qmodem/SMS, the AW1000 phone stack, our themes and modeminfo.
+	case "$name" in
+		qmodem|tom_modem|sms-tool_q|ubus-at-daemon|sms-forwarder|libqmodem-sms|\
+		luci-app-qmodem*|luci-app-modeminfo|luci-app-aw1k-led|\
+		luci-app-fxs|fxsd|kmod-aw1000-fxs|luci-app-ramfree|luci-app-cpufreq|\
+		luci-app-tailscale-community|luci-app-filemanager|tailscale|\
+		luci-theme-vantage|luci-app-vantage|luci-app-passwall*|\
+		xray-core|geoview|nikki|mihomo-meta|luci-app-nikki)
+			return 0 ;;
+	esac
+
+	# 3) Everything else - the eight apps, their lucI frontends, common
+	#    userland libraries - is served by the official ImmortalWrt 24.10.6
+	#    opkg feeds. Publishing our own copies here would shadow those
+	#    versions, which is exactly how banip 1.9.1 got advertised with no
+	#    .ipk behind it.
+	return 1
 }
 
 arch_dir="$src/bin/packages/aarch64_cortex-a53"

@@ -33,6 +33,9 @@ if [ -z "${kver:-}" ]; then
 fi
 [ -n "${kver:-}" ] || kver="unknown"
 
+# Manifest of what is actually in the image, for the package list section.
+MANIFEST=$(ls "$dir"/*.manifest 2>/dev/null | head -1 || true)
+
 img=$(ls "$dir"/*squashfs-sysupgrade.bin 2>/dev/null | head -1 || true)
 # Prefer the collected artifact set: bin/ can hold a stale image from an
 # earlier local build, and reporting the wrong size is worse than none.
@@ -70,6 +73,47 @@ if [ -n "${GITHUB_SHA:-}" ]; then
 	[ -n "$msg" ] && { notes "**$msg**"; notes ""; }
 	[ -n "$body" ] && { notes '```'; notes "$body"; notes '```'; notes ""; }
 fi
+notes "## Package list"
+notes ""
+notes "**Pre-installed in the image** — no download needed, always present:"
+notes ""
+notes '```'
+sed 's/ - .*/ /; s/ $//' "${MANIFEST:-/dev/null}" 2>/dev/null | sort | column -c 100 2>/dev/null || true
+notes '```'
+notes ""
+notes "**Installable from the opkg feed** (not in the image, keeps it small):"
+notes ""
+notes "| App | Install with | Notes |"
+notes "|---|---|---|"
+notes "| banIP | \`opkg install luci-app-banip\` | ad/blocklist filtering |"
+notes "| SmartDNS | \`opkg install luci-app-smartdns\` | fast DNS resolver |"
+notes "| AdGuard Home | \`opkg install luci-app-adguardhome\` | DNS + ad blocking UI |"
+notes "| HomeProxy | \`opkg install luci-app-homeproxy\` | sing-box proxy |"
+notes "| mwan3 | \`opkg install luci-app-mwan3\` | multi-WAN failover |"
+notes "| SQM | \`opkg install luci-app-sqm\` | traffic shaping (cake) |"
+notes "| OpenClash | \`opkg install luci-app-openclash\` | clash/mihomo proxy |"
+notes "| Nikki | \`opkg install luci-app-nikki\` | mihomo proxy |"
+notes ""
+notes "Feeds are already configured, so \`opkg update\` then install. Two sources"
+notes "are used: this project's repo on jsDelivr for kernel-matched kmods, and"
+notes "ImmortalWrt 24.10.6's opkg feeds for the apps and userland - 25.12"
+notes "publishes apk only."
+notes ""
+notes "## Known issues"
+notes ""
+notes "- **kmod-dependent apps need the matching firmware.** A kernel module must"
+notes "  match the running kernel exactly, so if a newer build has replaced the"
+notes "  feed, opkg refuses with \"Not downgrading package kernel\". Flash the"
+notes "  newest release before installing mwan3/SQM/OpenClash/Nikki."
+notes "- **TTL 64 and OpenClash conflict.** OpenClash installs its own redirect"
+notes "  rules that can bypass the nftables chain carrying the TTL rewrite. It is"
+notes "  deliberately not pre-installed. If you install it, verify with"
+notes "  \`nft list chain inet fw4 mangle_forward\`."
+notes "- **NSS/ECM flow offload is not shipped.** It cannot compile on kernel"
+notes "  6.12.112 and would bypass netfilter, defeating the TTL rewrite."
+notes "- **VoLTE calls** require a carrier MBN profile from Quectel. Not fixable"
+notes "  in firmware."
+notes ""
 notes "## What is in it"
 notes ""
 notes "| Area | Detail |"

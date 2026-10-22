@@ -333,7 +333,12 @@ ci_check_packages() {
              luci-app-aw1k-led luci-app-ramfree \
              xray-core luci-app-tailscale-community tailscale \
              luci-app-filemanager \
-             luci-app-qmodem-sms sms-forwarder sms-tool_q ubus-at-daemon; do
+             luci-app-qmodem-sms sms-forwarder sms-tool_q ubus-at-daemon \
+             kmod-ifb kmod-sched-cake kmod-sched-core kmod-ipt-ipset \
+             kmod-macvlan kmod-nf-ipt kmod-nft-socket kmod-nf-nathelper \
+             kmod-nf-nathelper-extra ipset tc-tiny iptables-nft \
+             iptables-mod-conntrack-extra iptables-mod-ipopt ruby \
+             rpcd-mod-rpcsys; do
         grep -q "^CONFIG_PACKAGE_${p}=y$" .config || missing="$missing $p"
     done
     # NSS ECM needs these drv features compiled in
@@ -400,8 +405,8 @@ ci_check_packages() {
     # publishes only .apk feeds (opkg asks for Packages.gz, the mirror serves
     # packages.adb), so any downloads.immortalwrt.org URL makes every feed fail
     # with "wget returned 8" and `opkg update` is dead on the device.
-    grep -q '^CONFIG_VERSION_REPO="https://raw.githubusercontent.com/Ace1337z/AW1000_BYTE/repo"' .config || \
-        missing="$missing VERSION_REPO(self-hosted-opkg)"
+    grep -q '^CONFIG_VERSION_REPO="https://cdn.jsdelivr.net/gh/Ace1337z/AW1000_BYTE@repo"' .config || \
+        missing="$missing VERSION_REPO(jsdelivr-kmod-repo)"
     if grep -q '^CONFIG_VERSION_REPO=.*downloads.immortalwrt.org' .config; then
         forbidden="$forbidden VERSION_REPO(apk-only-mirror)"
     fi

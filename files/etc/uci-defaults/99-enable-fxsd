@@ -19,6 +19,13 @@ if [ -x /etc/init.d/fxsd ]; then
 	/etc/init.d/fxsd enable 2>/dev/null
 fi
 
+# Point opkg at both the kmod repo and the ImmortalWrt 24.10.6 opkg feeds.
+# Runs after base-files has written its own distfeeds.conf, so this wins.
+if [ -x /usr/sbin/byte-opkg-feeds ]; then
+	/usr/sbin/byte-opkg-feeds 2>/dev/null
+	rm -rf /var/opkg-lists
+fi
+
 # Tailscale: enable at boot so the router is reachable over the tailnet after a
 # reboot. rc.local additionally waits for tailscale0 to receive its address and
 # restarts tailscaled if it never does - the daemon can report "Running" while
