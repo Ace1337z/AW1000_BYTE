@@ -387,8 +387,10 @@ ci_check_packages() {
     # published repo, or opkg gets a 404 and reports "no such file or
     # directory" for that feed. Adding a feed to the build without adding it to
     # the repo is exactly that failure, so fail the build instead.
+    # "base" is deliberately absent: it has no CONFIG_FEED_* symbol and is
+    # always emitted by base-files, so requiring one would always fail.
     local f
-    for f in base luci packages qmodem nss fxs dotycat vantage passwall_luci \
+    for f in luci packages qmodem nss fxs dotycat vantage passwall_luci \
              routing telephony video nikki; do
         grep -q "^CONFIG_FEED_${f}=y$" .config || \
             forbidden="$forbidden FEED_WITHOUT_REPO_DIR($f)"
