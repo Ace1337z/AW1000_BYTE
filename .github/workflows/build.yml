@@ -82,6 +82,37 @@ jobs:
           test -n "$(find out -name '*.bin' -o -name '*.itb')" || {
             echo "No firmware images produced"; exit 1; }
 
+      - name: Build self-hosted opkg repository
+        run: |
+          # ImmortalWrt 25.12 publishes only apk feeds, so an opkg image has
+          # nowhere to update from. This packages the .ipk set the build just
+          # produced into a repo laid out like downloads.immortalwrt.org, and
+          # signs each index with this build's key (which the image installs
+          # into /etc/opkg/keys, so the device trusts it automatically).
+          MANIFEST=$(ls builder/immortalwrt/bin/targets/qualcommax/ipq807x/*.manifest | head -1)
+          bash builder/.github/build-package-repo.sh \
+            builder/immortalwrt repo "$MANIFEST"
+          du -sh repo
+          find repo -name Packages.gz | sort
+
+      - name: Publish opkg repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The repo must be browsable as a directory tree for opkg to fetch
+          # <feed>/Packages.gz. Release assets are flat files, so it lives on
+          # a dedicated orphan 'repo' branch that raw.githubusercontent.com
+          # serves path-by-path. Rewritten every build: no history to keep.
+          cd repo
+          git init -q -b repo
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "opkg repo for build ${{ github.run_number }} (${{ github.sha }})"
+          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" repo:repo
+          echo "published $(find . -name '*.ipk' | wc -l) packages to branch 'repo'"
+
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:

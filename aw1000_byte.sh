@@ -354,6 +354,16 @@ ci_check_packages() {
     [ -x "$repo_root/files/etc/init.d/byte-ttl" ] || missing="$missing byte-ttl-init"
     grep -q 'oifname' "$repo_root/files/etc/nftables.d/ttl64.nft" 2>/dev/null || \
         missing="$missing TTL-RULE(oifname)"
+    # The distfeeds must point at the self-hosted opkg repo. ImmortalWrt 25.12
+    # publishes only .apk feeds (opkg asks for Packages.gz, the mirror serves
+    # packages.adb), so any downloads.immortalwrt.org URL makes every feed fail
+    # with "wget returned 8" and `opkg update` is dead on the device.
+    grep -q '^CONFIG_VERSION_REPO="https://raw.githubusercontent.com/Ace1337z/AW1000_BYTE/repo"' .config || \
+        missing="$missing VERSION_REPO(self-hosted-opkg)"
+    if grep -q '^CONFIG_VERSION_REPO=.*downloads.immortalwrt.org' .config; then
+        forbidden="$forbidden VERSION_REPO(apk-only-mirror)"
+    fi
+
     # qmodem AT plumbing. override_at_port/sms_at_port pointing at
     # /dev/ttyUSB2 makes tom_modem hang there on the RG500Q: the qmodem
     # "WAN" panel then shows empty Manufacturer/Revision/Temperature and
