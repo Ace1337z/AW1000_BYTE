@@ -95,6 +95,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: BYTE_by_ACE-${{ env.TARGET_BRANCH }}-${{ github.run_number }}
           TITLE: BYTE by ACE ${{ env.TARGET_BRANCH }} (AW1000) build ${{ github.run_number }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
           # A previous run may have left a bare tag without a release object,
@@ -107,12 +108,22 @@ jobs:
             fi
           fi
 
+          # Release body is generated from the artifacts that were actually
+          # built (commit, kernel, feed pins, image size), so it can never
+          # describe a firmware that was not produced.
+          OUT_DIR=out bash builder/.github/release-notes.sh \
+            builder/immortalwrt/bin/targets/qualcommax/ipq807x > /tmp/notes.md
+          echo "--- release notes ---"
+          cat /tmp/notes.md
+          # An empty or stub body means the generator broke; fail loudly
+          # rather than publishing a release that says nothing about itself.
+          test "$(wc -l < /tmp/notes.md)" -ge 20 || {
+            echo "::error::generated release notes are too short"; exit 1; }
+
           gh release create "$TAG" out/* \
             -R "$GITHUB_REPOSITORY" \
             --title "$TITLE" \
-            --notes "BYTE by ACE firmware for Arcadyan AW1000 (qualcommax/ipq807x).
-          ImmortalWrt ${{ env.TARGET_BRANCH }}, opkg/ipk packages.
-          Includes passwall, passwall2, openclash, qmodem, footstrap theme."
+            --notes-file /tmp/notes.md
 
           # Never trust the upload: confirm the release really carries the image.
           count=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets \

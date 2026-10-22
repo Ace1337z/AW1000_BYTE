@@ -16,6 +16,7 @@ the RJ11 phone port, correct TTL, and a working proxy stack.
 | **Web UI** | <http://192.168.1.1> |
 | **Login** | user `root`, **no password** (set one immediately) |
 | **SIM** | insert, boot, done — APN is auto-negotiated |
+| **Download** | [latest release](../../releases/latest) — each one lists its commit, kernel and image size |
 
 > ⚠️ Open WiFi and an empty root password. Set both before exposing the device.
 
@@ -28,9 +29,6 @@ the RJ11 phone port, correct TTL, and a working proxy stack.
 - [Default configuration](#default-configuration)
 - [The three custom services](#the-three-custom-services)
 - [TTL and NSS offload](#ttl-and-nss-offload)
-- [Building](#building)
-- [Repository layout](#repository-layout)
-- [Troubleshooting](#troubleshooting)
 - [Licensing and credits](#licensing-and-credits)
 
 ---
@@ -141,91 +139,6 @@ compile against kernel 6.12.112 (`struct bond_cb` was reworked upstream).
 
 `qca-nss-drv` is present, so NSS is still used where it does not conflict —
 WiFi acceleration, bridge and VLAN managers.
-
----
-
-## Building
-
-### GitHub Actions (recommended)
-
-Push to `main` (touching `preset`, `aw1000_byte.sh`, `files/**` or the workflow), or
-run **Actions → Build BYTE by ACE firmware (AW1000) → Run workflow**.
-
-A run takes roughly **2.5 hours**. The release step verifies the firmware is actually
-attached before reporting success.
-
-Output: `BYTE_by_ACE-<branch>-<run>` with
-
-- `...-squashfs-sysupgrade.bin` — flashing an existing OpenWrt
-- `...-squashfs-factory.ubi` — recovery / first install
-- `...-initramfs-uImage.itb` — RAM boot for recovery
-
-### Locally (Ubuntu 22.04+)
-
-```bash
-git clone https://github.com/Ace1337z/AW1000_BYTE.git
-cd AW1000_BYTE
-bash aw1000_byte.sh
-```
-
-Output: `immortalwrt/bin/targets/qualcommax/ipq807x/`.
-
-The script clones ImmortalWrt (`--no-single-branch`, so the release branch exists),
-applies `files/` as the rootfs overlay, `nss/` as kernel patches + DTS, and
-`packages/` as a local feed, then runs `make defconfig` and builds.
-
-Before compiling, `ci_check_packages` refuses the build if any of the following
-regress — this has caught several real breakages:
-
-- a duplicate QMI driver (`kmod-usb-net-qmi-wwan`, `uqmi`) that races `qmi_wwan_q`
-- `qca-nss-ecm` or the NSS client modules reappearing
-- TTL not set to 64/enabled, or the rule losing `oifname`
-- `use_ubus=1` or the `ttyUSB2` overrides returning to the qmodem config
-- any trimmed package (sing-box, AdGuardHome, hysteria, argon…) coming back
-
----
-
-## Repository layout
-
-```
-AW1000_BYTE/
-├── aw1000_byte.sh              # build entrypoint: feeds, preset, guards, build
-├── preset                      # the full .config
-├── files/                      # rootfs overlay
-│   ├── etc/config/             # network, wireless, firewall, qmodem, qmodem_ttl, …
-│   ├── etc/init.d/             # byte-ttl, qmodem-iface-heal, byte-affinity
-│   ├── etc/fxs/                # si3226x_patch.bin
-│   ├── etc/nftables.d/         # ttl64.nft
-│   ├── etc/rc.local            # per-boot phone + service bring-up
-│   ├── etc/uci-defaults/       # first-boot enablement
-│   └── usr/                    # nss-offload, qmodem-iface-heal
-├── nss/                        # kernel patches, DTS, xray-core Makefile overlay
-├── packages/                   # local feed (luci-app-modeminfo)
-├── docs/screenshots/           # README images
-└── .github/workflows/          # CI build + release
-```
-
----
-
-## Troubleshooting
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| WAN page shows no preset | qmodem deleted the interface | `qmodem-iface-heal` recreates it in ~20 s; check `logread \| grep qmodem-heal` |
-| qmodem panel blank, "Disconnected" but internet works | AT hanging on `/dev/ttyUSB2` | ensure `at_port=/dev/ttyUSB3` and no `override_at_port` |
-| Passwall says *"must be run on version 26.7.11+"* | passwall2 newer than 26.4.10 injects `version.min` | stay on the pinned passwall2 26.4.10 |
-| Phone has no audio | modem PCM in master mode | `sms_tool -d /dev/ttyUSB3 at 'AT+QDAI?'` must show `x,1,…` |
-| Band lock does nothing | AT path broken (see row 2) | fix `at_port`/`use_ubus` first |
-| High CPU at ~500 Mbit/s | userspace crypto in xray, single-core IRQ | expected; `byte-affinity` spreads RPS |
-
-Useful commands:
-
-```sh
-logread | grep -E 'byte-ttl|qmodem-heal|byte-affinity|fxsd'
-/usr/bin/nss-offload status
-nft list chain inet fw4 mangle_forward
-sms_tool -d /dev/ttyUSB3 at 'AT+QENG="servingcell"'
-```
 
 ---
 
