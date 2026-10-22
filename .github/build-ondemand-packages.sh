@@ -25,14 +25,23 @@ cd "$src"
 # Packages live either in a feed (package/feeds/<feed>/<name>, a symlink) or
 # in-tree (package/network/utils/...). Entries under package/feeds/<name> that
 # are plain files are feed indexes, not packages, hence -mindepth 2.
+# Many packages are sub-packages: declared inside a parent Makefile with no
+# directory of their own (iptables-nft lives in package/network/utils/iptables,
+# kmod-ifb in package/kernel/modules/net-sched). So a name search alone misses
+# them; fall back to grepping for "define Package/<name>".
 pkg_path() {
 	local p=$1 d
 	for d in $(find package/feeds -mindepth 2 -maxdepth 2 -name "$p" 2>/dev/null); do
 		[ -d "$d" ] && echo "$d"
 	done
-	for d in $(find package -maxdepth 4 -type d -name "$p" -not -path "package/feeds/*" 2>/dev/null); do
-		echo "$d"
-	done
+	[ -d "package/$p" ] && echo "package/$p"
+	[ -d "package/kernel/$p" ] && echo "package/kernel/$p"
+	[ -d "package/kernel/modules/$p" ] && echo "package/kernel/modules/$p"
+	local mk
+	for mk in $(grep -rl "^define Package/${p}\$" \
+			--include=Makefile package 2>/dev/null); do
+		echo "$(dirname "$mk")"
+	done | sort -u
 }
 
 # Save the image config so the firmware build is unaffected.

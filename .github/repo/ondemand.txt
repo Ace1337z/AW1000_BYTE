@@ -40,24 +40,28 @@ luci-app-smartdns
 # firewall4 and the TTL chain intact. xtables-legacy is never pulled in.
 iptables-nft
 ip6tables-nft
-ip6tables-mod-conntrack-extra-nft
-ip6tables-mod-ipopt-nft
-iptables-mod-conntrack-extra-nft
-iptables-mod-ipopt-nft
-ipset
-kmod-ipt-ipset
+iptables-mod-conntrack-extra
+iptables-mod-ipopt
+# These come out of the kernel build (they are already produced for the target
+# feed) and are listed here so the repo publishes them; there is no package
+# directory of their own, so the build step skips them and that is correct.
 kmod-ipt-core
+kmod-ipt-ipset
+kmod-ifb
 kmod-nft-compat
+kmod-sched-cake
+kmod-sched-core
+# tc is a virtual name: tc-tiny / tc-full / tc-bpf all PROVIDES:=tc. The real
+# package is tc-tiny, so name that or opkg reports "tc" as unavailable.
+tc-tiny
+ipset
 
 # --- SQM (traffic shaping) ---
 # The cake/hybrid qdiscs are pure tc and contain zero iptables calls; only
 # simple.qos uses iptables, for ingress policing. The iptables-nft shim above
 # covers that too, so every SQM mode works.
-kmod-ifb
-kmod-sched-cake
 luci-app-sqm
 sqm-scripts
-tc
 
 # --- mwan3 (multi-WAN failover) ---
 mwan3
