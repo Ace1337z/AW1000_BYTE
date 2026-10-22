@@ -16,3 +16,4 @@ tmp/
 
 # Prebuilt package source (its files are vendored into packages/luci-app-modeminfo)
 luci-app-modeminfo-SA/
+/repo/

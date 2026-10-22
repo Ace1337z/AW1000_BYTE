@@ -89,7 +89,12 @@ jobs:
           # produced into a repo laid out like downloads.immortalwrt.org, and
           # signs each index with this build's key (which the image installs
           # into /etc/opkg/keys, so the device trusts it automatically).
-          MANIFEST=$(ls builder/immortalwrt/bin/targets/qualcommax/ipq807x/*.manifest | head -1)
+          MANIFEST=$(ls builder/immortalwrt/bin/targets/qualcommax/ipq807x/*.manifest 2>/dev/null | head -1)
+          # Without the manifest the builder publishes every .ipk left in
+          # bin/packages (116M instead of 49M) and re-advertises removed
+          # packages, so treat its absence as a hard failure.
+          test -n "$MANIFEST" || { echo "::error::no .manifest in target output"; exit 1; }
+          echo "filtering repo against $MANIFEST"
           bash builder/.github/build-package-repo.sh \
             builder/immortalwrt repo "$MANIFEST"
           du -sh repo
@@ -109,7 +114,9 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -q -m "opkg repo for build ${{ github.run_number }} (${{ github.sha }})"
+          # --allow-empty: a re-run can produce an identical tree, and a bare
+          # `git commit` would then exit non-zero and fail the whole job.
+          git commit -q --allow-empty -m "opkg repo for build ${{ github.run_number }} (${{ github.sha }})"
           git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" repo:repo
           echo "published $(find . -name '*.ipk' | wc -l) packages to branch 'repo'"
 
