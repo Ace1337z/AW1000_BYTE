@@ -328,7 +328,14 @@ ci_check_packages() {
     local missing="" p
     # openclash / adguardhome are intentionally not shipped (size); the
     # proxy stack is passwall + passwall2 with the Xray core only.
-    for p in luci-app-passwall luci-app-passwall2 \
+    # passwall v1 is deliberately absent: it and passwall2 both install redirect
+    # rules on the same nft table and hijack port 53, so they cannot coexist -
+    # v1 gets torn down and looks "not running". Only passwall2 ships; require
+    # that v1 stays out.
+    if grep -q '^CONFIG_PACKAGE_luci-app-passwall=y$' .config; then
+        forbidden="$forbidden passwall-v1(ships alongside passwall2, cannot coexist)"
+    fi
+    for p in luci-app-passwall2 \
              luci-theme-footstrap luci-theme-vantage luci-app-vantage \
              luci-app-qmodem qmodem \
              kmod-aw1000-fxs fxsd luci-app-fxs \
