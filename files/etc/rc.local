@@ -43,10 +43,9 @@ fi
 		/etc/init.d/fxsd clear_guard 2>/dev/null
 	fi
 
-	# qmodem 2.8.9 uses the direct AT path (tom_modem/sms_tool), not a
-	# ubus at-daemon - that daemon only exists in qmodem 3.x and this image
-	# does not ship it. Waiting for it here meant this whole block was dead
-	# code and the PCM was never checked or forced to slave mode.
+	# The PCM check below deliberately uses sms_tool directly rather than
+	# going through ubus at-daemon: it must work even if the daemon is slow
+	# to come up, and sms_tool needs no service.
 	at_q() {
 		command -v sms_tool >/dev/null 2>&1 || return 1
 		timeout 6 sms_tool -d "$ATPORT" at "$1" 2>/dev/null | tr -d '\r'
@@ -82,6 +81,25 @@ fi
 			logger -t fxsd "could not read AT+QDAI; skipping PCM setup"
 			;;
 	esac
+
+	# fxsd drives the phone, but it sends every AT command through
+	# 'ubus call at-daemon sendat'. Without that ubus object it loops forever
+	# in wait_modem() and the phone sits at "Waiting for the modem", even
+	# though the modem is perfectly reachable via sms_tool. So make sure the
+	# daemon is actually answering before fxsd is started; fxsd would retry
+	# every 3s anyway, but waiting here avoids a pointless log churn and the
+	# case where procd marks the service failed.
+	if [ -x /etc/init.d/ubus-at-daemon ]; then
+		/etc/init.d/ubus-at-daemon start 2>/dev/null
+		i=0
+		while [ "$i" -lt 20 ]; do
+			ubus list 2>/dev/null | grep -qx 'at-daemon' && break
+			sleep 1
+			i=$((i+1))
+		done
+		ubus list 2>/dev/null | grep -qx 'at-daemon' ||
+			logger -t fxsd "ubus at-daemon did not register; the phone will stay at 'waiting for modem'"
+	fi
 
 	# Start fxsd once the patch is present and PCM is (attempted) slave.
 	if [ -x /etc/init.d/fxsd ] && [ -s /etc/fxs/si3226x_patch.bin ]; then

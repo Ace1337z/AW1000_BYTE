@@ -4,15 +4,24 @@
 # fxsd needs:
 #   - /etc/fxs/si3226x_patch.bin (shipped) present, and
 #   - the modem PCM interface in slave mode (AT+QDAI 2nd field = 1), else
-#     fxsd's wait_modem() blocks forever and the phone won't work.
+#     fxsd's wait_modem() blocks forever and the phone won't work, and
+#   - the 'at-daemon' ubus object: fxsd sends every AT command through
+#     'ubus call at-daemon sendat', so without ubus-at-daemon running the
+#     phone sits at "Waiting for the modem" even though the modem answers
+#     sms_tool fine. That is why ubus-at-daemon is a shipped dependency.
 #
-# The per-boot heavy lifting (PCM check, stale-guard clear, fxsd start) runs
-# from /etc/rc.local in the background every boot. Here we only mark fxsd
-# enabled and re-assert the wan default route once on first boot.
+# The per-boot heavy lifting (PCM check, stale-guard clear, daemon + fxsd
+# start) runs from /etc/rc.local in the background every boot. Here we only
+# mark the services enabled and re-assert the wan default route on first boot.
 
 echo "[fxsd] first-boot: enabling fxsd (phone port)"
 if [ -x /etc/init.d/fxsd ]; then
 	/etc/init.d/fxsd enable 2>/dev/null
+fi
+
+# fxsd talks AT only through this daemon; enabled so it is up before fxsd.
+if [ -x /etc/init.d/ubus-at-daemon ]; then
+	/etc/init.d/ubus-at-daemon enable 2>/dev/null
 fi
 
 # qmodem deletes network.wan / network.wanv6 on every hang/redial and only
