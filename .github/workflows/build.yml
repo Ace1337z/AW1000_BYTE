@@ -7,8 +7,11 @@ on:
         description: ImmortalWrt branch to build
         required: false
         default: openwrt-25.12
+  # The apk branch is intentionally NOT auto-built: it is a work-in-progress
+  # and its custom feeds are not hosted yet, so an image from it would have
+  # dead feed URLs. Build it manually via workflow_dispatch when ready.
   push:
-    branches: [main, apk]
+    branches: [main]
     paths:
       - preset
       - aw1000_byte.sh
