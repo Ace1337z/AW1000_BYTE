@@ -1,0 +1,30 @@
+#!/bin/sh
+# Stamp the BYTE by ACE build identity into the release files.
+#
+# DISTRIB_REVISION comes from ImmortalWrt's git REVISION, which is identical
+# for every build of this project (r38259-96f566f4a4). That made it impossible
+# to tell which build a router was running - we lost time on exactly that
+# confusion. VERSION_CODE carries our own marker, so append it to the revision
+# once at first boot.
+#
+# Written here rather than in the build so the value travels with the image
+# even when /etc/config survives a sysupgrade.
+
+CODE="BYTE-STABLE-1"
+
+for f in /etc/openwrt_release; do
+	[ -f "$f" ] || continue
+	grep -q "BYTE-STABLE" "$f" 2>/dev/null && continue
+	sed -i "s/^DISTRIB_REVISION='\(.*\)'$/DISTRIB_REVISION='\1 ($CODE)'/" "$f"
+	sed -i "s/^DISTRIB_DESCRIPTION='\(.*\)'$/DISTRIB_DESCRIPTION='\1 ($CODE)'/" "$f"
+done
+
+# os-release is where `uname`-style tooling and LuCI read the version.
+for f in /usr/lib/os-release; do
+	[ -f "$f" ] || continue
+	grep -q "BYTE-STABLE" "$f" 2>/dev/null && continue
+	sed -i "s/^VERSION=\"\(.*\)\"$/VERSION=\"\1 ($CODE)\"/" "$f"
+	sed -i "s/^PRETTY_NAME=\"\(.*\)\"$/PRETTY_NAME=\"\1 ($CODE)\"/" "$f"
+done
+
+exit 0

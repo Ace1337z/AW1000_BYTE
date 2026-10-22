@@ -390,10 +390,15 @@ ci_check_packages() {
     # index fails verification while opkg still reports "Updated list". That
     # only works if key-build is in the tree BEFORE base-files runs, so the
     # CI step that installs it must precede the firmware build.
-    [ -s "$repo_root/key-build.pub" ] || missing="$missing repo-key(key-build.pub missing from builder repo)"
-    [ -s "$repo_root/repo-key/key-build.pub" ] || missing="$missing repo-key/key-build.pub"
-    if ! cmp -s "$repo_root/key-build.pub" "$repo_root/repo-key/key-build.pub" 2>/dev/null; then
-        [ -s "$repo_root/key-build.pub" ] && forbidden="$forbidden KEY_MISMATCH(top-level key-build.pub != repo-key/)"
+    # The committed key is the single source of truth. CI copies repo-key/* into
+    # immortalwrt/ BEFORE base-files runs (step order matters - see the
+    # workflow), so the image and the published repo share one key. A stray
+    # top-level key-build.pub would mean something generated one early.
+    [ -s "$repo_root/repo-key/key-build" ] || missing="$missing repo-key(key-build)"
+    [ -s "$repo_root/repo-key/key-build.pub" ] || missing="$missing repo-key(key-build.pub)"
+    if [ -e "$repo_root/key-build.pub" ] && \
+       ! cmp -s "$repo_root/key-build.pub" "$repo_root/repo-key/key-build.pub" 2>/dev/null; then
+        forbidden="$forbidden KEY_MISMATCH(top-level key-build.pub != repo-key/)"
     fi
 
     # The cellular MTU must stay pinned: qmodem creates the interface at the
