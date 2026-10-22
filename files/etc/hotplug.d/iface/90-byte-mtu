@@ -1,0 +1,23 @@
+#!/bin/sh
+# Re-apply the cellular MTU after every netifd ifup.
+#
+# qmodem destroys and recreates wwan0/wwan0_1 on each redial, which resets the
+# MTU back to the kernel default of 1500. A 1500 MTU on an LTE/NR bearer causes
+# a PMTU blackhole: full-size packets are dropped upstream while small ones
+# pass, so large transfers and VoIP stall intermittently.
+[ "$ACTION" = "ifup" ] || exit 0
+
+case "$INTERFACE" in
+	wan|wanv6|wwan*|*qmodem*) ;;
+	*) exit 0 ;;
+esac
+
+MTU=1420
+for dev in wwan0 wwan0_1; do
+	ip link show "$dev" >/dev/null 2>&1 || continue
+	cur=$(ip link show "$dev" 2>/dev/null | grep -oE 'mtu [0-9]+' | cut -d' ' -f2)
+	[ "$cur" = "$MTU" ] && continue
+	ip link set dev "$dev" mtu "$MTU" 2>/dev/null &&
+		logger -t byte-mtu "hotplug $INTERFACE: $dev ${cur:-?} -> $MTU"
+done
+exit 0

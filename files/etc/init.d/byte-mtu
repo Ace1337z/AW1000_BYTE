@@ -1,0 +1,34 @@
+#!/bin/sh /etc/rc.common
+# BYTE by ACE - keep the cellular interface at a tunnel-safe MTU.
+#
+# qmodem creates wwan0/wwan0_1 with the kernel default of 1500, but an LTE/NR
+# bearer cannot carry a 1500-byte payload: the PDCP/GTP layers add overhead.
+# With MTU 1500 a full-size packet is silently dropped upstream ("PMTU
+# blackhole"), which shows up as stalled video calls, hung VPNs and large
+# downloads that stall after the handshake. 1420 leaves room for a 100-byte
+# encapsulating header and is the value carriers provision.
+#
+# TCP is partly protected by fw4's MSS clamp, but that does nothing for UDP,
+# QUIC, VoIP or tunnels - so the interface itself has to be correct.
+#
+# The interface is recreated on every qmodem redial, so this is applied at
+# boot and again from /etc/hotplug.d/iface/90-byte-mtu on every ifup.
+
+START=95
+STOP=10
+
+MTU=1420
+
+start() {
+	local dev cur
+	for dev in wwan0 wwan0_1; do
+		ip link show "$dev" >/dev/null 2>&1 || continue
+		cur=$(ip link show "$dev" 2>/dev/null | grep -oE 'mtu [0-9]+' | cut -d' ' -f2)
+		[ "$cur" = "$MTU" ] && continue
+		if ip link set dev "$dev" mtu "$MTU" 2>/dev/null; then
+			logger -t byte-mtu "$dev: mtu ${cur:-?} -> $MTU"
+		else
+			logger -t byte-mtu "$dev: could not set mtu $MTU (was ${cur:-?})"
+		fi
+	done
+}

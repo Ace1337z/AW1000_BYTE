@@ -26,6 +26,15 @@ if [ -x /usr/sbin/byte-opkg-feeds ]; then
 	rm -rf /var/opkg-lists
 fi
 
+# Keep the cellular interface at a tunnel-safe MTU (1420). qmodem creates
+# wwan0/wwan0_1 at the kernel default of 1500, which an LTE/NR bearer cannot
+# carry - full-size packets are dropped upstream (PMTU blackhole), stalling
+# video calls, VPNs and large transfers while small packets pass fine.
+if [ -x /etc/init.d/byte-mtu ]; then
+	/etc/init.d/byte-mtu enable 2>/dev/null
+	/etc/init.d/byte-mtu start 2>/dev/null
+fi
+
 # Tailscale: enable at boot so the router is reachable over the tailnet after a
 # reboot. rc.local additionally waits for tailscale0 to receive its address and
 # restarts tailscaled if it never does - the daemon can report "Running" while
