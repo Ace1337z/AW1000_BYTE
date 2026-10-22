@@ -386,6 +386,12 @@ ci_check_packages() {
     grep -qE "^[[:space:]]*option enable '1'$" "$repo_root/files/etc/config/qmodem_ttl" 2>/dev/null || \
         missing="$missing TTL-ENABLED(qmodem_ttl.enable)"
     [ -x "$repo_root/files/etc/init.d/byte-ttl" ] || missing="$missing byte-ttl-init"
+    # The cellular MTU must stay pinned: qmodem creates the interface at the
+    # kernel default of 1500, which an LTE/NR bearer cannot carry, so
+    # full-size packets get dropped upstream (PMTU blackhole) while small ones
+    # pass - which reads as "works but keeps dropping".
+    [ -x "$repo_root/files/etc/init.d/byte-mtu" ] || missing="$missing byte-mtu-init"
+    [ -x "$repo_root/files/etc/hotplug.d/iface/90-byte-mtu" ] || missing="$missing byte-mtu-hotplug"
     grep -q 'oifname' "$repo_root/files/etc/nftables.d/ttl64.nft" 2>/dev/null || \
         missing="$missing TTL-RULE(oifname)"
     # Every feed base-files emits a distfeeds line for must also exist in the
