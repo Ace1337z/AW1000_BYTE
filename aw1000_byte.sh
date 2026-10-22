@@ -383,6 +383,17 @@ ci_check_packages() {
     [ -x "$repo_root/files/etc/init.d/byte-ttl" ] || missing="$missing byte-ttl-init"
     grep -q 'oifname' "$repo_root/files/etc/nftables.d/ttl64.nft" 2>/dev/null || \
         missing="$missing TTL-RULE(oifname)"
+    # Every feed base-files emits a distfeeds line for must also exist in the
+    # published repo, or opkg gets a 404 and reports "no such file or
+    # directory" for that feed. Adding a feed to the build without adding it to
+    # the repo is exactly that failure, so fail the build instead.
+    local f
+    for f in base luci packages qmodem nss fxs dotycat vantage passwall_luci \
+             routing telephony video nikki; do
+        grep -q "^CONFIG_FEED_${f}=y$" .config || \
+            forbidden="$forbidden FEED_WITHOUT_REPO_DIR($f)"
+    done
+
     # The distfeeds must point at the self-hosted opkg repo. ImmortalWrt 25.12
     # publishes only .apk feeds (opkg asks for Packages.gz, the mirror serves
     # packages.adb), so any downloads.immortalwrt.org URL makes every feed fail

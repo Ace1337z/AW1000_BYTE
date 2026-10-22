@@ -140,7 +140,16 @@ done
 
 # Feeds that are enabled but produced no packages (routing, telephony, video)
 # still appear in the generated distfeeds.conf, so give them a valid index.
-for name in routing telephony video; do
+# Derive the list from .config rather than hardcoding it: base-files emits a
+# distfeeds line for every enabled feed, so the repo must have a directory for
+# each one. Hardcoding the list is how nikki ended up enabled in the image with
+# no repo directory, which opkg reports as "no such file or directory".
+mapfile -t enabled_feeds < <(
+	sed -n 's/^CONFIG_FEED_\([a-z0-9_]*\)=y$/\1/p' "$src/.config" 2>/dev/null | sort -u
+)
+[ "${#enabled_feeds[@]}" -gt 0 ] || enabled_feeds=(routing telephony video)
+
+for name in "${enabled_feeds[@]}"; do
 	d="$out/packages/aarch64_cortex-a53/$name"
 	[ -d "$d" ] && continue
 	mkdir -p "$d"
