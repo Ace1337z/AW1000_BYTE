@@ -82,6 +82,26 @@ jobs:
           test -n "$(find out -name '*.bin' -o -name '*.itb')" || {
             echo "No firmware images produced"; exit 1; }
 
+      - name: Install opkg repo signing key
+        run: |
+          # A stable key keeps the image and the published repo in agreement.
+          # base-files only generates key-build when it is missing, so a
+          # committed key is reused by every future build. Without this each
+          # run invents a new key: the image ships key N, the repo is signed
+          # with key N, but the NEXT build replaces the repo with key N+1 while
+          # devices still hold key N. opkg then prints "Updated list" while
+          # discarding every index, leaving /var/opkg-lists empty and nothing
+          # installable - a silent failure.
+          bash builder/.github/install-repo-key.sh builder/immortalwrt builder/repo-key
+
+      - name: Build on-demand packages
+        run: |
+          # OpenClash, AdGuard Home, Nikki, SQM and friends are published in the
+          # opkg repo but kept out of the image: they would roughly double the
+          # firmware size, and OpenClash's redirect rules can bypass the
+          # nftables chain that applies the TTL rewrite.
+          bash builder/.github/build-ondemand-packages.sh builder/immortalwrt
+
       - name: Build self-hosted opkg repository
         run: |
           # ImmortalWrt 25.12 publishes only apk feeds, so an opkg image has

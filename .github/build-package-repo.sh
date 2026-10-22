@@ -22,6 +22,11 @@ src=${1:?usage: build-package-repo.sh <immortalwrt-dir> <out-dir> [manifest]}
 out=${2:?usage: build-package-repo.sh <immortalwrt-dir> <out-dir> [manifest]}
 manifest=${3:-}
 
+# On-demand allowlist: .github/repo/ondemand.txt (a directory so it can also
+# hold other repo-shared data later).
+repo=$(cd "$(dirname "$0")" && pwd)
+[ -f "$repo/repo/ondemand.txt" ] || { echo "missing $repo/repo/ondemand.txt"; exit 1; }
+
 if [ -n "$manifest" ] && [ -f "$manifest" ]; then
 	# Manifest lines are "name - version"; the first field is the package name.
 	cut -d' ' -f1 "$manifest" | LC_ALL=C sort -u > /tmp/repo-allow.$$
@@ -33,17 +38,25 @@ fi
 trap 'rm -f /tmp/repo-allow.$$' EXIT
 
 want() { # <ipk path>
-	[ -s /tmp/repo-allow.$$ ] || return 0
 	local base name
 	base=$(basename "$1")
 	# name_version_arch.ipk; version may contain underscores, so cut at _arch
 	name=${base%%_*}
+
+	# On-demand set: built into the repo so users can `opkg install` them,
+	# but deliberately NOT in the image (size, and openclash's redirect rules
+	# would bypass the nftables TTL chain). Published regardless of manifest.
+	if grep -qx "$name" "$repo/repo/ondemand.txt" 2>/dev/null; then
+		return 0
+	fi
+
+	[ -s /tmp/repo-allow.$$ ] || return 0
 	grep -qx "$name" /tmp/repo-allow.$$ || return 1
 	# Explicitly never publish the size-trimmed set, manifest or not.
 	case "$name" in
-		sing-box|adguardhome|luci-app-adguardhome|hysteria|naiveproxy| \
-		xray-plugin|v2ray-plugin|luci-app-openclash|luci-theme-argon| \
-		shadowsocks-rust-sslocal|shadowsocks-rust-ssserver|simple-obfs-client|ruby)
+		sing-box|hysteria|naiveproxy| \
+		xray-plugin|v2ray-plugin|luci-theme-argon| \
+		shadowsocks-rust-sslocal|shadowsocks-rust-ssserver|simple-obfs-client)
 			return 1 ;;
 	esac
 	return 0

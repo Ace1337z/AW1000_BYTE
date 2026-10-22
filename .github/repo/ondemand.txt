@@ -1,0 +1,98 @@
+# Packages published in the self-hosted opkg repo but NOT installed in the
+# image, so users can `opkg install` them on demand.
+#
+# Why they are not in the image:
+#   - size. OpenClash alone pulls ruby, haproxy and dnsmasq-full; the trimmed
+#     image is 43 MB and these would roughly double it.
+#   - TTL. OpenClash installs its own redirect rules that can bypass the
+#     nftables chain byte-ttl owns, and TTL 64 is the point of this firmware.
+#     Installing it is a deliberate user choice, not a default.
+#
+# Dependencies are listed explicitly because the repo is filtered against the
+# image manifest: these packages are absent from it, so opkg would not pull
+# their dependencies in automatically. The list is the transitive closure of
+# every root below, derived from the built .ipk control files - not a guess.
+#
+# One package name per line. Blank lines and # ignored.
+
+# --- AdGuard Home ---
+adguardhome
+luci-app-adguardhome
+
+# --- banIP ---
+banip
+luci-app-banip
+
+# --- SmartDNS ---
+smartdns
+luci-app-smartdns
+
+# --- iptables-nft shim -----------------------------------------------------
+# mwan3, sqm-scripts, nikki and OpenClash all shell out to iptables at
+# runtime (mwan3 49 references, OpenClash 362, nikki 16), so they cannot work
+# without it. We ship the nft-backed shim, NOT legacy iptables:
+#
+#   iptables-nft  PROVIDES=iptables, DEFAULT_VARIANT=1, and every binary it
+#                 installs is *-nft (iptables-nft, iptables-nft-restore, ...)
+#   xtables-nft   DEPENDS=kmod-nft-compat + libnftnl - it writes nft rules
+#
+# So this is nftables under an iptables-compatible name, which keeps
+# firewall4 and the TTL chain intact. xtables-legacy is never pulled in.
+iptables-nft
+ip6tables-nft
+ip6tables-mod-conntrack-extra-nft
+ip6tables-mod-ipopt-nft
+iptables-mod-conntrack-extra-nft
+iptables-mod-ipopt-nft
+ipset
+kmod-ipt-ipset
+kmod-ipt-core
+kmod-nft-compat
+
+# --- SQM (traffic shaping) ---
+# The cake/hybrid qdiscs are pure tc and contain zero iptables calls; only
+# simple.qos uses iptables, for ingress policing. The iptables-nft shim above
+# covers that too, so every SQM mode works.
+kmod-ifb
+kmod-sched-cake
+luci-app-sqm
+sqm-scripts
+tc
+
+# --- mwan3 (multi-WAN failover) ---
+mwan3
+luci-app-mwan3
+
+# --- Nikki (mihomo) ---
+# nikki depends on "mihomo"; the feed's mihomo-meta package provides it.
+luci-app-nikki
+mihomo-meta
+nikki
+yq
+
+# --- HomeProxy (sing-box) ---
+luci-app-homeproxy
+sing-box
+firewall4
+ucode-mod-digest
+
+# --- OpenClash (clash) ---
+luci-app-openclash
+haproxy
+ruby
+ruby-yaml
+libncursesw6
+dnsmasq-full
+bash
+curl
+ca-bundle
+ip
+ip-full
+kmod-dummy
+kmod-inet-diag
+kmod-netlink-diag
+kmod-nft-tproxy
+kmod-tun
+unzip
+coreutils-nohup
+ucode

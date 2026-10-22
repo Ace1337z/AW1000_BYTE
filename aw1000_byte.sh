@@ -116,6 +116,12 @@ update_feeds() {
     # dotycat packages: luci-app-aw1k-led (AW1000 LED controller), etc.
     grep -q '^src-git dotycat ' feeds.conf.default 2>/dev/null || \
         echo 'src-git dotycat https://github.com/dotywrt/dotycat-package.git;dotycat' >> feeds.conf.default
+    # Nikki: mihomo-based transparent proxy (luci-app-nikki, mihomo-meta,
+    # mihomo-alpha). Not shipped in the image - built for the self-hosted opkg
+    # repo so it can be installed on demand. Pinned by full 40-char SHA:
+    # an abbreviated SHA makes src-git fail with "couldn't find remote ref".
+    grep -q '^src-git nikki ' feeds.conf.default 2>/dev/null || \
+        echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git^78e1a751d55ed0762811f054ee699049473da7b8' >> feeds.conf.default
     # luci-app-modeminfo is vendored as a local package (its repo has a
     # root-level Makefile that the feeds scanner cannot index); see packages/.
     # footstrap theme ships in immortalwrt/luci, no external feed needed
@@ -255,10 +261,21 @@ run_menuconfig() {
 # profiles.json metadata in sync with the renamed files.
 rename_output() {
     local dir="bin/targets"
-    local f b d nb
+    local f b d nb tag
     [ -d "$dir" ] || return 0
 
-    # 1) Rename image + metadata files.
+    # Build/run number in the filename, so a user can tell at a glance which
+    # firmware they are flashing. GITHUB_RUN_NUMBER in CI; otherwise the short
+    # commit; otherwise no tag at all, so a plain local build still works.
+    tag="${BUILD_TAG:-}"
+    if [ -z "$tag" ] && [ -n "${GITHUB_RUN_NUMBER:-}" ]; then
+        tag="build${GITHUB_RUN_NUMBER}"
+    fi
+    if [ -z "$tag" ]; then
+        tag=$(git rev-parse --short HEAD 2>/dev/null || echo "")
+    fi
+
+    # 1) Rename image + metadata files, inserting the build tag.
     while IFS= read -r f; do
         d="$(dirname "$f")"
         b="$(basename "$f")"
@@ -267,6 +284,18 @@ rename_output() {
             -e 's/immortalwrt/BYTE_by_ACE/g' \
             -e 's/^byte-by-ace-/BYTE_by_ACE-/' \
             -e 's/^byte-/BYTE_by_ACE-/')"
+        # Put the tag right after the BYTE_by_ACE- prefix so names read
+        # BYTE_by_ACE-build28-qualcommax-... and sort together. Skip if a tag
+        # is already there, so re-running this function cannot produce
+        # build28-build28.
+        if [ -n "$tag" ]; then
+            case "$nb" in
+                BYTE_by_ACE-build*)
+                    : ;;
+                BYTE_by_ACE-?*)
+                    nb="BYTE_by_ACE-${tag}-${nb#BYTE_by_ACE-}" ;;
+            esac
+        fi
         [ "$b" = "$nb" ] || mv -f "$f" "$d/$nb"
     done < <(find "$dir" -type f)
 

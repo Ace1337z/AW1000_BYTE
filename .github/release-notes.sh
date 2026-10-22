@@ -92,13 +92,16 @@ notes '```'
 notes ""
 notes "## Install"
 notes ""
+# Use the real asset name rather than a reconstructed one: it now carries the
+# build number, and a hardcoded string here would send users to a 404.
+sysup=$(basename "${img:-}")
 notes "**From an existing OpenWrt / ImmortalWrt:**"
 notes '```sh'
-notes "sysupgrade -n BYTE_by_ACE-$branch-qualcommax-ipq807x-arcadyan_aw1000-squashfs-sysupgrade.bin"
+[ -n "${sysup:-}" ] && notes "sysupgrade -n ${sysup}" || notes "sysupgrade -n <the squashfs-sysupgrade.bin from this release>"
 notes '```'
 notes ""
-notes "**First install or recovery:** use \`...-squashfs-factory.ubi\`, or boot"
-notes "\`...-initramfs-uImage.itb\` into RAM for a non-destructive test."
+notes "**First install or recovery:** use the \`squashfs-factory.ubi\` from this"
+notes "release, or boot \`initramfs-uImage.itb\` into RAM for a non-destructive test."
 notes ""
 notes "Verify the download first:"
 notes '```sh'

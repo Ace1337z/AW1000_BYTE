@@ -123,7 +123,7 @@ for tag in "$@"; do
 		echo
 		echo '```sh'
 		echo "sha256sum -c sha256sums"
-		echo "sysupgrade -n BYTE_by_ACE-25.12-qualcommax-ipq807x-arcadyan_aw1000-squashfs-sysupgrade.bin"
+		echo "sysupgrade -n $(basename "${img:-}")"
 		echo '```'
 		echo
 		echo "> \`-n\` discards \`/etc/config\`. **Set a root password and WiFi key after flashing.**"
