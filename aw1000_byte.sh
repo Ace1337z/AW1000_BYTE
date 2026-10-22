@@ -303,7 +303,8 @@ ci_check_packages() {
              kmod-qmi_wwan_q luci-app-modeminfo \
              luci-app-aw1k-led luci-app-ramfree \
              xray-core luci-app-tailscale-community tailscale \
-             luci-app-filemanager; do
+             luci-app-filemanager \
+             luci-app-qmodem-sms sms-forwarder sms-tool_q; do
         grep -q "^CONFIG_PACKAGE_${p}=y$" .config || missing="$missing $p"
     done
     # NSS ECM needs these drv features compiled in
