@@ -108,4 +108,33 @@ fi
 	logger -t fxsd "phone bring-up done"
 ) &
 
+# Tailscale self-heal. tailscaled sometimes comes up "Running" and reports its
+# Tailscale IP, yet tailscale0 is left with no IPv4/IPv6 address at all. The
+# result is a node that looks connected but is unreachable: MagicDNS at
+# 100.100.100.100 times out and no peer can be dialled. Waiting for the address
+# and restarting the daemon if it never lands fixes it without a reboot.
+(
+	[ -x /usr/sbin/tailscaled ] || exit 0
+	ts_ip=$(/usr/sbin/tailscale ip -4 2>/dev/null | head -1)
+	[ -n "$ts_ip" ] || exit 0
+
+	i=0
+	while [ "$i" -lt 30 ]; do
+		ip -4 addr show tailscale0 2>/dev/null | grep -q "inet ${ts_ip}" && break
+		sleep 2
+		i=$((i + 1))
+	done
+
+	if ip -4 addr show tailscale0 2>/dev/null | grep -q "inet ${ts_ip}"; then
+		logger -t byte-ts "tailscale0 ready (${ts_ip})"
+	else
+		logger -t byte-ts "tailscale0 never got ${ts_ip}; restarting tailscaled"
+		/etc/init.d/tailscale restart >/dev/null 2>&1
+		sleep 10
+		ip -4 addr show tailscale0 2>/dev/null | grep -q "inet ${ts_ip}" &&
+			logger -t byte-ts "tailscale0 recovered (${ts_ip})" ||
+			logger -t byte-ts "tailscale0 still has no address; check 'tailscale status'"
+	fi
+) &
+
 exit 0

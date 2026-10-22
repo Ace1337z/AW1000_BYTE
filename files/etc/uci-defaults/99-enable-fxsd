@@ -19,6 +19,14 @@ if [ -x /etc/init.d/fxsd ]; then
 	/etc/init.d/fxsd enable 2>/dev/null
 fi
 
+# Tailscale: enable at boot so the router is reachable over the tailnet after a
+# reboot. rc.local additionally waits for tailscale0 to receive its address and
+# restarts tailscaled if it never does - the daemon can report "Running" while
+# the interface is left empty, which makes MagicDNS time out.
+if [ -x /etc/init.d/tailscale ]; then
+	/etc/init.d/tailscale enable 2>/dev/null
+fi
+
 # fxsd talks AT only through this daemon; enabled so it is up before fxsd.
 if [ -x /etc/init.d/ubus-at-daemon ]; then
 	/etc/init.d/ubus-at-daemon enable 2>/dev/null
