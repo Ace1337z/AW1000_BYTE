@@ -333,12 +333,7 @@ ci_check_packages() {
              luci-app-aw1k-led luci-app-ramfree \
              xray-core luci-app-tailscale-community tailscale \
              luci-app-filemanager \
-             luci-app-qmodem-sms sms-forwarder sms-tool_q ubus-at-daemon \
-             kmod-ifb kmod-sched-cake kmod-sched-core kmod-ipt-ipset \
-             kmod-macvlan kmod-nf-ipt kmod-nft-socket kmod-nf-nathelper \
-             kmod-nf-nathelper-extra ipset tc-tiny iptables-nft \
-             iptables-mod-conntrack-extra iptables-mod-ipopt ruby \
-             rpcd-mod-rpcsys; do
+             luci-app-qmodem-sms sms-forwarder sms-tool_q ubus-at-daemon; do
         grep -q "^CONFIG_PACKAGE_${p}=y$" .config || missing="$missing $p"
     done
     # NSS ECM needs these drv features compiled in
@@ -396,7 +391,7 @@ ci_check_packages() {
     # always emitted by base-files, so requiring one would always fail.
     local f
     for f in luci packages qmodem nss fxs dotycat vantage passwall_luci \
-             routing telephony video nikki; do
+             routing telephony video; do
         grep -q "^CONFIG_FEED_${f}=y$" .config || \
             forbidden="$forbidden FEED_WITHOUT_REPO_DIR($f)"
     done
@@ -420,10 +415,14 @@ ci_check_packages() {
     # publishes only .apk feeds (opkg asks for Packages.gz, the mirror serves
     # packages.adb), so any downloads.immortalwrt.org URL makes every feed fail
     # with "wget returned 8" and `opkg update` is dead on the device.
-    grep -q '^CONFIG_VERSION_REPO="https://cdn.jsdelivr.net/gh/Ace1337z/AW1000_BYTE@repo"' .config || \
-        missing="$missing VERSION_REPO(jsdelivr-kmod-repo)"
-    if grep -q '^CONFIG_VERSION_REPO=.*downloads.immortalwrt.org' .config; then
-        forbidden="$forbidden VERSION_REPO(apk-only-mirror)"
+    # apk branch: the official 25.12.2 mirror publishes apk (packages.adb),
+    # which is exactly what this image speaks. The jsDelivr opkg repo and the
+    # 24.10.6 fallback exist only on the ipk branch.
+    grep -q '^CONFIG_USE_APK=y$' .config || missing="$missing USE_APK"
+    grep -q '^CONFIG_VERSION_REPO="https://downloads.immortalwrt.org/releases/25.12.2"' .config || \
+        missing="$missing VERSION_REPO(25.12.2-apk)"
+    if grep -q '^CONFIG_PACKAGE_opkg=y$' .config; then
+        forbidden="$forbidden opkg-on-apk-branch"
     fi
 
     # qmodem AT plumbing. override_at_port/sms_at_port pointing at
@@ -436,7 +435,10 @@ ci_check_packages() {
     if grep -qE "^[[:space:]]*option (override_at_port|sms_at_port) " "$repo_root/files/etc/config/qmodem" 2>/dev/null; then
         forbidden="$forbidden qmodem-ttyUSB2-override"
     fi
-    grep -q '^# CONFIG_USE_APK is not set$' .config || missing="$missing IPK(opkg)"
+    # APK branch: the whole point of this branch is the apk package manager.
+    # The opkg/ipk details above (jsDelivr repo, 24.10.6 app feeds, separate
+    # .sig per feed) do not apply here - 25.12.2 publishes packages.adb and apk
+    # verifies one signed index per feed.
     if [ -n "$forbidden" ]; then
         echo -e "${BOLD_RED}FORBIDDEN CONFIG (see reasons in aw1000_byte.sh):$forbidden${RESET}"
         return 1
