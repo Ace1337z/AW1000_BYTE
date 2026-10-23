@@ -1,0 +1,66 @@
+#!/bin/sh /etc/rc.common
+# BYTE by ACE - start tailscale only when it has credentials.
+#
+# A fresh image enables the tailscale service, so tailscaled runs at every
+# boot and holds ~13 MB of private memory (38 MB RSS, the rest shared code
+# pages) even though nobody has ever run `tailscale up`. On a router that does
+# not use Tailscale that is pure waste; on one that does, the daemon must of
+# course run.
+#
+# The package's own /etc/init.d/tailscale is left untouched - it belongs to
+# the tailscale package and would be restored by any upgrade, so patching it
+# would silently break on the next opkg update. Instead this gate runs first
+# and simply declines to start it while there are no credentials.
+#
+# Failure bias is deliberate: anything ambiguous means "start". A user who is
+# logged in must never be left without Tailscale because of this.
+
+START=79
+STOP=11
+
+start() {
+	ensure_pkg_disabled
+	local state=/etc/tailscale/tailscaled.state
+
+	# Already running (started manually or by an earlier boot): do nothing.
+	[ -n "$(pidof tailscaled 2>/dev/null)" ] && return 0
+
+	# The package service must exist for us to drive it.
+	[ -x /etc/init.d/tailscale ] || return 0
+
+	if [ -x /usr/libexec/byte-ts-should-start ]; then
+		if ! /usr/libexec/byte-ts-should-start "$state"; then
+			logger -t byte-ts "no Tailscale credentials yet - not starting tailscaled (run 'tailscale up' to enable)"
+			return 0
+		fi
+	fi
+
+	/etc/init.d/tailscale start 2>/dev/null
+	logger -t byte-ts "credentials found - tailscaled started"
+}
+
+stop() {
+	/etc/init.d/tailscale stop 2>/dev/null
+}
+
+# The package service is disabled (no /etc/rc.d/S80tailscale) so that it does
+# not start on its own and defeat this gate. `tailscale up` and the LuCI page
+# call /etc/init.d/tailscale directly, which still works because the script is
+# present - only its boot symlink is removed. Re-assert that here in case a
+# package upgrade recreated it.
+ensure_pkg_disabled() {
+	[ -e /etc/rc.d/S80tailscale ] && /etc/init.d/tailscale disable 2>/dev/null
+}
+
+boot() {
+	ensure_pkg_disabled
+	start
+}
+
+# If the user logs in through LuCI or `tailscale up`, the state file changes
+# and the daemon may already be running - nothing to do. But when they click
+# "enable" in LuCI the package service is restarted, and this gate re-runs so
+# the daemon comes up with the new credentials.
+service_triggers() {
+	procd_add_reload_trigger "tailscale"
+}

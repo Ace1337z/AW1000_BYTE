@@ -1,0 +1,43 @@
+#!/bin/sh
+# BYTE by ACE - do not run tailscaled until it actually has credentials.
+#
+# A fresh image enables the tailscale service at boot, so tailscaled runs and
+# holds ~13 MB of private memory (38 MB RSS, mostly shared code pages) before
+# anyone has ever run `tailscale up`. On a router that never uses Tailscale
+# that is pure waste.
+#
+# The guard is deliberately biased to FAIL OPEN: it only skips startup when it
+# is certain there are no credentials. Anything unexpected - an unreadable
+# state file, a file that does not look like our "empty" marker, a successful
+# login, a running daemon - results in starting, so a logged-in user can never
+# be blocked by this.
+#
+# Usage: byte-ts-should-start
+#   exit 0 -> start tailscaled
+#   exit 1 -> nothing to do yet (no credentials)
+
+STATE_FILE="${1:-/etc/tailscale/tailscaled.state}"
+
+# NOTE: deliberately no "already running" shortcut here. This predicate answers
+# exactly one question - "are there credentials?" - and the gate checks whether
+# the daemon is already up before calling it. Mixing the two made the predicate
+# return "start" on a live router purely because tailscaled happened to be
+# running, which hid the real answer.
+
+# No state file at all: nothing to run.
+[ -e "$STATE_FILE" ] || exit 1
+
+# Unreadable -> assume the user may be logged in; start rather than guess.
+[ -r "$STATE_FILE" ] || exit 0
+
+size=$(wc -c < "$STATE_FILE" 2>/dev/null)
+case "$size" in
+	''|*[!0-9]*) exit 0 ;;   # could not measure -> fail open
+esac
+
+# An empty or near-empty state is exactly "{}" (2 bytes). Credentials add a
+# node key, a profile and machine data, which is always at least a few hundred
+# bytes. Treat anything above 16 bytes as "may have credentials" and start.
+[ "$size" -le 16 ] && exit 1
+
+exit 0
