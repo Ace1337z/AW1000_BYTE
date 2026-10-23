@@ -1,0 +1,17 @@
+Package: luci-app-adguardhome
+Version: 26.293.13009~61e876e
+Depends: adguardhome (>=0.107.73-r3), libc, adguardhome, luci-base
+Provides: luci-app-adguardhome-any
+Source: feeds/luci/feeds/luci/applications/luci-app-adguardhome
+SourceName: luci-app-adguardhome
+License: GPL-2.0-only
+Section: luci
+SourceDateEpoch: 1792757748
+URL: https://github.com/openwrt/luci
+Maintainer: George Sapkin <george@sapk.in>
+Architecture: all
+Installed-Size: 20480
+Description:  LuCI support for AdGuard Home
+Filename: luci-app-adguardhome_26.293.13009~61e876e_all.ipk
+Size: 3912
+

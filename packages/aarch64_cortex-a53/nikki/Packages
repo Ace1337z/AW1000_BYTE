@@ -1,0 +1,52 @@
+Package: luci-app-nikki
+Version: 1.26.2-r1
+Depends: libc, luci-base, nikki
+Provides: luci-app-nikki-any
+Source: feeds/nikki/feeds/nikki/luci-app-nikki
+SourceName: luci-app-nikki
+Section: luci
+SourceDateEpoch: 1792757753
+URL: https://github.com/openwrt/luci
+Maintainer: OpenWrt LuCI community
+Architecture: all
+Installed-Size: 61440
+Description:  LuCI Support for nikki
+Filename: luci-app-nikki_1.26.2-r1_all.ipk
+Size: 10863
+
+Package: mihomo-meta
+Version: 1.19.32
+Depends: libc, ca-bundle, ip-full, kmod-inet-diag, kmod-tun
+Conflicts: mihomo-alpha
+Provides: mihomo-meta-any, mihomo
+Alternatives: 300:/usr/bin/mihomo:/usr/libexec/mihomo
+Source: feeds/nikki/feeds/nikki/mihomo-meta
+SourceName: mihomo-meta
+License: GPL3.0+
+Section: net
+SourceDateEpoch: 1790778949
+URL: https://wiki.metacubex.one
+Maintainer: Joseph Mory <morytyann@gmail.com>
+Architecture: aarch64_cortex-a53
+Installed-Size: 57241600
+Description:  A rule based proxy in Go.
+Filename: mihomo-meta_1.19.32_aarch64_cortex-a53.ipk
+Size: 20676139
+
+Package: nikki
+Version: 2026.10.10-r1
+Depends: libc, ca-bundle, curl, yq, firewall4, ip-full, kmod-inet-diag, kmod-nft-socket, kmod-nft-tproxy, kmod-tun, kmod-dummy, mihomo
+Provides: nikki-any
+Source: feeds/nikki/feeds/nikki/nikki
+SourceName: nikki
+License: GPL3.0+
+Section: net
+SourceDateEpoch: 1792757739
+URL: https://github.com/nikkinikki-org
+Maintainer: Joseph Mory <morytyann@gmail.com>
+Architecture: aarch64_cortex-a53
+Installed-Size: 307200
+Description:  Transparent Proxy with Mihomo on OpenWrt.
+Filename: nikki_2026.10.10-r1_aarch64_cortex-a53.ipk
+Size: 53250
+
