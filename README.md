@@ -222,7 +222,7 @@ Built on the work of others, and standing on their shoulders:
 - [Openwrt-Passwall](https://github.com/Openwrt-Passwall) — passwall2
 - [nikkinikki-org/OpenWrt-nikki](https://github.com/nikkinikki-org/OpenWrt-nikki) — nikki
 - [dotywrt/dotycat-package](https://github.com/dotywrt/dotycat-package) — AW1000 LED control
-- [Ace1337z/luci-theme-vantage](https://github.com/Ace1337z/luci-theme-vantage) — theme
+- [anothaDev/luci-theme-vantage](https://github.com/anothaDev/luci-theme-vantage) — theme
 - [SolomonRicky/luci-app-modeminfo](https://github.com/Ace1337z/luci-app-modeminfo) — modem info
 
 ### Licensing
