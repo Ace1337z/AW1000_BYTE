@@ -9,7 +9,12 @@ config system
 	option log_proto 'udp'
 	option conloglevel '8'
 	option cronloglevel '7'
-	option zram_comp_algo 'lz4'
+	# lzo-rle is the only algorithm this kernel ships (CONFIG_CRYPTO_LZ4 is
+	# off, and no *lz4* module exists in /lib/modules). With 'lz4' configured,
+	# zram-swap logs "compression algorithm 'lz4' is not supported" and gives
+	# up - silently, because the init script still exits 0. The result was a
+	# 433 MB zram device allocated but only 0 kB of swap on a running router.
+	option zram_comp_algo 'lzo-rle'
 	option zram_size_mb '433'
 
 config timeserver 'ntp'
