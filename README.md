@@ -30,7 +30,24 @@ commit history so it can never come back.
 | **Fixed, not hidden** | 28 documented fixes since the last public build. Each one names the symptom it cures. |
 | **Small** | 44 MB image. We removed ~45 MB of packages most people never use. |
 | **Guarded** | CI refuses to build if any critical setting regresses. |
-| **Honest** | Known limitations are written down instead of discovered by you at 2 AM. |
+| **Honest** | Problems are written down instead of discovered by you at 2 AM. |
+
+---
+
+> ## 🚨 IMPORTANT — read this before installing any package
+>
+> **If `opkg update` reports "Signature check failed", run these three commands.** Your
+> router is not broken and nothing is corrupt — our package feed is served through jsDelivr,
+> which can hand out a stale signature file. Point the feed at GitHub directly:
+>
+> ```sh
+> sed -i 's|https://cdn.jsdelivr.net/gh/Ace1337z/AW1000_BYTE@repo|https://raw.githubusercontent.com/Ace1337z/AW1000_BYTE/repo|g' /etc/opkg/distfeeds.conf
+> rm -rf /var/opkg-lists
+> opkg update
+> ```
+>
+> **Success looks like:** `Signature check passed` for every feed and `Signature check
+> failed` nowhere. Only then will `opkg install` work.
 
 ---
 
@@ -158,65 +175,6 @@ opkg install luci-app-nikki          # mihomo
 
 ---
 
-## Repository & patches
-
-Everything that makes this firmware work is in this repository — inspect it, build it,
-fork it.
-
-| Path | Contents |
-|---|---|
-| [`aw1000_byte.sh`](aw1000_byte.sh) | Build entrypoint: feeds, preset, guards, build |
-| [`preset`](preset) | The full `.config` |
-| [`files/`](files) | Rootfs overlay — TTL, MTU, IPv6 check, phone, Tailscale, sysctl |
-| [`nss/`](nss) | **9 kernel patches** for NSS support + DTS nodes for the AW1000 |
-| [`packages/`](packages) | Local feed — `luci-app-modeminfo` (with NR5G-SA support) |
-| [`repo-key/`](repo-key) | Stable opkg signing key so the feed and image always agree |
-| [`.github/`](.github) | CI, release-notes generator, repo publisher |
-
-**Kernel patches** ([`nss/target/linux/qualcommax/patches-6.12/`](nss/target/linux/qualcommax/patches-6.12)):
-
-- `0601-arm64-dts-qcom-ipq8072-aw1000-add-nss-nodes.patch` — NSS nodes for the AW1000
-- `0600-0-arm64-dts-ipq8074-rename-nss-region.patch` — DTS region naming
-- `0600-1/2/5/…-qca-nss-ecm-support-*.patch` — offload for CORE, PPPoE, macvlan, bridges
-- `0603-2/3/…-qca-nss-clients-add-*.patch` — L2TP and PPTP support
-
-**CI guards** — the build fails rather than shipping a regression:
-
-- TTL not 64, or the rule losing `oifname`
-- `qca-nss-ecm` or a duplicate QMI driver reappearing
-- a trimmed package coming back
-- any preset listing a package as both `=y` and "not set"
-- the signing key missing or mismatched
-- the MTU service or IPv6 check disappearing
-
----
-
-## Known limitations
-
-Stated up front, because discovering them later is worse.
-
-- **kmod-dependent apps need the matching firmware.** Flash the latest release first.
-- **TTL 64 and OpenClash conflict.** OpenClash installs redirect rules that bypass the
-  nftables chain carrying the TTL rewrite. It is deliberately not pre-installed — verify
-  with `nft list chain inet fw4 mangle_forward` after installing it.
-- **NSS/ECM flow offload is not shipped.** It does not compile on kernel 6.12.112 and would
-  bypass netfilter, defeating the TTL rewrite.
-- **VoLTE calls** need a carrier MBN profile from Quectel. Not solvable in firmware.
-- **No TX-power control** exists on the RG500Q; antenna placement is the only signal lever.
-
-### If `opkg update` reports signature failures
-
-Our feed is served via jsDelivr, which can return a stale signature file. Point it at GitHub
-directly:
-
-```sh
-sed -i 's|https://cdn.jsdelivr.net/gh/Ace1337z/AW1000_BYTE@repo|https://raw.githubusercontent.com/Ace1337z/AW1000_BYTE/repo|g' /etc/opkg/distfeeds.conf
-rm -rf /var/opkg-lists
-opkg update
-```
-
----
-
 ## Technical detail
 
 ### Network defaults
@@ -250,17 +208,6 @@ modem panel and "Disconnected" while the link is actually up.
 | `qmodem-iface-heal` | Recreates `wan`/`wanv6` when qmodem's `hang()` deletes them |
 | `byte-affinity` | RPS/RFS/XPS across all four cores for modem traffic |
 | `byte-tailscale-gate` | Starts `tailscaled` only when credentials exist |
-
-### Building
-
-Push to `main`, or run **Actions → Build BYTE by ACE firmware (AW1000) → Run workflow**.
-A run takes roughly **2.5 hours** and produces a verified release automatically.
-
-```sh
-git clone https://github.com/Ace1337z/AW1000_BYTE.git
-cd AW1000_BYTE
-bash aw1000_byte.sh
-```
 
 ---
 
