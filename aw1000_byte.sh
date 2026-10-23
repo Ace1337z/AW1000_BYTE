@@ -271,7 +271,15 @@ rename_output() {
     # Build/run number in the filename, so a user can tell at a glance which
     # firmware they are flashing. GITHUB_RUN_NUMBER in CI; otherwise the short
     # commit; otherwise no tag at all, so a plain local build still works.
+    # Prefer an explicit series name from the config (VERSION_CODE, e.g.
+    # "FINAL") so a release's files are named after the series rather than an
+    # internal CI counter. Falls back to build<run> then the short commit.
     tag="${BUILD_TAG:-}"
+    if [ -z "$tag" ]; then
+        local code
+        code=$(sed -n 's/^CONFIG_VERSION_CODE="\(.*\)"$/\1/p' "$script_dir/preset" 2>/dev/null | head -1)
+        [ -n "$code" ] && tag="$code"
+    fi
     if [ -z "$tag" ] && [ -n "${GITHUB_RUN_NUMBER:-}" ]; then
         tag="build${GITHUB_RUN_NUMBER}"
     fi
