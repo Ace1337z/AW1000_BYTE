@@ -35,6 +35,13 @@ if [ -x /etc/init.d/byte-mtu ]; then
 	/etc/init.d/byte-mtu start 2>/dev/null
 fi
 
+# IPv6 health check: keep IPv6 enabled, but demote it to IPv4 when the carrier
+# does not actually provide a usable IPv6 path. Without this, clients pick IPv6
+# and hang on a route that has no routable source.
+if [ -x /etc/init.d/byte-v6 ]; then
+	/etc/init.d/byte-v6 enable 2>/dev/null
+fi
+
 # Tailscale: enable at boot so the router is reachable over the tailnet after a
 # reboot. rc.local additionally waits for tailscale0 to receive its address and
 # restarts tailscaled if it never does - the daemon can report "Running" while

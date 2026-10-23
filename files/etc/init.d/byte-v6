@@ -1,0 +1,29 @@
+#!/bin/sh /etc/rc.common
+# BYTE by ACE - prefer IPv4 when the carrier's IPv6 is not actually usable.
+#
+# IPv6 stays enabled by default: users on carriers that support it keep it.
+# This only demotes IPv6 after measuring that it does not work, which is the
+# case on networks that delegate a prefix but never provide a routable WAN
+# address. Without this the router and its clients pick IPv6, send traffic into
+# a route with no usable source, and everything hangs - "internet is fine but I
+# cannot browse". See /usr/libexec/byte-v6-check for the full reasoning.
+
+START=98
+STOP=10
+
+boot() {
+	[ -x /usr/libexec/byte-v6-check ] || return 0
+	# Background: the probe waits up to ~60s for wanv6 to settle and must not
+	# hold up the rest of the boot.
+	( /usr/libexec/byte-v6-check ) &
+}
+
+start() {
+	[ -x /usr/libexec/byte-v6-check ] || return 0
+	( /usr/libexec/byte-v6-check ) &
+}
+
+# Re-evaluate whenever the modem reconnects - DHCPv6 may succeed next time.
+service_triggers() {
+	procd_add_reload_trigger "network"
+}

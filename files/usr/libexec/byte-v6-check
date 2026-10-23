@@ -1,0 +1,126 @@
+#!/bin/sh
+# BYTE by ACE - decide whether IPv6 is actually usable, and prefer IPv4 when
+# it is not.
+#
+# The problem this solves: on some carriers the modem negotiates an IPv6
+# bearer, dnsmasq hands LAN clients a global prefix from it, and the kernel
+# installs a default IPv6 route - but no usable global address ever appears on
+# the WAN device. Clients then prefer IPv6 (RFC 6724), send everything into a
+# default route with no source address, and the traffic is silently dropped.
+# The symptom is "internet is fine but I cannot browse".
+#
+# Rather than disabling IPv6 outright (which would punish users on carriers
+# that do support it), this only demotes IPv6 when it is measurably broken:
+#
+#   1. Wait for wanv6 to settle.
+#   2. Probe IPv6 with a real connection, not just "is there a route".
+#   3. If it works  -> leave IPv6 preferred (default behaviour).
+#      If it fails  -> prefer IPv4 by installing a low-priority ::/0 route,
+#                      so existing IPv6 config is untouched but IPv4 wins.
+
+LOG="byte-v6"
+TAG="0x42"
+
+say() { logger -t "$LOG" "$*"; }
+
+# A global (not link-local, not ULA) IPv6 address on a given device.
+has_global_v6() {
+	ip -6 addr show dev "$1" 2>/dev/null | grep -q 'inet6 2[0-9a-f]'
+}
+
+# Does IPv6 actually reach the internet? Try two well-known hosts over HTTPS.
+# Uses wget because it is in the base image; IPv4/IPv6 forced explicitly.
+v6_works() {
+	for h in https://downloads.immortalwrt.org https://www.google.com; do
+		wget -6 -q -T 8 -O /dev/null "$h" 2>/dev/null && return 0
+	done
+	return 1
+}
+
+prefer_ipv4() {
+	local dev="$1"
+
+	# 1. Standards-based preference: make getaddrinfo() return IPv4 first.
+	#    gai.conf does not exist in a stock image, so create it.
+	cat > /etc/gai.conf <<-'EOF'
+		# BYTE by ACE: prefer IPv4 while IPv6 is not usable.
+		# Managed by /usr/libexec/byte-v6-check - edits are overwritten.
+		precedence ::ffff:0:0/96  100
+	EOF
+
+	# 2. Stop the ULA prefix being used as a source for internet traffic.
+	#    This is the actual black hole: with no global WAN address, the kernel
+	#    falls back to the br-lan ULA (fdb0::/48) as the source for IPv6
+	#    packets leaving the router. Those can never be routed back, so every
+	#    connection hangs until it times out - which users see as "internet is
+	#    up but pages will not load".
+	#
+	#    Withdrawing the ULA from br-lan removes the false source without
+	#    touching any of the user's IPv6 configuration.
+	#    Done through uci so it survives RAs and renews: odhcpd would otherwise
+	#    re-advertise the prefix within seconds and the black hole returns.
+	if [ "$(uci -q get dhcp.lan.ra)" != "disabled" ]; then
+		uci set dhcp.lan.ra='disabled'
+		uci set dhcp.lan.dhcpv6='disabled'
+		uci commit dhcp
+		/etc/init.d/odhcpd restart 2>/dev/null
+		say "disabled LAN IPv6 RA/DHCPv6 (no usable WAN IPv6)"
+	fi
+	if ip -6 addr show dev br-lan 2>/dev/null | grep -q 'inet6 fd'; then
+		ip -6 addr flush dev br-lan scope global 2>/dev/null
+		say "removed unrouteable ULA source from br-lan"
+	fi
+
+	# 3. Make the broken IPv6 path fail fast instead of hanging.
+	if ! ip -6 route show default 2>/dev/null | grep -q 'metric 2048'; then
+		ip -6 route add default dev "$dev" metric 2048 2>/dev/null
+	fi
+
+	say "IPv6 not usable - IPv4 preferred (gai.conf + ULA source withdrawn)"
+}
+
+restore_ipv6() {
+	# Undo the demotion if IPv6 turns out to work after all.
+	rm -f /etc/gai.conf
+	if [ "$(uci -q get dhcp.lan.ra)" = "disabled" ]; then
+		uci set dhcp.lan.ra='server'
+		uci set dhcp.lan.dhcpv6='server'
+		uci commit dhcp
+		/etc/init.d/odhcpd restart 2>/dev/null
+	fi
+	logger -t byte-v6 "IPv6 usable - default preference and LAN RA restored"
+	ip -6 route del default dev wwan0_1 metric 2048 2>/dev/null
+	ip -6 route del default dev wwan0 metric 2048 2>/dev/null
+
+}
+
+main() {
+	# Let wanv6 come up (or give up) before judging.
+	local i=0
+	while [ "$i" -lt 20 ]; do
+		ifstatus wanv6 2>/dev/null | grep -q '"up": true' && break
+		sleep 3
+		i=$((i + 1))
+	done
+	sleep 3
+
+	local dev=""
+	for d in wwan0_1 wwan0; do
+		has_global_v6 "$d" && { dev="$d"; break; }
+	done
+
+	if [ -z "$dev" ]; then
+		say "no global IPv6 on the WAN - preferring IPv4"
+		prefer_ipv4 wwan0_1
+		return 0
+	fi
+
+	if v6_works; then
+		restore_ipv6
+	else
+		say "IPv6 address present on $dev but no connectivity - preferring IPv4"
+		prefer_ipv4 "$dev"
+	fi
+}
+
+main "$@"
