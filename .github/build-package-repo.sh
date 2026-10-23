@@ -61,7 +61,10 @@ want() { # <ipk path>
 	# 2) Packages that only exist in this project (not in ImmortalWrt 24.10.6):
 	#    qmodem/SMS, the AW1000 phone stack, our themes and modeminfo.
 	case "$name" in
-		luci-app-adguardhome|\
+		# adguardhome (the binary) must ship with luci-app-adguardhome: the UI
+		# requires >=0.107.73-r3, and ImmortalWrt 24.10.6 only has 0.107.57,
+		# so the 24.10.6 copy can never satisfy it. Our tree builds 0.107.79.
+		adguardhome|luci-app-adguardhome|\
 		qmodem|tom_modem|sms-tool_q|ubus-at-daemon|sms-forwarder|libqmodem-sms|\
 		luci-app-qmodem*|luci-app-modeminfo|luci-app-aw1k-led|\
 		luci-app-fxs|fxsd|kmod-aw1000-fxs|luci-app-ramfree|luci-app-cpufreq|\

@@ -397,6 +397,15 @@ ci_check_packages() {
     grep -qE "^[[:space:]]*option enable '1'$" "$repo_root/files/etc/config/qmodem_ttl" 2>/dev/null || \
         missing="$missing TTL-ENABLED(qmodem_ttl.enable)"
     [ -x "$repo_root/files/etc/init.d/byte-ttl" ] || missing="$missing byte-ttl-init"
+    # adguardhome: the LuCI app requires >=0.107.73-r3, but ImmortalWrt
+    # 24.10.6 only publishes 0.107.57, so the binary MUST come from our repo
+    # (we build 0.107.79). If it ever stops being published the UI becomes
+    # uninstallable, which is silent until a user tries.
+    grep -q 'luci-app-adguardhome' "$repo_root/.github/build-package-repo.sh" 2>/dev/null || \
+        missing="$missing repo-publishes-luci-app-adguardhome"
+    grep -q 'adguardhome|luci-app-adguardhome' "$repo_root/.github/build-package-repo.sh" 2>/dev/null || \
+        missing="$missing repo-publishes-adguardhome-binary"
+
     # The image must trust the key the repo is signed with, otherwise every
     # index fails verification while opkg still reports "Updated list". That
     # only works if key-build is in the tree BEFORE base-files runs, so the
