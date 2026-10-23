@@ -28,13 +28,31 @@ has_global_v6() {
 	ip -6 addr show dev "$1" 2>/dev/null | grep -q 'inet6 2[0-9a-f]'
 }
 
-# Does IPv6 actually reach the internet? Try two well-known hosts over HTTPS.
-# Uses wget because it is in the base image; IPv4/IPv6 forced explicitly.
+# Does IPv6 actually reach the internet?
+#
+# The probe must not be fooled by the router simply lacking a source address,
+# nor by a firewall rule: "Failed to send request: Operation not permitted"
+# (EPERM) means the kernel refused to send because no usable source address
+# existed, which IS the broken case we care about - but a local firewall drop
+# looks identical from userspace. To keep the two apart we require a real
+# TCP handshake against a numeric address, so nothing depends on DNS, and we
+# treat any success as proof IPv6 works. If it never succeeds we demote.
+#
+# wget is used because it is in the base image; -6 forces the family.
 v6_works() {
-	for h in https://downloads.immortalwrt.org https://www.google.com; do
-		wget -6 -q -T 8 -O /dev/null "$h" 2>/dev/null && return 0
+	for h in "https://[2a00:1450:4001:80e::200e]" https://www.google.com "https://[2606:4700:4700::1111]"; do
+		wget -6 -q -T 6 -O /dev/null "$h" 2>/dev/null && return 0
 	done
 	return 1
+}
+
+# Guard against demoting IPv6 for the wrong reason: if the router has no
+# global IPv6 address at all there is nothing to bind a source to, and every
+# probe would fail with EPERM even on a perfectly working network. In that
+# case we still prefer IPv4, because a router with no global v6 cannot route
+# v6 for its clients either - the outcome is the same and the log says why.
+has_any_global_v6() {
+	ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 2'
 }
 
 prefer_ipv4() {
@@ -95,6 +113,15 @@ restore_ipv6() {
 }
 
 main() {
+	# Only one instance at a time: the boot service and the ifup hotplug can
+	# both fire within seconds of each other, and two concurrent uci commits
+	# against dhcp are not safe.
+	exec 9>/var/lock/byte-v6.lock
+	flock -n 9 2>/dev/null || {
+		say "another check is already running - skipping"
+		return 0
+	}
+
 	# Let wanv6 come up (or give up) before judging.
 	local i=0
 	while [ "$i" -lt 20 ]; do
@@ -112,6 +139,12 @@ main() {
 	if [ -z "$dev" ]; then
 		say "no global IPv6 on the WAN - preferring IPv4"
 		prefer_ipv4 wwan0_1
+		return 0
+	fi
+
+	if ! has_any_global_v6; then
+		say "no global IPv6 source address on this router - preferring IPv4"
+		prefer_ipv4 "$dev"
 		return 0
 	fi
 
