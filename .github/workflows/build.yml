@@ -152,8 +152,8 @@ jobs:
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: BYTE_by_ACE-${{ env.TARGET_BRANCH }}-${{ github.run_number }}
-          TITLE: BYTE by ACE ${{ env.TARGET_BRANCH }} (AW1000) build ${{ github.run_number }}
+          TAG: BYTE_by_ACE-FINAL-${{ env.TARGET_BRANCH }}-${{ github.run_number }}
+          TITLE: BYTE by ACE — FINAL (AW1000, ImmortalWrt ${{ env.TARGET_BRANCH }})
           GITHUB_RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
@@ -170,8 +170,8 @@ jobs:
           # Release body is generated from the artifacts that were actually
           # built (commit, kernel, feed pins, image size), so it can never
           # describe a firmware that was not produced.
-          OUT_DIR=out bash builder/.github/release-notes.sh \
-            builder/immortalwrt/bin/targets/qualcommax/ipq807x > /tmp/notes.md
+          OUT_DIR=out bash builder/.github/release-notes-final.sh \
+            builder/immortalwrt/bin/targets/qualcommax/ipq807x out > /tmp/notes.md
           echo "--- release notes ---"
           cat /tmp/notes.md
           # An empty or stub body means the generator broke; fail loudly
