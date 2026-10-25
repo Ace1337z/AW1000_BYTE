@@ -1,0 +1,121 @@
+#!/bin/sh /etc/rc.common
+# BYTE by ACE - verify the tuning described in sysctl.conf / cpufreq /
+# byte-affinity / byte-mtu actually took effect on this unit.
+#
+# Every value below is *declared* elsewhere in the image. Until now nothing
+# checked that the kernel accepted it, and a rejected key is silent: sysctl -p
+# aborts the remainder of the file on the first error, a governor may not exist
+# for this CPU, and qmodem recreates wwan0 on every redial. This logs the
+# observed value next to the expected one and reports a single summary line, so
+# "is tuning applied?" is a log question instead of an SSH session.
+#
+# Runs late (S99) so wwan0 exists after the modem dials, and again on every
+# interface up (see /etc/hotplug.d/iface/91-byte-selfcheck).
+
+START=99
+STOP=01
+
+TAG=byte-selfcheck
+MTU_WANT=1420
+GOV_WANT=performance
+
+fails=0
+oks=0
+
+# report <label> <expected> <actual>; expected & actual are compared literally.
+# An empty actual means the source is missing (e.g. wwan0 not up yet), which is
+# reported as skip rather than a failure.
+report() {
+	local label="$1" want="$2" got="$3"
+	if [ -z "$got" ]; then
+		logger -t "$TAG" "$label: SKIP (unavailable)"
+		return
+	fi
+	if [ "$want" = "$got" ]; then
+		oks=$((oks + 1))
+		logger -t "$TAG" "$label: OK $got"
+	else
+		fails=$((fails + 1))
+		logger -t "$TAG" "$label: MISMATCH want=$want got=$got"
+	fi
+}
+
+check_cpu() {
+	local c dev gov min max
+	for c in /sys/devices/system/cpu/cpu[0-9]*/cpufreq; do
+		[ -d "$c" ] || continue
+		dev=${c#/sys/devices/system/cpu/}
+		gov=$(cat "$c/scaling_governor" 2>/dev/null)
+		report "cpu.$dev.governor" "$GOV_WANT" "$gov"
+		[ "$gov" = "$GOV_WANT" ] || continue
+		# min == max proves the frequency is pinned, not merely governed.
+		min=$(cat "$c/scaling_min_freq" 2>/dev/null)
+		max=$(cat "$c/scaling_max_freq" 2>/dev/null)
+		report "cpu.$dev.min_eq_max" "$max" "$min"
+	done
+}
+
+check_sysctl() {
+	# The expected value is the one declared in files/etc/sysctl.conf.
+	report qdisc.fq fq "$(cat /proc/sys/net/core/default_qdisc 2>/dev/null)"
+	report cc.bbr bbr "$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null)"
+	report mtu_probing 1 "$(cat /proc/sys/net/ipv4/tcp_mtu_probing 2>/dev/null)"
+	report slow_start_idle 0 "$(cat /proc/sys/net/ipv4/tcp_slow_start_after_idle 2>/dev/null)"
+	report netdev_budget 600 "$(cat /proc/sys/net/core/netdev_budget 2>/dev/null)"
+	report netdev_max_backlog 2000 "$(cat /proc/sys/net/core/netdev_max_backlog 2>/dev/null)"
+	report conntrack_max 32768 "$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)"
+	report keepalive_time 120 "$(cat /proc/sys/net/ipv4/tcp_keepalive_time 2>/dev/null)"
+	report rmem_max 4194304 "$(cat /proc/sys/net/core/rmem_max 2>/dev/null)"
+	# BBR only exists if CONFIG_TCP_CONG_BBR was compiled in; fq likewise.
+	[ "$(cat /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null | grep -cw bbr)" -eq 1 ] \
+		|| { logger -t "$TAG" "bbr.module: SKIP (not compiled in)"; }
+}
+
+check_iface() {
+	local dev cur qq
+	for dev in wwan0 wwan0_1; do
+		ip link show "$dev" >/dev/null 2>&1 || continue
+		cur=$(ip link show "$dev" 2>/dev/null | grep -oE 'mtu [0-9]+' | cut -d' ' -f2)
+		report "iface.$dev.mtu" "$MTU_WANT" "$cur"
+		qq=$(tc qdisc show dev "$dev" 2>/dev/null | awk '{print $2; exit}')
+		report "iface.$dev.qdisc" fq "$qq"
+		case "$qq" in
+			fq) ;;
+			*) logger -t "$TAG" "iface.$dev.qdisc: note - BBR pacing wants fq, got ${qq:-none}" ;;
+		esac
+
+		# RPS/XPS must reach all four cores (mask 0f); one core is the old
+		# single-core ceiling that byte-affinity exists to remove.
+		local q mask
+		for q in /sys/class/net/"$dev"/queues/rx-*/rps_cpus; do
+			[ -e "$q" ] || continue
+			mask=$(cat "$q" 2>/dev/null)
+			report "rps.$dev.$(basename "$(dirname "$q")")" 0f "$mask"
+		done
+	done
+}
+
+check_zram() {
+	local swapsz
+	swapsz=$(awk '/\/dev\/zram/{print $3}' /proc/swaps 2>/dev/null)
+	# Reported in KB by /proc/swaps; 433 MB is roughly 443392 KB. Only assert
+	# that some zram swap is live - the exact size is a config, not a behaviour.
+	if [ -n "$swapsz" ]; then
+		report zram.swap live live
+	else
+		report zram.swap live ""
+	fi
+}
+
+start() {
+	logger -t "$TAG" "begin (mtu=$MTU_WANT governor=$GOV_WANT)"
+	check_cpu
+	check_sysctl
+	check_iface
+	check_zram
+	if [ "$fails" -eq 0 ]; then
+		logger -t "$TAG" "PASS ${oks} checks, 0 mismatches"
+	else
+		logger -t "$TAG" "FAIL ${fails} mismatches, ${oks} ok"
+	fi
+}

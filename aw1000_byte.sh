@@ -436,6 +436,21 @@ ci_check_packages() {
     [ -x "$repo_root/files/etc/hotplug.d/iface/90-byte-mtu" ] || missing="$missing byte-mtu-hotplug"
     grep -q 'oifname' "$repo_root/files/etc/nftables.d/ttl64.nft" 2>/dev/null || \
         missing="$missing TTL-RULE(oifname)"
+    # Tuning must be verifiable on the device, not just declared: byte-selfcheck
+    # logs the observed governor/qdisc/MTU/RPS against the configured values, so
+    # a kernel that silently rejects a key shows up instead of going unnoticed.
+    [ -x "$repo_root/files/etc/init.d/byte-selfcheck" ] || missing="$missing byte-selfcheck-init"
+    [ -x "$repo_root/files/etc/hotplug.d/iface/91-byte-selfcheck" ] || missing="$missing byte-selfcheck-hotplug"
+    [ -x "$repo_root/files/etc/init.d/byte-affinity" ] || missing="$missing byte-affinity-init"
+    # The self-check reads these files as the source of truth; a missing key
+    # would make it assert the wrong thing.
+    for k in net.ipv4.tcp_congestion_control net.core.default_qdisc \
+             net.ipv4.tcp_mtu_probing net.ipv4.tcp_slow_start_after_idle; do
+        grep -q "^${k} = " "$repo_root/files/etc/sysctl.conf" 2>/dev/null || \
+            missing="$missing sysctl($k)"
+    done
+    grep -q "option governor0 'performance'" "$repo_root/files/etc/config/cpufreq" 2>/dev/null || \
+        missing="$missing cpufreq(performance)"
     # Every feed base-files emits a distfeeds line for must also exist in the
     # published repo, or opkg gets a 404 and reports "no such file or
     # directory" for that feed. Adding a feed to the build without adding it to
