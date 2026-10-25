@@ -3,11 +3,11 @@
 #
 # Two sources, for two different jobs:
 #
-#   1. Our own repo (jsDelivr CDN, branch 'repo'): kernel-pinned kmods and the
-#      packages that only exist in this project (qmodem/SMS, the AW1000 phone
-#      stack, our themes, modeminfo, nikki/mihomo). kmods MUST come from here -
-#      a kmod built against another kernel makes opkg abort with
-#      "Not downgrading package kernel".
+#   1. Our own repo (raw.githubusercontent.com, branch 'repo'): kernel-pinned
+#      kmods and the packages that only exist in this project (qmodem/SMS, the
+#      AW1000 phone stack, our themes, modeminfo, nikki/mihomo). kmods MUST
+#      come from here - a kmod built against another kernel makes opkg abort
+#      with "Not downgrading package kernel".
 #
 #   2. ImmortalWrt 24.10.6 opkg feeds: the eight on-demand apps (banIP,
 #      SmartDNS, SQM, mwan3, OpenClash, HomeProxy) plus their luci frontends and
@@ -18,12 +18,12 @@
 # Base-files generates /etc/opkg/distfeeds.conf from CONFIG_VERSION_REPO; this
 # script replaces it because the image needs BOTH sets of feeds.
 
-KODS="https://cdn.jsdelivr.net/gh/Ace1337z/AW1000_BYTE@repo"
+KODS="https://raw.githubusercontent.com/Ace1337z/AW1000_BYTE/repo"
 IMM="https://downloads.immortalwrt.org/releases/24.10.6"
 A="aarch64_cortex-a53"
 
 gen() {
-	# 1) our repo (jsDelivr). Same directory layout as the ImmortalWrt feeds.
+	# 1) our repo (raw.githubusercontent.com). Same directory layout as the ImmortalWrt feeds.
 	echo "src/gz byte_by_ace_core $KODS/targets/qualcommax/ipq807x/packages"
 	# Only feeds our repo actually publishes. Empty feeds (routing, telephony,
 	# video) are deliberately omitted: jsDelivr 404s a directory with no files,

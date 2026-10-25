@@ -111,12 +111,11 @@ update_feeds() {
     grep -q '^src-git nss ' feeds.conf.default 2>/dev/null || \
         echo 'src-git nss https://github.com/qosmio/nss-packages.git;NSS-12.5-K6.x' >> feeds.conf.default
     # AW1000 RJ11 phone port: kmod-aw1000-fxs, fxsd, luci-app-fxs (packages live in openwrt/)
-    # Upstream, pinned to v0.3.0 (Call history, auto-delete, phone LED fix).
-    # The previous URL pointed at our own fork, which had stalled at v0.2.0 -
-    # upstream updates would never have arrived. Pinned by full 40-char SHA:
-    # an abbreviated one makes src-git fail with "couldn't find remote ref".
+    # Upstream, pinned to v0.4.1.
+    # Pinned by full 40-char SHA: an abbreviated one makes src-git fail with
+    # "couldn't find remote ref".
     sed -i '\#^src-git fxs #d' feeds.conf.default 2>/dev/null
-    echo 'src-git fxs https://github.com/Perz3us/openwrt-aw1000-phone.git^502235d407e7ec1e0945eb5ef9c1367e9cd054e4' >> feeds.conf.default
+    echo 'src-git fxs https://github.com/Perz3us/openwrt-aw1000-phone.git^901f9dd1fa661fa4858613579fbd83d521565b35' >> feeds.conf.default
     # dotycat packages: luci-app-aw1k-led (AW1000 LED controller), etc.
     grep -q '^src-git dotycat ' feeds.conf.default 2>/dev/null || \
         echo 'src-git dotycat https://github.com/dotywrt/dotycat-package.git;dotycat' >> feeds.conf.default
@@ -469,8 +468,8 @@ ci_check_packages() {
     # publishes only .apk feeds (opkg asks for Packages.gz, the mirror serves
     # packages.adb), so any downloads.immortalwrt.org URL makes every feed fail
     # with "wget returned 8" and `opkg update` is dead on the device.
-    grep -q '^CONFIG_VERSION_REPO="https://cdn.jsdelivr.net/gh/Ace1337z/AW1000_BYTE@repo"' .config || \
-        missing="$missing VERSION_REPO(jsdelivr-kmod-repo)"
+    grep -q '^CONFIG_VERSION_REPO="https://raw.githubusercontent.com/Ace1337z/AW1000_BYTE/repo"' .config || \
+        missing="$missing VERSION_REPO(raw-github-kmod-repo)"
     if grep -q '^CONFIG_VERSION_REPO=.*downloads.immortalwrt.org' .config; then
         forbidden="$forbidden VERSION_REPO(apk-only-mirror)"
     fi

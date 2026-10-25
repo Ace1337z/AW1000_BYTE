@@ -36,9 +36,9 @@ commit history so it can never come back.
 
 > ## 🚨 IMPORTANT — read this before installing any package
 >
-> **If `opkg update` reports "Signature check failed", run these three commands.** Your
-> router is not broken and nothing is corrupt — our package feed is served through jsDelivr,
-> which can hand out a stale signature file. Point the feed at GitHub directly:
+> The image now points the package feed at **raw.githubusercontent.com** directly, so the
+> older jsDelivr stale-signature problem is gone by default. If you ever see `Signature check
+> failed` for our feed, run these three commands to force a clean refresh:
 >
 > ```sh
 > sed -i 's|https://cdn.jsdelivr.net/gh/Ace1337z/AW1000_BYTE@repo|https://raw.githubusercontent.com/Ace1337z/AW1000_BYTE/repo|g' /etc/opkg/distfeeds.conf

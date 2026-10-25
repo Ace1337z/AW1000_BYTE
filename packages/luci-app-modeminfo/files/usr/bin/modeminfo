@@ -78,10 +78,15 @@ mcc_5g_sa=$(echo "$signal" | grep 'QENG: "servingcell".*NR5G-SA' | awk -F, '{pri
 mnc_5g_sa=$(echo "$signal" | grep 'QENG: "servingcell".*NR5G-SA' | awk -F, '{print $6}')
 cell_5g_sa=$(echo "$signal" | grep 'QENG: "servingcell".*NR5G-SA' | awk -F, '{print $7}')
 
-# Convert LTE, NR5G-NSA & NR5G-SA Cell ID from Hex to Decimal
-cell_lte_dec=$(printf "%d\n" "0x$cell_lte")
-cell_5g_nsa_dec=$(printf "%d\n" "0x$cell_5g_nsa")
-cell_5g_sa_dec=$(printf "%d\n" "0x$cell_5g_sa")
+# Convert LTE, NR5G-NSA & NR5G-SA Cell ID from Hex to Decimal.
+# Guard empty values: busybox printf aborts on "0x" (invalid number) and the
+# LuCI page breaks. Also strip the optional leading 'b' marker if present.
+cell_lte_dec=
+[ -n "$cell_lte" ] && cell_lte_dec=$(printf "%d\n" "0x${cell_lte#b}")
+cell_5g_nsa_dec=
+[ -n "$cell_5g_nsa" ] && cell_5g_nsa_dec=$(printf "%d\n" "0x${cell_5g_nsa#b}")
+cell_5g_sa_dec=
+[ -n "$cell_5g_sa" ] && cell_5g_sa_dec=$(printf "%d\n" "0x${cell_5g_sa#b}")
 
 # Normalize outputs
 [ -z "$network" ] && network="Unknown Network" || network=$(echo "$network" | sed 's/ $//')
