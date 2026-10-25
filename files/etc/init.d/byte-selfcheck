@@ -19,6 +19,15 @@ TAG=byte-selfcheck
 MTU_WANT=1420
 GOV_WANT=performance
 
+# RPS mask covering every CPU, derived rather than hardcoded: this box has 4
+# cores (mask f) but the same image logic must not silently assert "0f" on a
+# different core count. printf %x keeps it in the same form the kernel prints
+# (no leading zeros), which is what the comparison below normalises anyway.
+_ncpu=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)
+[ "$_ncpu" -ge 1 ] 2>/dev/null || _ncpu=1
+CPUMASK=$(printf '%x' $(( (1 << _ncpu) - 1 )))
+unset _ncpu
+
 fails=0
 oks=0
 
@@ -84,13 +93,30 @@ check_iface() {
 			*) logger -t "$TAG" "iface.$dev.qdisc: note - BBR pacing wants fq, got ${qq:-none}" ;;
 		esac
 
-		# RPS/XPS must reach all four cores (mask 0f); one core is the old
-		# single-core ceiling that byte-affinity exists to remove.
+		# RPS must cover every core; one core is the single-core ceiling
+		# that byte-affinity exists to remove. The kernel prints the mask
+		# WITHOUT leading zeros ("f", not "0f") and the width grows with the
+		# core count, so compare numerically against the CPU bitmap rather
+		# than string-matching a literal mask.
 		local q mask
 		for q in /sys/class/net/"$dev"/queues/rx-*/rps_cpus; do
 			[ -e "$q" ] || continue
 			mask=$(cat "$q" 2>/dev/null)
-			report "rps.$dev.$(basename "$(dirname "$q")")" 0f "$mask"
+			if [ -z "$mask" ]; then
+				report "rps.$dev.$(basename "$(dirname "$q")")" "$CPUMASK" ""
+			elif [ $((0x$mask)) -eq $((0x$CPUMASK)) ]; then
+				report "rps.$dev.$(basename "$(dirname "$q")")" "$CPUMASK" "$CPUMASK"
+			else
+				report "rps.$dev.$(basename "$(dirname "$q")")" "$CPUMASK" "$mask"
+			fi
+		done
+
+		# RFS flow table must be populated or rps_flow_cnt is inert.
+		for q in /sys/class/net/"$dev"/queues/rx-*/rps_flow_cnt; do
+			[ -e "$q" ] || continue
+			report "rfs_flow_cnt.$dev.$(basename "$(dirname "$q")")" \
+				"$(cat /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null)" \
+				"$(cat "$q" 2>/dev/null)"
 		done
 	done
 }
@@ -108,7 +134,7 @@ check_zram() {
 }
 
 start() {
-	logger -t "$TAG" "begin (mtu=$MTU_WANT governor=$GOV_WANT)"
+	logger -t "$TAG" "begin (mtu=$MTU_WANT governor=$GOV_WANT cpumask=$CPUMASK)"
 	check_cpu
 	check_sysctl
 	check_iface

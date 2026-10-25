@@ -230,6 +230,12 @@ Declared in `files/etc/sysctl.conf`, `files/etc/config/cpufreq` and the `byte-*`
 - MTU 1420 on `wwan0`/`wwan0_1`, re-applied on every redial
 - zram swap, `lzo-rle`, 433 MB
 
+**Known ceiling:** the modem's USB interrupt (`xhci-hcd:usb3`) is not spread across
+cores — writes to its IRQ affinity make the kernel collapse it back to one CPU, so
+`byte-affinity` leaves it alone and distributes packet *processing* with RPS instead.
+The interrupt itself stays on a single core. XPS is written but rejected by
+`qmi_wwan`; `byte-affinity` probes this once at boot and logs `xps=unsupported`.
+
 ---
 
 ## Troubleshooting

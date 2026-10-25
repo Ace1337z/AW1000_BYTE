@@ -20,6 +20,7 @@ USE_PROCD=1
 
 RPS_MASK=0f          # all four cores
 RPS_FLOW=4096
+XPS_PROBE_DONE=/var/run/byte-affinity.xps-probed
 
 apply() {
 	# Global RFS table. Without this rps_flow_cnt is inert.
@@ -42,19 +43,48 @@ apply() {
 			[ -e "$q" ] || continue
 			echo "$RPS_FLOW" > "$q" 2>/dev/null
 		done
-		# Transmit-side steering: keeps xmit softirq off the same core as rx.
-		for q in "$dev"/queues/tx-*/xps_cpus; do
-			[ -e "$q" ] || continue
-			echo "$RPS_MASK" > "$q" 2>/dev/null
-		done
+		# Transmit-side steering. xps_cpus is write-only, so success cannot be
+		# confirmed by reading it back. Probe once by writing and checking for
+		# a kernel error; on qmi_wwan the write is rejected, and re-attempting
+		# it every 15s reload would just spam a dead path. The result is
+		# CACHED IN THE FILE: apply() runs from a timer in a fresh process, so
+		# a shell variable would not survive between reloads.
+		if [ ! -e "$XPS_PROBE_DONE" ]; then
+			local xps_ok=1
+			for q in "$dev"/queues/tx-*/xps_cpus; do
+				[ -e "$q" ] || continue
+				if { echo "$RPS_MASK" > "$q"; } 2>/dev/null; then
+					xps_ok=1
+				else
+					xps_ok=0
+				fi
+				break
+			done
+			echo "$xps_ok" > "$XPS_PROBE_DONE" 2>/dev/null
+		fi
+		if [ "$(cat "$XPS_PROBE_DONE" 2>/dev/null)" = 1 ]; then
+			for q in "$dev"/queues/tx-*/xps_cpus; do
+				[ -e "$q" ] || continue
+				echo "$RPS_MASK" > "$q" 2>/dev/null
+			done
+		fi
 	done
 
 	# Deliberately NOT touching IRQ affinity. Testing on the live modem showed
 	# that writing an all-cores mask to a single IRQ (e.g. IRQ 43,
 	# xhci-hcd:usb3) makes the kernel collapse effective_affinity back to one
-	# CPU, so it achieves nothing. RPS below is what distributes the work.
+	# CPU, so it achieves nothing.
+	#
+	# KNOWN CEILING: the modem's xhci interrupt therefore stays on one core
+	# (observed: 209k interrupts on cpu2, zero on the others). RPS moves the
+	# *processing* to all cores, which is what lifts the throughput ceiling,
+	# but the interrupt itself is not spread. Anything that pins a single
+	# high-rate IRQ to one CPU keeps that CPU's softirq share elevated.
 
-	logger -t byte-affinity "rps/xps=$RPS_MASK on wwan*, rfs=$RPS_FLOW"
+	local xps_state
+	xps_state=$(cat "$XPS_PROBE_DONE" 2>/dev/null)
+	[ "$xps_state" = 1 ] || xps_state=unsupported
+	logger -t byte-affinity "rps=$RPS_MASK rfs=$RPS_FLOW xps=$xps_state"
 }
 
 start_service() {
