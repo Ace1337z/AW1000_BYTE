@@ -1,0 +1,20 @@
+Package: adguardhome
+Version: 0.107.79-r1
+Depends: libc, ca-bundle
+Provides: adguardhome-any
+Source: feeds/packages/feeds/packages/net/adguardhome
+SourceName: adguardhome
+License: GPL-3.0-only
+LicenseFiles: LICENSE.txt
+Section: net
+Require-User: adguardhome=853:adguardhome=853
+SourceDateEpoch: 1786960338
+URL: https://github.com/AdguardTeam/AdGuardHome
+CPE-ID: cpe:/a:adguard:adguardhome
+Maintainer: Dobroslaw Kijowski <dobo90@gmail.com>, George Sapkin <george@sapk.in>
+Architecture: aarch64_cortex-a53
+Installed-Size: 34088960
+Description:  Free and open source, powerful network-wide ads and trackers blocking DNS server.
+Filename: adguardhome_0.107.79-r1_aarch64_cortex-a53.ipk
+Size: 11373918
+
