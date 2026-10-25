@@ -246,26 +246,43 @@ apply_preset() {
     rm -rf package/feeds/nss/qca-nss-ecm feeds/nss/qca-nss-ecm
     echo -e "${BOLD_GREEN}qca-nss-ecm REMOVED FROM TREE${RESET}"
 
-    # Kconfig variant cycles. Both package pairs declare a mutual
-    # PROVIDES/CONFLICTS + DEFAULT_VARIANT, which Kconfig cannot resolve:
+    # Kconfig variant cycle: upstream packages/net/weechat defines TWO packages
+    # in ONE Makefile (weechat-minimal with DEFAULT_VARIANT, and weechat-full
+    # with CONFLICTS:=weechat-minimal), both PROVIDES:=weechat. luci-app-weechat
+    # depends on the bare name "+weechat", so Kconfig cannot pick a provider:
     #
-    #   weechat-minimal  PROVIDES weechat, DEFAULT_VARIANT
-    #   weechat-full     PROVIDES weechat, CONFLICTS weechat-minimal
-    #   luci-app-weechat DEPENDS +weechat          <- resolves to the "full" name
+    #   PACKAGE_luci-app-weechat depends on PACKAGE_weechat-full
+    #   PACKAGE_weechat-full depends on PACKAGE_weechat-minimal
+    #   PACKAGE_weechat-minimal is selected by PACKAGE_luci-app-weechat
     #
-    # and mihomo-meta / mihomo-alpha do the same to each other, with nikki
-    # depending on the ambiguous "+mihomo". `make defconfig` then aborts with
-    # "recursive dependency detected!" and the build never starts. It only
-    # appears once the feeds are indexed, which is why it is not reproducible
-    # in a fresh checkout.
+    # -> "recursive dependency detected!" and `make defconfig` aborts.
     #
-    # Dropping the non-default variant from the tree leaves exactly one
-    # provider of "weechat"/"mihomo", so the cycle is gone and `+mihomo` /
-    # `+weechat` resolve to the remaining default variant. Neither package is
-    # in the image; only the default variant is built for the opkg repo.
-    rm -rf package/feeds/packages/weechat-full feeds/packages/weechat-full
+    # The feeds/packages branch (openwrt-25.12) is NOT pinned, so upstream
+    # added weechat-full while this repo was in flight - the same tree built
+    # fine before 2026-10-16. Neither variant is in the image, so drop the
+    # non-default one: with only weechat-minimal left there is one provider and
+    # "+weechat" resolves.
+    local wm="$PWD/feeds/packages/net/weechat/Makefile"
+    if [ -f "$wm" ] && grep -q '^define Package/weechat-full$' "$wm"; then
+        # Three separate blocks plus its BuildPackage call, all in this file.
+        # Deleting only the definition would leave the description/install
+        # blocks behind and Kconfig would still register the symbol.
+        sed -i \
+            -e '/^define Package\/weechat-full$/,/^endef$/d' \
+            -e '/^define Package\/weechat-full\/description$/,/^endef$/d' \
+            -e '/^define Package\/weechat-full\/install$/,/^endef$/d' \
+            -e '/^Package\/weechat-full\/conffiles =/d' \
+            -e '/^$(eval $(call BuildPackage,weechat-full))$/d' \
+            "$wm"
+        echo -e "${BOLD_GREEN}weechat-full VARIANT REMOVED (Kconfig cycle)${RESET}"
+    fi
+
+    # Same shape in the nikki feed: mihomo-alpha and mihomo-meta both declare
+    # PROVIDES:=mihomo and CONFLICT each other, while nikki depends on the bare
+    # "+mihomo". Keep the default (mihomo-meta, DEFAULT_VARIANT=1) and drop the
+    # alpha package directory so exactly one provider remains.
     rm -rf package/feeds/nikki/mihomo-alpha feeds/nikki/mihomo-alpha
-    echo -e "${BOLD_GREEN}KCONFIG VARIANT CYCLES REMOVED (weechat-full, mihomo-alpha)${RESET}"
+    echo -e "${BOLD_GREEN}mihomo-alpha VARIANT REMOVED (Kconfig cycle)${RESET}"
 }
 
 run_menuconfig() {
@@ -414,10 +431,13 @@ ci_check_packages() {
         grep -q "^CONFIG_PACKAGE_${p}=y$" .config && forbidden="$forbidden $p"
     done
     [ -e package/feeds/nss/qca-nss-ecm ] && forbidden="$forbidden qca-nss-ecm-tree"
-    # The non-default variants are deleted so Kconfig has a single provider per
-    # name; if one reappears the "recursive dependency detected!" abort is back.
-    [ -e package/feeds/packages/weechat-full ] && forbidden="$forbidden weechat-full-variant"
-    [ -e package/feeds/nikki/mihomo-alpha ] && forbidden="$forbidden mihomo-alpha-variant"
+    # The non-default variants are removed so Kconfig has a single provider per
+    # name; if either comes back, "recursive dependency detected!" returns and
+    # defconfig aborts before compiling anything.
+    grep -q '^define Package/weechat-full$' feeds/packages/net/weechat/Makefile 2>/dev/null && \
+        forbidden="$forbidden weechat-full-variant(Kconfig-cycle)"
+    [ -e package/feeds/nikki/mihomo-alpha ] && \
+        forbidden="$forbidden mihomo-alpha-variant(Kconfig-cycle)"
     # TTL must default to 64 on the modem uplink - this is the single most
     # important behaviour of the image (tethering detection).
     # NOTE: ci_check_packages runs with CWD=immortalwrt, so repo paths must be
