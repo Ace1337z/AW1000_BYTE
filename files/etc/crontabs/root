@@ -1,1 +1,18 @@
-0 * * * * echo 3 > /proc/sys/vm/drop_caches && swapoff -a && swapon -a
+# Root crontab for BYTE by ACE.
+#
+# Deliberately empty. An hourly "echo 3 > drop_caches && swapoff -a && swapon -a"
+# used to live here. It was removed because it made the box worse:
+#
+#   drop_caches  throws away the page cache and dentries every hour, so the
+#                next requests page the kernel to fetch them again - pure CPU
+#                and latency cost, no throughput gain. It also makes memory
+#                look "free" while the kernel is actually warm.
+#   swapoff/swapon  forces all 433 MB of zram to be decompressed back into RAM
+#                and then re-compressed, which stalls every process touching
+#                swapped pages for the whole cycle. Under memory pressure that
+#                is exactly when the stall hurts most.
+#
+# Leave the kernel's own reclaim alone: it already evicts cold pages on
+# demand, and zram is meant to stay warm.
+#
+# ci_check_packages fails the build if either command comes back.

@@ -451,6 +451,11 @@ ci_check_packages() {
     done
     grep -q "option governor0 'performance'" "$repo_root/files/etc/config/cpufreq" 2>/dev/null || \
         missing="$missing cpufreq(performance)"
+    # The hourly drop_caches/swapoff crontab was removed on purpose (it stalls
+    # the box for no gain). Fail the build if it reappears.
+    if grep -qE 'drop_caches|swapoff' "$repo_root/files/etc/crontabs/root" 2>/dev/null; then
+        forbidden="$forbidden CRON(drop_caches/swapoff)"
+    fi
     # Every feed base-files emits a distfeeds line for must also exist in the
     # published repo, or opkg gets a 404 and reports "no such file or
     # directory" for that feed. Adding a feed to the build without adding it to
