@@ -245,6 +245,27 @@ apply_preset() {
     # for defconfig or `make world` to enable.
     rm -rf package/feeds/nss/qca-nss-ecm feeds/nss/qca-nss-ecm
     echo -e "${BOLD_GREEN}qca-nss-ecm REMOVED FROM TREE${RESET}"
+
+    # Kconfig variant cycles. Both package pairs declare a mutual
+    # PROVIDES/CONFLICTS + DEFAULT_VARIANT, which Kconfig cannot resolve:
+    #
+    #   weechat-minimal  PROVIDES weechat, DEFAULT_VARIANT
+    #   weechat-full     PROVIDES weechat, CONFLICTS weechat-minimal
+    #   luci-app-weechat DEPENDS +weechat          <- resolves to the "full" name
+    #
+    # and mihomo-meta / mihomo-alpha do the same to each other, with nikki
+    # depending on the ambiguous "+mihomo". `make defconfig` then aborts with
+    # "recursive dependency detected!" and the build never starts. It only
+    # appears once the feeds are indexed, which is why it is not reproducible
+    # in a fresh checkout.
+    #
+    # Dropping the non-default variant from the tree leaves exactly one
+    # provider of "weechat"/"mihomo", so the cycle is gone and `+mihomo` /
+    # `+weechat` resolve to the remaining default variant. Neither package is
+    # in the image; only the default variant is built for the opkg repo.
+    rm -rf package/feeds/packages/weechat-full feeds/packages/weechat-full
+    rm -rf package/feeds/nikki/mihomo-alpha feeds/nikki/mihomo-alpha
+    echo -e "${BOLD_GREEN}KCONFIG VARIANT CYCLES REMOVED (weechat-full, mihomo-alpha)${RESET}"
 }
 
 run_menuconfig() {
@@ -393,6 +414,10 @@ ci_check_packages() {
         grep -q "^CONFIG_PACKAGE_${p}=y$" .config && forbidden="$forbidden $p"
     done
     [ -e package/feeds/nss/qca-nss-ecm ] && forbidden="$forbidden qca-nss-ecm-tree"
+    # The non-default variants are deleted so Kconfig has a single provider per
+    # name; if one reappears the "recursive dependency detected!" abort is back.
+    [ -e package/feeds/packages/weechat-full ] && forbidden="$forbidden weechat-full-variant"
+    [ -e package/feeds/nikki/mihomo-alpha ] && forbidden="$forbidden mihomo-alpha-variant"
     # TTL must default to 64 on the modem uplink - this is the single most
     # important behaviour of the image (tethering detection).
     # NOTE: ci_check_packages runs with CWD=immortalwrt, so repo paths must be
