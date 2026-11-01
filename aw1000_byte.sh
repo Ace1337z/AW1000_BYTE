@@ -159,6 +159,14 @@ update_feeds() {
     # keeping a second JS theme costs space and its luci-app-vantage dashboard
     # duplicates pages the Vantage-derived widgets now provide.
     sed -i '\#^src-git vantage #d' feeds.conf.default 2>/dev/null
+    # luci feed: the v25.12.1 pin (ed7692cb, 2026-07-06) predates the Footstrap
+    # theme, which landed on the branch on 2026-09-03. defconfig drops unknown
+    # symbols silently, so CONFIG_PACKAGE_luci-theme-footstrap=y was ignored,
+    # the image shipped Bootstrap, and the BYTE logo overrides under files/
+    # (footstrap assets) had no theme to attach to. Pin the last commit of the
+    # theme's landing series: same day, so the feed stays as close to the
+    # release tag as having the theme allows.
+    sed -i -E 's#^(src-git luci https://github\.com/immortalwrt/luci\.git)\^[0-9a-f]+#\1^17b3c7daab81c06396f0d9eb35012777dbc36436#' feeds.conf.default
     sed -i '\#^src-git fxs #d' feeds.conf.default 2>/dev/null
     # NSS offload: qca-nss-drv + qca-nss-ecm (QSDK 12.5, kernel 6.12 patches)
     grep -q '^src-git nss ' feeds.conf.default 2>/dev/null || \
@@ -830,6 +838,18 @@ ci_check_packages() {
     awk '/^on:/,/^permissions:/' "$repo_root/.github/workflows/build.yml" 2>/dev/null | \
         grep -q '^ *- version\.env$' || \
         missing="$missing version(workflow-path)"
+    grep -q 'luci\.git\^17b3c7da' "$repo_root/aw1000_byte.sh" 2>/dev/null || \
+        missing="$missing luci-feed-pin(footstrap)"
+    # Anything the boot sequence executes must carry the exec bit in git: the
+    # image copies these files verbatim, so a 100644 init script is installed
+    # and never run (this bit qmodem_ttl once, which made the TTL rule absent).
+    for f in "$repo_root"/files/etc/init.d/* "$repo_root"/files/etc/hotplug.d/iface/* \
+        "$repo_root"/files/etc/uci-defaults/* "$repo_root"/files/etc/rc.local \
+        "$repo_root"/files/usr/sbin/* "$repo_root"/files/usr/bin/* \
+        "$repo_root"/files/usr/libexec/*; do
+        [ -e "$f" ] || continue
+        [ -x "$f" ] || missing="$missing not-exec(${f#"$repo_root"/})"
+    done
     # Repo signing key: the copy must happen in the build script *after* the
     # clone (the tree does not exist before it), and no workflow step may copy
     # into builder/immortalwrt - that failed every cold-cache run outright.
