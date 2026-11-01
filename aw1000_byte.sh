@@ -297,8 +297,13 @@ apply_preset() {
         echo -e "${BOLD_RED}WARNING: PRESET NOT FOUND${RESET}"
 
     # Firmware version shown in Status -> Overview. Runs after the preset so
-    # its CONFIG_VERSION_* lines are the ones that survive.
-    apply_version
+    # its CONFIG_VERSION_* lines are the ones that survive. Fatal: an
+    # undetected kernel would ship "25.12(x)" and a filename that contradicts
+    # the image, which is worse than a failed build.
+    apply_version || {
+        echo -e "${BOLD_RED}FIRMWARE VERSION UNDETECTED - ABORTING${RESET}"
+        exit 1
+    }
 
     # qca-nss-ecm stays in the *tree* but not in the *image*: the preset has
     # "# CONFIG_PACKAGE_kmod-qca-nss-ecm is not set", the same choice
@@ -478,11 +483,39 @@ apply_version() {
         [ "$n" -ge 1 ] 2>/dev/null && patch=$n
     fi
 
-    # LINUX_VERSION-6.12 = .94  ->  6.12.94
-    kernel=$(awk -F' = ' '/^LINUX_VERSION-[0-9]/ { split($1, a, "-"); print a[2] $2; exit }' \
-        include/kernel-version.mk 2>/dev/null)
-    [ -n "$kernel" ] || kernel=$(sed -n 's/^# KERNEL_VERSION:=//p' include/version.mk 2>/dev/null | head -1)
-    [ -n "$kernel" ] || { echo -e "${BOLD_RED}VERSION: kernel version not found${RESET}"; return 0; }
+    # The patch level is NOT in include/kernel-version.mk (that file only includes
+    # the per-version detail file) and NOT in include/version.mk (the
+    # KERNEL_VERSION there is a placeholder replaced only by the SDK). It lives
+    # in target/linux/generic/kernel-<KERNEL_PATCHVER>:
+    #
+    #   target/linux/qualcommax/Makefile   KERNEL_PATCHVER:=6.12
+    #   target/linux/generic/kernel-6.12   LINUX_VERSION-6.12 = .94
+    #
+    # so read the subtarget's KERNEL_PATCHVER from .config's board, then the
+    # matching detail file. Anything else silently yields the placeholder "x".
+    local board patchver
+    board=$(sed -n 's/^CONFIG_TARGET_BOARD="\(.*\)"$/\1/p' .config 2>/dev/null | head -1)
+    [ -n "$board" ] || board=qualcommax
+    kernel=""
+    if [ -f "target/linux/$board/Makefile" ]; then
+        patchver=$(sed -n 's/^KERNEL_PATCHVER:=//p' "target/linux/$board/Makefile" 2>/dev/null |
+            tr -d '[:space:]' | head -1)
+    fi
+    # No generic/Makefile fallback and no scan across kernel-*: both can pick a
+    # series this target does not build (a 6.6 detail file is present in the
+    # tree too), and a plausible-but-wrong kernel in the version string is
+    # exactly the drift this feature exists to prevent.
+    if [ -n "${patchver:-}" ] && [ -f "target/linux/generic/kernel-$patchver" ]; then
+        kernel=$(awk -v pv="$patchver" -F' = ' '$1 == "LINUX_VERSION-" pv { print pv $2; exit }' \
+            "target/linux/generic/kernel-$patchver" 2>/dev/null)
+    fi
+    # Shape check: "6.12.94". Rejects the "x" placeholder and anything empty.
+    case "$kernel" in
+    '' | *[!0-9.]* | *.*.*.*)
+        echo -e "${BOLD_RED}VERSION: kernel patch level not found (board=${board:-?} patchver=${patchver:-?})${RESET}"
+        return 1
+        ;;
+    esac
 
     ver="${maj}.${min}.${patch}"
     sed -i -e '/^CONFIG_VERSION_DIST=/d' \
@@ -809,6 +842,16 @@ ci_check_packages() {
     fi
     if grep -q 'install-repo-key.sh' "$repo_root/.github/workflows/build.yml" 2>/dev/null; then
         missing="$missing workflow(pre-clone-key-step)"
+    fi
+    # Kernel patch level comes from target/linux/generic/kernel-<PATCHVER>,
+    # resolved through CONFIG_TARGET_BOARD. The old include/version.mk fallback
+    # returned its "x" placeholder and shipped "25.12(x)".
+    awk '/^apply_version\(\)/,/^}/' "$repo_root/aw1000_byte.sh" 2>/dev/null |
+        grep -q 'target/linux/generic/kernel-' || \
+        missing="$missing version(kernel-detail-file)"
+    if awk '/^apply_version\(\)/,/^}/' "$repo_root/aw1000_byte.sh" 2>/dev/null |
+        grep -q 'KERNEL_VERSION:='; then
+        missing="$missing version(version.mk-placeholder)"
     fi
     # Every local image the README references must exist, or the page renders a
     # broken image on GitHub. Remote (http) references are skipped.

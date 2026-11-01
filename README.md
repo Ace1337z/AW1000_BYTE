@@ -180,6 +180,7 @@ Complete history, newest first. Every entry names the symptom it cures.
 **Build / CI**
 | Change | Detail |
 |---|---|
+| **Version read the SDK placeholder** | `apply_version()` looked for the kernel patch level in `include/kernel-version.mk` (it only includes the detail file) and then in `include/version.mk`, whose `KERNEL_VERSION` is a placeholder substituted only by the SDK. The fallback therefore returned `x` and the image would have reported `BYTE 25.12(x) <patch>`. It now reads `KERNEL_PATCHVER` from `target/linux/<board>/Makefile` and the patch level from `target/linux/generic/kernel-<ver>`, rejects anything that is not `N.N.N`, and aborts the build instead of shipping a wrong string. No generic-Makefile fallback and no scan across `kernel-*`: a 6.6 detail file is present in the same tree, so a guess can pick the wrong series |
 | **Cold-cache build failure** | The `Install opkg repo signing key` step ran *before* `aw1000_byte.sh` cloned ImmortalWrt, so `cp` into `builder/immortalwrt/` failed — `cp: cannot create regular file 'builder/immortalwrt/key-build': No such file or directory` — on every run whose cache restore did not happen to pre-create that directory (i.e. every cold cache). The step exited 1 and the run went red before compiling anything: run 41358300178 died exactly there. The key copy now happens inside `aw1000_byte.sh` right after the clone (`install_repo_key()`), where the tree is guaranteed to exist; the workflow step and `.github/install-repo-key.sh` are removed, and CI asserts the call stays after the clone |
 | **`version.env` triggers a build** | It is a build input but was missing from the workflow `paths` filter, so changing `FW_MAJOR`/`FW_BASE` alone produced no image at all. Added |
 | **Image filename matches Status** | `rename_output()` used to take the version tag from the static `preset`, so the second commit would have shipped `BYTE 25.12(6.12.94) 1.2.2` in Status inside a file named `...-1.2.1-...`. It now reads `CONFIG_VERSION_CODE` from the generated `.config` (preset only as fallback), so the version in the filename, the version in Status and the commit count are the same number |
@@ -312,6 +313,13 @@ Rendered from `CONFIG_VERSION_DIST`, `CONFIG_VERSION_NUMBER` and
 `DISTRIB_DESCRIPTION='%D %V %C'` and LuCI prints that string verbatim.
 
 - `version.env` holds `FW_MAJOR`, `FW_MINOR`, `FW_BASE`, `FW_PATCH_FALLBACK`.
+- The kernel part is `KERNEL_PATCHVER` of the target (`target/linux/<board>/Makefile`,
+  `6.12` here) resolved to the patch level in
+  `target/linux/generic/kernel-6.12` (`LINUX_VERSION-6.12 = .94`). Neither
+  `include/kernel-version.mk` nor `include/version.mk` carries it — the latter
+  holds the SDK placeholder `KERNEL_VERSION:=x`, so reading it would have
+  shipped `25.12(x)`. Detection is fatal on failure: a plausible-but-wrong kernel in
+  the version string is worse than a failed build.
 - The patch is `git rev-list --count FW_BASE..HEAD`, so **no manual bump**: the
   commit that adds a change is the version that ships with it (first commit →
   `1.2.1`, next → `1.2.2`). CI checks out with `fetch-depth: 0` for this.
