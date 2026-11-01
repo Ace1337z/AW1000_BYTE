@@ -1,6 +1,15 @@
 config main 'main'
+	# TTL / Hop Limit rewriting on modem egress, owned by
+	# luci-app-qmodem-ttlfw4 (LuCI: Network -> Modem -> TTL Configuration).
+	#
+	# enable 1 -> the app writes the nft rule AND parks NSS/ECM, because ECM
+	#             forwards established flows in hardware, past netfilter, where
+	#             the TTL rewrite lives. Carrier tethering detection wins.
+	# enable 0 -> the app removes its rule and starts ECM again, so NSS offload
+	#             and the dashboard's NSS widget work.
+	#
+	# ttl is a single value for both IPv4 TTL and IPv6 Hop Limit, range 1-255.
+	# 64 matches a Linux host; 128 matches Windows. Any value the carrier
+	# expects can be typed here or in LuCI.
 	option enable '1'
 	option ttl '64'
-	option ttl4 '64'
-	option hl6 '64'
-	option meta_mode 'wwan_only'

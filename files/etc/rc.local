@@ -12,18 +12,15 @@ if [ -x /etc/init.d/qmodem-iface-heal ]; then
 		/etc/init.d/qmodem-iface-heal start 2>/dev/null
 fi
 
-# TTL 64 on modem egress must be active on every boot, including after a
-# sysupgrade that preserved /etc/config (uci-defaults only runs once).
-# ECM is stopped first: it bypasses netfilter and would leak the real TTL.
-if [ -x /etc/init.d/qca-nss-ecm ]; then
-	/etc/init.d/qca-nss-ecm enabled >/dev/null 2>&1 && {
-		/etc/init.d/qca-nss-ecm disable 2>/dev/null
-	}
-fi
-if [ -x /etc/init.d/byte-ttl ]; then
-	/etc/init.d/byte-ttl enable 2>/dev/null
-	/etc/init.d/byte-ttl running >/dev/null 2>&1 || \
-		/etc/init.d/byte-ttl start 2>/dev/null
+# TTL/HopLimit is owned by luci-app-qmodem-ttlfw4 (uci qmodem_ttl), whose
+# service this image overrides. It parks qca-nss-ecm (installed or not) and
+# drives fw4's flowtable from the same switch: TTL on -> flow_offloading=1,
+# TTL off -> 0. Do not start ECM or toggle flow_offloading from here - the
+# service owns both, and a second writer is how they end up disagreeing.
+if [ -x /etc/init.d/qmodem_ttl ]; then
+	/etc/init.d/qmodem_ttl enable 2>/dev/null
+	/etc/init.d/qmodem_ttl running >/dev/null 2>&1 || \
+		/etc/init.d/qmodem_ttl start 2>/dev/null
 fi
 
 # RPS/XPS across all cores for the modem interfaces; also re-runs on netifd

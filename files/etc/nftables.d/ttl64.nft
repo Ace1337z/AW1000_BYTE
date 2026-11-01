@@ -1,7 +1,0 @@
-chain mangle_forward {
-    type filter hook forward priority mangle; policy accept;
-    oifname "wwan0_1" ip ttl set 64 comment "Reset TTL on modem egress (IPv4)"
-    oifname "wwan0_1" ip6 hoplimit set 64 comment "Reset HopLimit on modem egress (IPv6)"
-    oifname "wwan0" ip ttl set 64 comment "Reset TTL on modem parent egress (IPv4)"
-    oifname "wwan0" ip6 hoplimit set 64 comment "Reset HopLimit on modem parent egress (IPv6)"
-}

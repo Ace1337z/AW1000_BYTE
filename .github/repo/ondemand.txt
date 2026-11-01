@@ -5,8 +5,8 @@
 #   - size. OpenClash alone pulls ruby, haproxy and dnsmasq-full; the trimmed
 #     image is 43 MB and these would roughly double it.
 #   - TTL. OpenClash installs its own redirect rules that can bypass the
-#     nftables chain byte-ttl owns, and TTL 64 is the point of this firmware.
-#     Installing it is a deliberate user choice, not a default.
+#     nftables chain luci-app-qmodem-ttlfw4 owns, and a correct TTL on the
+#     wire is the point of this firmware. Installing it is a user choice.
 #
 # Dependencies are listed explicitly because the repo is filtered against the
 # image manifest: these packages are absent from it, so opkg would not pull
@@ -100,3 +100,10 @@ kmod-tun
 unzip
 coreutils-nohup
 ucode
+# --- Tailscale ---
+# Out of the image: the daemon idles at ~13 MB RSS for a feature most units
+# never configure, and the binary is ~10 MB. /etc/init.d/byte-tailscale-gate
+# ships regardless, so an on-demand install still starts tailscaled only once
+# credentials exist.
+tailscale
+luci-app-tailscale-community

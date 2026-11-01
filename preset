@@ -483,9 +483,9 @@ CONFIG_TARGET_INIT_ENV=""
 CONFIG_TARGET_INIT_CMD="/sbin/init"
 CONFIG_TARGET_INIT_SUPPRESS_STDERR=y
 CONFIG_VERSIONOPT=y
-CONFIG_VERSION_DIST="BYTE by ACE"
-CONFIG_VERSION_NUMBER="25.12"
-CONFIG_VERSION_CODE="FINAL"
+CONFIG_VERSION_DIST="BYTE"
+CONFIG_VERSION_NUMBER="25.12(6.12.94)"
+CONFIG_VERSION_CODE="1.2.1"
 CONFIG_VERSION_REPO="https://raw.githubusercontent.com/Ace1337z/AW1000_BYTE/repo"
 CONFIG_VERSION_MANUFACTURER="BYTE by ACE"
 CONFIG_VERSION_MANUFACTURER_URL="https://github.com/Ace1337z/AW1000_BYTE"
@@ -500,7 +500,7 @@ CONFIG_FEED_telephony=y
 CONFIG_FEED_video=y
 CONFIG_FEED_qmodem=y
 CONFIG_FEED_passwall_luci=y
-CONFIG_FEED_vantage=y
+# CONFIG_FEED_vantage is not set
 CONFIG_FEED_fxs=y
 CONFIG_FEED_nss=y
 
@@ -2692,13 +2692,15 @@ CONFIG_PACKAGE_kmod-phy-aquantia=y
 CONFIG_PACKAGE_kmod-qca-nss-dp=y
 CONFIG_PACKAGE_kmod-qca-nss-drv=y
 # CONFIG_PACKAGE_kmod-qca-nss-ecm is not set
-# ECM 12.5.2024.11.06 does not compile against kernel 6.12.112:
-#   frontends/cmn/ecm_bond_notifier.c: invalid use of undefined type
-#   'struct bond_cb' / implicit declaration of 'bond_register_cb'
-# The reference AW1000 runs kernel 6.12.74 where this builds, but its ECM
-# never actually started either (broken init script), and ECM offload
-# bypasses netfilter so it would defeat the TTL rewrite. NSS WiFi/bridge
-# acceleration comes from qca-nss-drv and does not need ECM.
+# ECM is NOT shipped. Decision (2026-11-02): leave the NSS widget path exactly
+# as XT-Martinez/aw1000-feed ships it - the 48_nss widget stays dormant, and no
+# build depends on ECM compiling. That removes the kernel-version straitjacket:
+# ECM 12.5.2024.11.06 fails on 6.12.112 in ecm_bond_notifier.c ('struct
+# bond_cb'), so enabling it would pin the whole image to an older kernel for a
+# feature that also bypasses netfilter and defeats the TTL rewrite. NSS data
+# path acceleration (qca-nss-drv, rmnet raw-IP binding, NSS WiFi) stays on;
+# only ECM - the flow-offload engine - is out. /usr/bin/nss-offload and
+# luci-app-qmodem-ttlfw4 are written to tolerate its absence.
 CONFIG_PACKAGE_nss-firmware=y
 CONFIG_NSS_FIRMWARE_VERSION_12_5=y
 CONFIG_NSS_MEM_PROFILE_HIGH=y
@@ -5154,7 +5156,7 @@ CONFIG_PACKAGE_luci-compat=y
 CONFIG_PACKAGE_luci-lua-runtime=y
 CONFIG_PACKAGE_luci-mod-admin-full=y
 # CONFIG_PACKAGE_luci-mod-battstatus is not set
-# CONFIG_PACKAGE_luci-mod-dashboard is not set
+CONFIG_PACKAGE_luci-mod-dashboard=y
 # CONFIG_PACKAGE_luci-mod-dsl is not set
 CONFIG_PACKAGE_luci-mod-network=y
 # CONFIG_PACKAGE_luci-mod-rpc is not set
@@ -5258,6 +5260,7 @@ CONFIG_PACKAGE_luci-app-fxs=y
 # CONFIG_PACKAGE_luci-app-n2n is not set
 # CONFIG_PACKAGE_luci-app-natmap is not set
 # CONFIG_PACKAGE_luci-app-netdata is not set
+CONFIG_PACKAGE_luci-app-netstat=y
 # CONFIG_PACKAGE_luci-app-nextdns is not set
 # CONFIG_PACKAGE_luci-app-nfs is not set
 # CONFIG_PACKAGE_luci-app-nft-qos is not set
@@ -5344,16 +5347,20 @@ CONFIG_PACKAGE_luci-app-rclone_INCLUDE_rclone-ng=y
 # CONFIG_PACKAGE_luci-app-smartdns is not set
 # CONFIG_PACKAGE_luci-app-sms-tool-js is not set
 CONFIG_PACKAGE_luci-app-qmodem=y
+# CONFIG_PACKAGE_luci-app-qmodem-next is not set
 CONFIG_PACKAGE_luci-app-qmodem-sms=y
+CONFIG_PACKAGE_luci-app-qmodem-ttlfw4=y
+# CONFIG_PACKAGE_luci-app-qmodem-ttl is not set
 CONFIG_PACKAGE_sms-forwarder=y
 CONFIG_PACKAGE_sms-tool_q=y
 CONFIG_PACKAGE_ubus-at-daemon=y
 # CONFIG_PACKAGE_luci-app-nft-ttl is not set
-# TTL is handled by our own /etc/init.d/byte-ttl: the vendor package
-# rewrites /etc/nftables.d/ttl64.nft with a postrouting/iifname rule that
-# is not the right hook for this.
+# TTL is handled by luci-app-qmodem-ttlfw4 (uci qmodem_ttl), which also parks
+# qca-nss-ecm while the rewrite is active. luci-app-nft-ttl is a different app
+# with its own include and no NSS handling, so it stays out.
 CONFIG_PACKAGE_luci-app-modeminfo=y
 CONFIG_PACKAGE_luci-app-aw1k-led=y
+CONFIG_PACKAGE_luci-app-byte=y
 # CONFIG_PACKAGE_luci-app-snmpd is not set
 # CONFIG_PACKAGE_luci-app-softether is not set
 # CONFIG_PACKAGE_luci-app-softethervpn is not set
@@ -5408,8 +5415,8 @@ CONFIG_PACKAGE_luci-theme-footstrap=y
 # CONFIG_PACKAGE_luci-theme-material is not set
 # CONFIG_PACKAGE_luci-theme-openwrt is not set
 # CONFIG_PACKAGE_luci-theme-openwrt-2020 is not set
-CONFIG_PACKAGE_luci-theme-vantage=y
-CONFIG_PACKAGE_luci-app-vantage=y
+# CONFIG_PACKAGE_luci-theme-vantage is not set
+# CONFIG_PACKAGE_luci-app-vantage is not set
 # end of 4. Themes
 
 #
@@ -5656,6 +5663,8 @@ CONFIG_PACKAGE_luci-i18n-ttyd-zh-cn=y
 # CONFIG_PACKAGE_luci-i18n-vnstat2-vi is not set
 # CONFIG_PACKAGE_luci-i18n-vnstat2-yua is not set
 CONFIG_PACKAGE_luci-i18n-vnstat2-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-netstat-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-qmodem-ttlfw4-zh-cn=y
 # CONFIG_PACKAGE_luci-i18n-vnstat2-zh-tw is not set
 # end of LuCI
 
@@ -6376,8 +6385,8 @@ CONFIG_PACKAGE_openssh-sftp-server=y
 # CONFIG_PACKAGE_softethervpn5-server is not set
 # CONFIG_PACKAGE_sstp-client is not set
 # CONFIG_PACKAGE_strongswan is not set
-CONFIG_PACKAGE_luci-app-tailscale-community=y
-CONFIG_PACKAGE_tailscale=y
+# CONFIG_PACKAGE_luci-app-tailscale-community is not set
+# CONFIG_PACKAGE_tailscale is not set
 # CONFIG_PACKAGE_tinc is not set
 # CONFIG_PACKAGE_tinyfecvpn is not set
 # CONFIG_PACKAGE_uanytun is not set

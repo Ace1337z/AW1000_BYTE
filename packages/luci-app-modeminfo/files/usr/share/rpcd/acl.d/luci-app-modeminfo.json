@@ -1,0 +1,15 @@
+{
+	"luci-app-modeminfo": {
+		"description": "Read the modem snapshot and change the AT port / refresh interval",
+		"read": {
+			"ubus": {
+				"modeminfo": [ "status", "ports" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"modeminfo": [ "sample", "set_port", "set_interval" ]
+			}
+		}
+	}
+}

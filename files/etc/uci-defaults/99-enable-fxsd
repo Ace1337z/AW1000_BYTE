@@ -50,6 +50,10 @@ fi
 # the package service would start tailscaled (13 MB private RSS) even with no
 # credentials configured. The gate starts it only when a state file with real
 # credentials exists, and still lets `tailscale up` / LuCI start it directly.
+# Tailscale is NOT in the image any more (on-demand: `opkg install tailscale
+# luci-app-tailscale-community`). The gate ships anyway so that an install
+# still starts tailscaled only when credentials exist; with no package present
+# the gate is a no-op, which is why it is enabled unconditionally.
 if [ -x /etc/init.d/byte-tailscale-gate ]; then
 	/etc/init.d/byte-tailscale-gate enable 2>/dev/null
 	[ -x /etc/init.d/tailscale ] && /etc/init.d/tailscale disable 2>/dev/null
@@ -68,11 +72,11 @@ if [ -x /etc/init.d/qmodem-iface-heal ]; then
 	/etc/init.d/qmodem-iface-heal start 2>/dev/null
 fi
 
-# TTL 64 on the modem uplink is the point of the image; make sure the service
-# is enabled even when /etc/config survived a sysupgrade untouched.
-if [ -x /etc/init.d/byte-ttl ]; then
-	/etc/init.d/byte-ttl enable 2>/dev/null
-	/etc/init.d/byte-ttl start 2>/dev/null
+# TTL/HopLimit on the modem uplink is the point of the image; enable the app
+# that owns it even when /etc/config survived a sysupgrade untouched.
+if [ -x /etc/init.d/qmodem_ttl ]; then
+	/etc/init.d/qmodem_ttl enable 2>/dev/null
+	/etc/init.d/qmodem_ttl start 2>/dev/null
 fi
 
 # Spread modem packet processing across all four cores (RPS/XPS on wwan*).
@@ -81,14 +85,10 @@ if [ -x /etc/init.d/byte-affinity ]; then
 	/etc/init.d/byte-affinity start 2>/dev/null
 fi
 
-# NSS/ECM flow offload bypasses netfilter, so offloaded flows would keep their
-# original TTL and defeat the rewrite above. Keep it installed (so
-# /usr/bin/nss-offload can turn it on) but off by default on first boot.
-if [ -x /etc/init.d/qca-nss-ecm ]; then
-	/etc/init.d/qca-nss-ecm stop 2>/dev/null
-	/etc/init.d/qca-nss-ecm disable 2>/dev/null
-fi
-
+# NSS/ECM is NOT parked here any more: luci-app-qmodem-ttlfw4 owns that
+# decision. With TTL rewriting enabled (the shipped default) it stops ECM at
+# start; turning TTL off in LuCI starts ECM again so NSS offload works. Doing
+# both here and there produced a race whose loser was the TTL rule.
 # Ensure the modem dial interface remains the default route (qmodem can
 # leave network.wan.defaultroute unset on a fresh UCI).
 if uci -q get network.wan >/dev/null 2>&1; then

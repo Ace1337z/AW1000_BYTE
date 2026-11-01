@@ -6,7 +6,19 @@ config interface 'loopback'
 
 config globals 'globals'
 	option ula_prefix 'fdb0:d40a:1782::/48'
-	option packet_steering '0'
+	# Packet steering: netifd's packet_steering (START=25) pins each netdev's
+	# NAPI threads and RX queues to CPUs so that one core does not take every
+	# interrupt while the other three idle. "1" = one CPU per queue/NAPI
+	# thread, spread by load; "2" would put every queue on all CPUs, which
+	# avoids the per-queue bottleneck but loses the cache locality that makes
+	# NSS/WiFi forwarding cheap. The modem's own xhci IRQ is not movable (the
+	# kernel collapses its affinity back to one CPU), so byte-affinity keeps
+	# steering the *processing* of wwan traffic with RPS on top of this.
+	# steering_flows must match net.core.rps_sock_flow_entries (set to 32768
+	# in sysctl.conf, and re-asserted by byte-affinity) or RFS tracking is
+	# silently clamped.
+	option packet_steering '1'
+	option steering_flows '32768'
 
 config device
 	option name 'br-lan'

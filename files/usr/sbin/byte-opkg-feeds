@@ -28,7 +28,7 @@ gen() {
 	# Only feeds our repo actually publishes. Empty feeds (routing, telephony,
 	# video) are deliberately omitted: jsDelivr 404s a directory with no files,
 	# and opkg reports that as a failed feed.
-	for f in base dotycat fxs luci nikki nss packages passwall_luci qmodem vantage; do
+	for f in base dotycat fxs luci nikki nss packages passwall_luci qmodem; do
 		echo "src/gz byte_by_ace_$f $KODS/packages/$A/$f"
 	done
 

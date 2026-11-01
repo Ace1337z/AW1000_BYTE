@@ -3,9 +3,12 @@
 #
 # Why this exists:
 #   NSS hardware offload forwards established flows entirely in the NSS engine,
-#   which BYPASSES netfilter. The TTL/HopLimit rewrite (luci-app-nft-ttl) is a
-#   netfilter rule, so while offload is active the TTL rewrite does NOT apply to
-#   offloaded (forwarded) traffic. NSS also has no in-hardware TTL support.
+#   which BYPASSES netfilter. The TTL/HopLimit rewrite (luci-app-qmodem-ttlfw4)
+#   is a netfilter rule, so while offload is active the TTL rewrite does NOT
+#   apply to offloaded (forwarded) traffic. NSS has no in-hardware TTL support.
+#
+# Prefer LuCI: Network -> Modem -> TTL Configuration toggles TTL on/off and
+# starts or stops qca-nss-ecm for you. This script is the shell equivalent.
 #
 #   This device needs the TTL rewrite (tethering / carrier detection), so NSS
 #   offload is OFF by default. Turn it on only when you prefer raw speed over a

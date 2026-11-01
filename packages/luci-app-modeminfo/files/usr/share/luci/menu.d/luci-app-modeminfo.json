@@ -1,0 +1,13 @@
+{
+	"admin/modem/modeminfo": {
+		"title": "Modem info",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "modeminfo/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-modeminfo" ]
+		}
+	}
+}

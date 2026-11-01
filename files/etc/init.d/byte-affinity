@@ -19,7 +19,9 @@ STOP=12
 USE_PROCD=1
 
 RPS_MASK=0f          # all four cores
-RPS_FLOW=4096
+# Must be >= network.@globals[0].steering_flows, otherwise RFS is clamped and
+# the flow table is smaller than the per-queue tables packet_steering writes.
+RPS_FLOW=32768
 XPS_PROBE_DONE=/var/run/byte-affinity.xps-probed
 
 apply() {

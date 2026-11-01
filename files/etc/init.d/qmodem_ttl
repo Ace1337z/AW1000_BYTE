@@ -1,0 +1,173 @@
+#!/bin/sh /etc/rc.common
+# TTL / Hop Limit rewrite for the modem uplink - BYTE by ACE override.
+#
+# Same UCI schema, same LuCI page and the same ECM parking as QModem's
+# luci-app-qmodem-ttlfw4, but the rule is written on the OUTPUT interface in
+# the postrouting hook instead of on `iifname br-lan`.
+#
+# Why the override exists:
+#   Upstream writes
+#       iifname "br-lan" ip ttl set <ttl>          (postrouting)
+#   which only matches traffic that ARRIVED from the LAN. Packets the router
+#   itself originates (dnsmasq, NTP, the proxy stack, curl, the modem's own
+#   health checks) leave with the host TTL and are not rewritten - a carrier
+#   that fingerprints tethering by watching router-originated flows sees the
+#   real value. `oifname "wwan*"` in the same postrouting hook matches both
+#   forwarded and locally-originated traffic leaving through the modem, which
+#   is the set we actually want, and it still never touches LAN or loopback.
+#
+# Why ECM is stopped while this is on: ECM forwards established flows inside
+# the NSS engine, past netfilter, so an offloaded flow keeps the client's
+# original TTL. Turning TTL on parks ECM; turning TTL off (enable='0') starts
+# ECM again so NSS offload works. The two are mutually exclusive on this SoC.
+START=95
+STOP=13
+USE_PROCD=1
+. /lib/functions.sh
+NFT=/usr/sbin/nft
+NFT_DIR=/etc/nftables.d
+NFT_FILE="$NFT_DIR/90-byte-ttl.nft"
+# Stock luci-app-qmodem-ttlfw4 writes this include instead of ours. It is never
+# created now that our /etc/init.d/qmodem_ttl replaces the package script, but
+# it survives a keep-config sysupgrade from an older image - remove it, or the
+# old `iifname br-lan` rule keeps running next to ours.
+NFT_LEGACY="$NFT_DIR/99-reset-ttl-from-br-lan.nft"
+ECM_INIT=/etc/init.d/qca-nss-ecm
+
+# modem_ifs: every wwan-ish data interface present right now. qmodem creates
+# wwan0/wwan0_1 after boot and again on every redial, so the file is rewritten
+# on each start/reload rather than baked once.
+modem_ifs() {
+	local i n out=""
+	for i in /sys/class/net/*; do
+		n=${i##*/}
+		case "$n" in
+		wwan* | rmnet*) out="$out $n" ;;
+		esac
+	done
+	# Interfaces that do not exist yet still need a rule for the first packets
+	# after they appear; nft rejects a rule for a missing interface only in
+	# `oifname { ... }` sets, so use one rule per name and keep the two known
+	# names in the list.
+	case " $out " in *" wwan0 "*) ;; *) out="$out wwan0" ;; esac
+	case " $out " in *" wwan0_1 "*) ;; *) out="$out wwan0_1" ;; esac
+	echo "$out"
+}
+
+write_rules() {
+	local ttl="$1" i
+	mkdir -p "$NFT_DIR"
+	{
+		# Unique chain name on purpose: fw4 generates its own
+		# `mangle_postrouting` chain, and a second definition with that name
+		# makes the whole firewall reload fail - which would silently leave
+		# TTL unrewritten. A separate chain may share the hook safely.
+		echo "chain byte_ttl {"
+		echo "    type filter hook postrouting priority mangle; policy accept;"
+		# oifname matches forwarded *and* locally-originated egress; the hook
+		# priority (mangle) is before the conntrack-confirm work that ECM
+		# would otherwise accelerate past.
+		for i in $(modem_ifs); do
+			echo "    oifname \"$i\" ip ttl set $ttl comment \"BYTE TTL $ttl on $i\""
+			echo "    oifname \"$i\" ip6 hoplimit set $ttl comment \"BYTE HL $ttl on $i\""
+		done
+		echo "}"
+	} >"$NFT_FILE"
+}
+
+park_accel() {
+	# Software fast paths and NSS ECM both skip netfilter; with TTL rewriting
+	# enabled either one would leak the original value on accelerated flows.
+	for m in shortcut_fe_cm fast_classifier; do
+		lsmod 2>/dev/null | grep -q "^${m} " && rmmod "$m" 2>/dev/null
+	done
+	[ -x "$ECM_INIT" ] && {
+		"$ECM_INIT" stop 2>/dev/null
+		"$ECM_INIT" disable 2>/dev/null
+	}
+}
+
+# offload <0|1> - fw4 flowtable follows the TTL switch, per the requested
+# policy: TTL on -> flow_offloading=1, TTL off -> flow_offloading=0.
+#
+# WARNING, stated here so nobody re-discovers it in the field: the software
+# flowtable (and any hardware offload) hands established flows to the data
+# path *after* the first packet, so those packets never reach the postrouting
+# mangle chain and keep the sender's own TTL. In practice:
+#   - clients that already send TTL 64 (phones, Linux, most IoT) look correct
+#     on the wire, because nothing rewrites or decrements their TTL;
+#   - clients that send 128 (Windows) or 255 leak that value for the life of
+#     the offloaded flow.
+# The first packet of every flow is still rewritten, and router-originated
+# traffic has no offloaded flow, so it is always rewritten.
+# flow_offloading_hw stays 0: nss-dp does not implement it, so a `1` there is
+# accepted by fw4 and then silently unused.
+offload() {
+	local v="$1"
+	uci -q get firewall.@defaults[0] >/dev/null 2>&1 || return 0
+	[ "$(uci -q get firewall.@defaults[0].flow_offloading)" = "$v" ] &&
+		[ "$(uci -q get firewall.@defaults[0].flow_offloading_hw)" = "0" ] &&
+		return 0
+	uci -q set firewall.@defaults[0].flow_offloading="$v"
+	uci -q set firewall.@defaults[0].flow_offloading_hw='0'
+	uci -q commit firewall
+	logger -t qmodem_ttl "flow_offloading=$v (hw off)"
+}
+
+start_service() {
+	config_load qmodem_ttl
+	config_get enable main enable '1'
+	# Disabled must also mean "no stale include": fw4 slurps /etc/nftables.d/*.nft
+	# at every boot, so a file left behind by a previous enable would keep
+	# rewriting TTL after the user turned the switch off.
+	if [ "$enable" != "1" ]; then
+		rm -f "$NFT_FILE" "$NFT_LEGACY"
+		offload 0
+		logger -t qmodem_ttl "disabled, include removed, flow_offloading=0"
+		/etc/init.d/firewall reload 2>/dev/null || true
+		return 0
+	fi
+	config_get ttl main ttl '64'
+	case "$ttl" in
+	'' | *[!0-9]*) logger -t qmodem_ttl "invalid ttl '$ttl', using 64"; ttl=64 ;;
+	esac
+	# The LuCI form allows 1-255; clamp here too so a stray 0 or 999 cannot
+	# produce a rule nft refuses (which would silently leave TTL unmodified).
+	[ "$ttl" -ge 1 ] 2>/dev/null || ttl=1
+	[ "$ttl" -le 255 ] 2>/dev/null || ttl=255
+	logger -t qmodem_ttl "TTL/HopLimit $ttl on modem egress (forwarded + router-originated); NSS/ECM parked"
+	park_accel
+	offload 1
+	rm -f "$NFT_LEGACY"
+	write_rules "$ttl"
+	# The file is a chain fragment for fw4's own table, so it cannot be loaded
+	# with a standalone `nft -f` (no table context). fw4 is the loader.
+	/etc/init.d/firewall reload 2>/dev/null || /etc/init.d/firewall restart 2>/dev/null
+	if $NFT list chain inet fw4 byte_ttl >/dev/null 2>&1; then
+		logger -t qmodem_ttl "rule active (fw4 chain byte_ttl)"
+	else
+		logger -t qmodem_ttl "ERROR: fw4 did not load $NFT_FILE - TTL not rewritten"
+	fi
+}
+
+stop_service() {
+	rm -f "$NFT_FILE" "$NFT_LEGACY"
+	logger -t qmodem_ttl "TTL rewrite off"
+	# TTL off -> flow_offloading=0, per policy. ECM is released back so NSS
+	# acceleration can run; starting it is a no-op when the package is not
+	# installed, which is the shipped configuration.
+	offload 0
+	[ -x "$ECM_INIT" ] && {
+		"$ECM_INIT" enable 2>/dev/null
+		"$ECM_INIT" start 2>/dev/null
+	}
+	/etc/init.d/firewall reload 2>/dev/null
+}
+
+service_triggers() {
+	procd_add_reload_trigger "qmodem_ttl"
+}
+
+reload_service() {
+	start_service
+}

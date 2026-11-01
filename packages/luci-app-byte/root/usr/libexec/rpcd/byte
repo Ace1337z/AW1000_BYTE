@@ -1,0 +1,211 @@
+#!/bin/sh
+# rpcd backend for luci-app-byte.
+#
+# Everything the BYTE page can change is funnelled through here so the ACL can
+# stay narrow: the browser never gets a shell, only these verbs:
+#   status            read-only state of AdGuard Home, the DNS chain and the box
+#   setup             run the vendored agh-passwall2 installer (settings only)
+#   action {name}     start|stop|restart|autostart_on|autostart_off
+#   log {lines}       tail of the last setup run
+#
+# Contract: rpcd calls us with no argument to list methods, or with
+# "call <method>" and a JSON object on stdin, expecting a JSON object back.
+
+. /usr/share/libubox/jshn.sh
+
+AGH_INIT=/etc/init.d/adguardhome
+AGH_YAML=/etc/adguardhome/adguardhome.yaml
+STAGE=/usr/libexec/luci-app-byte/agh-passwall2.sh
+LOG=/tmp/luci-app-byte-setup.log
+
+list_methods() {
+	cat <<'EOF'
+{
+	"status": { },
+	"setup": { },
+	"action": { "name": "string" },
+	"log": { "lines": "integer" }
+}
+EOF
+}
+
+# agh_yaml_get <section.awk-regex> - read a scalar out of AdGuardHome's YAML
+# without a YAML parser: only two flat keys are ever needed.
+agh_yaml_get() {
+	local key="$1"
+	awk -v key="$key" '
+		$0 ~ "^" key "[[:space:]]*:" {
+			sub("^" key "[[:space:]]*:[[:space:]]*", "")
+			gsub(/"/, "")
+			print
+			exit
+		}' "$AGH_YAML" 2>/dev/null
+}
+
+# agh_yaml_sect <section> <key>: for nested "http:" / "dns:" blocks.
+agh_yaml_sect() {
+	local sect="$1" key="$2"
+	awk -v sect="$sect" -v key="$key" '
+		$0 ~ "^" sect "[[:space:]]*:" { insec = 1; next }
+		insec && $0 ~ "^[^[:space:]]" { insec = 0 }
+		insec && $0 ~ "^[[:space:]]+" key "[[:space:]]*:" {
+			sub("^[[:space:]]+" key "[[:space:]]*:[[:space:]]*", "")
+			gsub(/"/, "")
+			print
+			exit
+		}' "$AGH_YAML" 2>/dev/null
+}
+
+wan_ip() {
+	ubus call network.interface.wan status 2>/dev/null |
+		jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null
+}
+
+do_status() {
+	local running=0 installed=0 enabled=0 ver="" up load memtot memavail memused
+	local dport= prefer= rdr= rp= aghweb= aghdns= feed= wan= wanup=0
+
+	# The AdGuardHome binary lives in /usr/bin or /usr/sbin depending on the
+	# package revision; check both before calling it missing.
+	for b in /usr/bin/AdGuardHome /usr/sbin/AdGuardHome "$(command -v AdGuardHome 2>/dev/null)"; do
+		[ -n "$b" ] && [ -x "$b" ] && { installed=1; ver=$("$b" --version 2>/dev/null | awk 'NR==1 { print $NF }'); break; }
+	done
+	pidof AdGuardHome >/dev/null 2>&1 && running=1
+	[ -x "$AGH_INIT" ] && "$AGH_INIT" enabled >/dev/null 2>&1 && enabled=1
+	aghweb=$(agh_yaml_sect http address)
+	aghdns=$(agh_yaml_sect dns port)
+
+	up=$(cut -d. -f1 /proc/uptime 2>/dev/null)
+	load=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)
+	memtot=$(awk '/^MemTotal:/ { print int($2/1024) }' /proc/meminfo 2>/dev/null)
+	memavail=$(awk '/^MemAvailable:/ { print int($2/1024) }' /proc/meminfo 2>/dev/null)
+	[ -n "$memtot" ] && [ -n "$memavail" ] && memused=$((memtot - memavail))
+
+	dport=$(uci -q get dhcp.@dnsmasq[0].port)
+	prefer=$(uci -q get network.@globals[0].packet_steering)
+	rdr=$(uci -q get passwall2.@global[0].dns_redirect)
+	rp=$(uci -q get passwall2.@global[0].remote_dns)
+	feed=$(grep -c 'byte_by_ace' /etc/opkg/distfeeds.conf 2>/dev/null)
+	wan=$(wan_ip)
+	[ -n "$wan" ] && wanup=1
+
+	json_init
+	json_add_object "system"
+	json_add_string "version" "$(cat /etc/byte-version 2>/dev/null)"
+	json_add_string "release" "$(. /etc/openwrt_release 2>/dev/null; printf '%s' "$DISTRIB_REVISION")"
+	json_add_string "kernel" "$(uname -r)"
+	json_add_string "model" "$(cat /tmp/sysinfo/model 2>/dev/null)"
+	json_add_int "uptime" "${up:-0}"
+	json_add_string "load" "${load:-?}"
+	json_add_int "mem_total" "${memtot:-0}"
+	json_add_int "mem_used" "${memused:-0}"
+	json_add_int "wan_up" "$wanup"
+	json_add_string "wan_ip" "${wan:-}"
+	json_add_int "repo_feeds" "${feed:-0}"
+	json_close_object
+
+	json_add_object "agh"
+	json_add_int "installed" "$installed"
+	json_add_int "running" "$running"
+	json_add_int "enabled" "$enabled"
+	json_add_string "version" "${ver:-}"
+	json_add_string "web" "${aghweb:-}"
+	json_add_string "dns_port" "${aghdns:-}"
+	json_close_object
+
+	json_add_object "dns"
+	json_add_string "dnsmasq_port" "${dport:-53}"
+	json_add_string "passwall_redirect" "${rdr:-}"
+	json_add_string "passwall_remote_dns" "${rp:-}"
+	json_add_string "steering" "${prefer:-0}"
+	json_close_object
+
+	json_add_boolean "setup_available" "$([ -x "$STAGE" ] && echo 1 || echo 0)"
+	json_add_boolean "log_available" "$([ -s "$LOG" ] && echo 1 || echo 0)"
+	json_dump
+}
+
+do_setup() {
+	local out rc
+	[ -x "$STAGE" ] || {
+		json_init
+		json_add_boolean "ok" 0
+		json_add_string "message" "installer missing"
+		json_dump
+		return
+	}
+	out=$("$STAGE" 2>&1)
+	rc=$?
+	printf '%s\n' "$out" >"$LOG"
+	json_init
+	[ "$rc" = 0 ] && json_add_boolean "ok" 1 || json_add_boolean "ok" 0
+	json_add_string "message" "$(printf '%s' "$out" | tail -n 12)"
+	json_dump
+}
+
+do_action() {
+	local name out rc=0
+	json_load "$(cat)"
+	json_get_var name name
+	case "$name" in
+	start)
+		out=$("$AGH_INIT" start 2>&1)
+		;;
+	stop)
+		out=$("$AGH_INIT" stop 2>&1)
+		;;
+	restart)
+		out=$("$AGH_INIT" restart 2>&1)
+		;;
+	autostart_on)
+		out=$("$AGH_INIT" enable 2>&1)
+		;;
+	autostart_off)
+		out=$("$AGH_INIT" disable 2>&1)
+		;;
+	*)
+		rc=1
+		out="unknown action: $name"
+		;;
+	esac
+	json_init
+	[ "$rc" = 0 ] && json_add_boolean "ok" 1 || json_add_boolean "ok" 0
+	json_add_string "message" "$out"
+	json_dump
+}
+
+do_log() {
+	local n=40
+	json_load "$(cat)"
+	json_get_var n lines
+	case "$n" in
+	'' | *[!0-9]*) n=40 ;;
+	esac
+	[ "$n" -gt 400 ] && n=400
+	json_init
+	json_add_string "log" "$(tail -n "$n" "$LOG" 2>/dev/null)"
+	json_dump
+}
+
+case "$1" in
+list)
+	list_methods
+	;;
+call)
+	shift
+	case "$1" in
+	status) do_status ;;
+	setup) do_setup ;;
+	action) do_action ;;
+	log) do_log ;;
+	*)
+		json_init
+		json_add_string "error" "unknown method"
+		json_dump
+		;;
+	esac
+	;;
+*)
+	list_methods
+	;;
+esac

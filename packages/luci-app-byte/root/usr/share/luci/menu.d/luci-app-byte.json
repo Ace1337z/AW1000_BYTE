@@ -1,0 +1,13 @@
+{
+	"admin/byte": {
+		"title": "BYTE",
+		"order": 5,
+		"action": {
+			"type": "view",
+			"path": "byte/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-byte" ]
+		}
+	}
+}

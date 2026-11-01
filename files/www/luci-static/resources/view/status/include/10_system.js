@@ -1,63 +1,129 @@
 'use strict';
 'require baseclass';
+'require fs';
 'require rpc';
+'require uci';
 
-var call = {
-	board: rpc.declare({ object: 'system', method: 'board' }),
-	info: rpc.declare({ object: 'system', method: 'info' }),
-	cpu: rpc.declare({ object: 'luci', method: 'getCPUUsage' }),
-	temp: rpc.declare({ object: 'luci', method: 'getTempInfo' }),
-	users: rpc.declare({ object: 'luci', method: 'getOnlineUsers' })
-};
+var callGetUnixtime = rpc.declare({
+	object: 'luci',
+	method: 'getUnixtime',
+	expect: { result: 0 }
+});
+
+var callLuciVersion = rpc.declare({
+	object: 'luci',
+	method: 'getVersion'
+});
+
+var callSystemBoard = rpc.declare({
+	object: 'system',
+	method: 'board'
+});
+
+var callSystemInfo = rpc.declare({
+	object: 'system',
+	method: 'info'
+});
+
+var callCPUBench = rpc.declare({
+	object: 'luci',
+	method: 'getCPUBench'
+});
+
+var callCPUInfo = rpc.declare({
+	object: 'luci',
+	method: 'getCPUInfo'
+});
+
+var callCPUUsage = rpc.declare({
+	object: 'luci',
+	method: 'getCPUUsage'
+});
+
+var callTempInfo = rpc.declare({
+	object: 'luci',
+	method: 'getTempInfo'
+});
 
 return baseclass.extend({
-	title: _(''),
-	load() {
+	title: _('System'),
+
+	load: function() {
 		return Promise.all([
-			L.resolveDefault(call.board(), {}),
-			L.resolveDefault(call.info(), {}),
-			L.resolveDefault(call.cpu(), {}),
-			L.resolveDefault(call.temp(), {}),
-			L.resolveDefault(call.users(), {})
+			L.resolveDefault(callSystemBoard(), {}),
+			L.resolveDefault(callSystemInfo(), {}),
+			L.resolveDefault(callCPUBench(), {}),
+			L.resolveDefault(callCPUInfo(), {}),
+			L.resolveDefault(callCPUUsage(), {}),
+			L.resolveDefault(callTempInfo(), {}),
+			L.resolveDefault(callLuciVersion(), { revision: _('unknown version'), branch: 'LuCI' }),
+			L.resolveDefault(callGetUnixtime(), 0),
+			uci.load('system')
 		]);
 	},
-	render([board, info, cpu, temp, users]) {
-		const date = new Date(info.localtime * 1000);
-		const datestr = '%04d-%02d-%02d %02d:%02d'.format(
-			date.getUTCFullYear(), date.getUTCMonth() + 1,
-			date.getUTCDate(), date.getUTCHours(), date.getUTCMinutes()
-		);
 
-		const cpuStr = cpu.cpuusage
-			? (cpu.cpuusage.includes('%') ? cpu.cpuusage : cpu.cpuusage + '%')
-			: '?';
-		const tempStr = temp.tempinfo?.match(/\d+/)?.[0]
-			? temp.tempinfo.match(/\d+/)[0] + '°C'
-			: '?';
+	render: function(data) {
+		var boardinfo   = data[0],
+		    systeminfo  = data[1],
+		    cpubench    = data[2],
+		    cpuinfo     = data[3],
+		    cpuusage    = data[4],
+		    tempinfo    = data[5],
+		    luciversion = data[6],
+		    unixtime    = data[7];
 
-		const cpuTempStr = `${tempStr} / ${cpuStr}`;
+		luciversion = luciversion.branch + ' ' + luciversion.revision;
 
-		const versionString = E('span', {}, [
-			(board.release?.distribution || '').toUpperCase() + ' ' +
-			(board.release?.version || '?') + '/' + (board.kernel || '?')
-		]);
+		var datestr = null;
 
-		const fields = [
-			[_('Firmware'), 'BYTE by ACE'],
-			[_('Version'), versionString],
-			[_('Time'), datestr],
-			[_('Uptime'), info.uptime ? '%t'.format(info.uptime) : '?'],
-			[_('Temp / Cpu'), cpuTempStr],
-			...(users?.onlineusers != null ? [[_('Online Users'), users.onlineusers.toString()]] : [])
+		if (unixtime) {
+			var date = new Date(unixtime * 1000),
+				zn = uci.get('system', '@system[0]', 'zonename')?.replaceAll(' ', '_') || 'UTC',
+				ts = uci.get('system', '@system[0]', 'clock_timestyle') || 0,
+				hc = uci.get('system', '@system[0]', 'clock_hourcycle') || 0;
+
+			datestr = new Intl.DateTimeFormat(undefined, {
+				dateStyle: 'medium',
+				timeStyle: (ts == 0) ? 'long' : 'full',
+				hourCycle: (hc == 0) ? undefined : hc,
+				timeZone: zn
+			}).format(date);
+		}
+
+		var fields = [
+			_('Hostname'),         boardinfo.hostname,
+			_('Model'),            boardinfo.model + cpubench.cpubench,
+			_('Architecture'),     cpuinfo.cpuinfo || boardinfo.system,
+			_('Target Platform'),  (L.isObject(boardinfo.release) ? boardinfo.release.target : ''),
+			/* BYTE: show only the firmware identity. Upstream appends
+			 * " / luci-<version>", which puts two versions in one row and
+			 * buries the string this image actually ships. The LuCI
+			 * version is still visible in System -> Software (luci-base). */
+			_('Firmware Version'), (L.isObject(boardinfo.release) ? boardinfo.release.description : ''),
+			_('Kernel Version'),   boardinfo.kernel,
+			_('Local Time'),       datestr,
+			_('Uptime'),           systeminfo.uptime ? '%t'.format(systeminfo.uptime) : null,
+			_('Load Average'),     Array.isArray(systeminfo.load) ? '%.2f, %.2f, %.2f'.format(
+				systeminfo.load[0] / 65535.0,
+				systeminfo.load[1] / 65535.0,
+				systeminfo.load[2] / 65535.0
+			) : null,
+			_('CPU usage (%)'),    cpuusage.cpuusage
 		];
 
-		const table = E('table', { class: 'table' });
-		fields.forEach(([label, value]) => {
-			table.appendChild(E('tr', { class: 'tr' }, [
-				E('td', { class: 'td left', width: '33%' }, [label]),
-				E('td', { class: 'td left' }, [value])
+		if (tempinfo.tempinfo) {
+			fields.splice(6, 0, _('Temperature'));
+			fields.splice(7, 0, tempinfo.tempinfo);
+		}
+
+		var table = E('table', { 'class': 'table' });
+
+		for (var i = 0; i < fields.length; i += 2) {
+			table.appendChild(E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td left', 'width': '33%' }, [ fields[i] ]),
+				E('td', { 'class': 'td left' }, [ (fields[i + 1] != null) ? fields[i + 1] : '?' ])
 			]));
-		});
+		}
 
 		return table;
 	}

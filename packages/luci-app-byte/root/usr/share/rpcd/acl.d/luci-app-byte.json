@@ -1,0 +1,20 @@
+{
+	"luci-app-byte": {
+		"description": "BYTE panel: AdGuard Home install/status, DNS chain and system state",
+		"read": {
+			"ubus": {
+				"byte": [ "status", "log" ],
+				"network.interface.wan": [ "status" ],
+				"system": [ "info", "board" ]
+			},
+			"file": {
+				"/tmp/luci-app-byte-setup.log": [ "read" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"byte": [ "setup", "action" ]
+			}
+		}
+	}
+}

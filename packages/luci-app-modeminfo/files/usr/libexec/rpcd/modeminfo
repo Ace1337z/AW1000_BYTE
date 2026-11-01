@@ -1,0 +1,185 @@
+#!/bin/sh
+# rpcd backend for luci-app-modeminfo (BYTE build).
+#
+# The AT collector (/usr/bin/modeminfo) costs several AT round trips, so it is
+# never run from cron or a daemon: this plugin runs it on demand and caches the
+# result for the refresh interval in /etc/config/modeminfo. The UI polls
+# `status`; while the cache is younger than the interval the call is free.
+#
+# Methods:
+#   status                 parsed snapshot + meta (cache age, port)
+#   ports                  available AT ports and the configured one
+#   set_port {port}        persist the AT port
+#   set_interval {seconds} persist the refresh interval (2-60)
+#   sample                 force a refresh now
+
+. /usr/share/libubox/jshn.sh
+
+CACHE=/tmp/modeminfo
+LOCK=/var/lock/modeminfo.lock
+PORT_DEFAULT=/dev/ttyUSB3
+
+list_methods() {
+	cat <<'EOF'
+{
+	"status": { },
+	"ports": { },
+	"set_port": { "port": "string" },
+	"set_interval": { "seconds": "integer" },
+	"sample": { }
+}
+EOF
+}
+
+interval() {
+	local n
+	n=$(uci -q get modeminfo.settings.refresh_rate)
+	case "$n" in '' | *[!0-9]*) n=5 ;; esac
+	[ "$n" -lt 2 ] && n=2
+	[ "$n" -gt 60 ] && n=60
+	echo "$n"
+}
+
+port() {
+	local p
+	p=$(uci -q get modeminfo.settings.comm)
+	[ -n "$p" ] || p="$PORT_DEFAULT"
+	echo "$p"
+}
+
+age() {
+	local m now
+	m=$(stat -c %Y "$1" 2>/dev/null) || { echo 999999; return; }
+	now=$(date +%s)
+	echo $((now - m))
+}
+
+# One AT poll at a time: two concurrent collectors would interleave replies on
+# the same tty and both parse garbage.
+collect() {
+	(
+		flock -n 9 || exit 0
+		/bin/sh /usr/bin/modeminfo >/dev/null 2>&1
+	) 9>>"$LOCK"
+}
+
+# keymap <"Key Name"> -> key_name (lowercase, non-alnum -> underscore)
+keymap() {
+	printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' '_' |
+		sed -e 's/^_*//' -e 's/_*$//'
+}
+
+do_status() {
+	local iv p a fresh avail
+	iv=$(interval)
+	p=$(port)
+	a=$(age "$CACHE")
+	[ "$a" -ge "$iv" ] && collect
+	a=$(age "$CACHE")
+	fresh=0 avail=0
+	[ -s "$CACHE" ] && avail=1
+	[ "$avail" = 1 ] && [ "$a" -lt "$iv" ] && fresh=1
+
+	json_init
+	json_add_object "meta"
+	json_add_string "port" "$p"
+	json_add_int "interval" "$iv"
+	json_add_int "age" "$a"
+	json_add_int "fresh" "$fresh"
+	json_add_int "available" "$avail"
+	json_close_object
+
+	json_add_object "modem"
+	if [ -s "$CACHE" ]; then
+		local line k v key
+		while IFS= read -r line; do
+			case "$line" in
+			PCC:* | SCC[0-9]*:*) continue ;;
+			esac
+			k=${line%%:*}
+			v=${line#*: }
+			key=$(keymap "$k")
+			[ -n "$key" ] && json_add_string "$key" "$v"
+		done <"$CACHE"
+	fi
+	json_close_object
+
+	json_add_array "carriers"
+	if [ -s "$CACHE" ]; then
+		local c
+		while IFS= read -r c; do
+			json_add_string "" "$c"
+		done <<EOF
+$(grep -E '^(PCC|SCC[0-9]+):' "$CACHE" 2>/dev/null)
+EOF
+	fi
+	json_close_array
+
+	json_dump
+}
+
+do_ports() {
+	local f p
+	p=$(port)
+	json_init
+	json_add_string "current" "$p"
+	json_add_array "ports"
+	for f in /dev/ttyUSB* /dev/ttyACM*; do
+		[ -c "$f" ] && json_add_string "" "$f"
+	done
+	json_close_array
+	json_dump
+}
+
+do_set_port() {
+	local p
+	json_load "$(cat)"
+	json_get_var p port
+	case "$p" in
+	/dev/ttyUSB[0-9]* | /dev/ttyACM[0-9]*) ;;
+	*)
+		json_init
+		json_add_boolean "ok" 0
+		json_add_string "message" "invalid port"
+		json_dump
+		return
+		;;
+	esac
+	uci -q set modeminfo.settings.comm="$p"
+	uci -q commit modeminfo
+	rm -f "$CACHE"
+	json_init
+	json_add_boolean "ok" 1
+	json_add_string "message" "port saved"
+	json_dump
+}
+
+do_set_interval() {
+	local n
+	json_load "$(cat)"
+	json_get_var n seconds
+	case "$n" in '' | *[!0-9]*) n=5 ;; esac
+	[ "$n" -lt 2 ] && n=2
+	[ "$n" -gt 60 ] && n=60
+	uci -q set modeminfo.settings.refresh_rate="$n"
+	uci -q commit modeminfo
+	json_init
+	json_add_boolean "ok" 1
+	json_add_int "interval" "$n"
+	json_dump
+}
+
+case "$1" in
+list) list_methods ;;
+call)
+	shift
+	case "$1" in
+	status) do_status ;;
+	ports) do_ports ;;
+	set_port) do_set_port ;;
+	set_interval) do_set_interval ;;
+	sample) collect; do_status ;;
+	esac
+	;;
+*) list_methods ;;
+esac

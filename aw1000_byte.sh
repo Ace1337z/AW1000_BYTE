@@ -33,8 +33,16 @@ main_menu() {
     repo="https://github.com/immortalwrt/immortalwrt.git"
     preset_repo="https://github.com/Ace1337z/AW1000_BYTE.git"
     preset_folder="aw1000_byte"
-    # Latest OpenWrt (ImmortalWrt 25.12) by default; override with TARGET_BRANCH=...
-    target_branch="${TARGET_BRANCH:-openwrt-25.12}"
+    # ImmortalWrt release tag v25.12.1 = kernel 6.12.94.
+    # Chosen for two hardware reasons, not fashion:
+    #   - the AW1000 phone (openwrt-aw1000-phone v0.7.0) publishes and validates
+    #     its kmod against 6.12.94 (OpenWrt 25.12.5 / NoobWRT rj11 images), and
+    #     the FXS driver is built in-tree here, so the kernel must be one its
+    #     maintainer actually tests;
+    #   - if qca-nss-ecm is ever enabled, its 6.12 port was written against the
+    #     .9x series (the .112 bonding/notifier change is what broke it).
+    # Override with TARGET_BRANCH=openwrt-25.12 (6.12.112) or v25.12.2 (6.12.103).
+    target_branch="${TARGET_BRANCH:-v25.12.1}"
 
     deps=(
         ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential
@@ -88,34 +96,43 @@ main_menu() {
 }
 
 update_feeds() {
-    echo -e "${BOLD_YELLOW}ADDING EXTERNAL FEEDS (QMODEM, PASSWALL2, VANTAGE)${RESET}"
+    echo -e "${BOLD_YELLOW}ADDING EXTERNAL FEEDS (QMODEM, PASSWALL2, NSS, FXS)${RESET}"
     # qmodem: modem management (replaces 3ginfo/modemband/sms-tool-js).
-    # Pinned to v2.8.9 (052f84477) - the exact version running on the working
-    # DOTYWRT AW1000. The 3.x line introduced the "qmodem_runtime" netifd
-    # protocol and host_ipv4_owner handling, which can leave network.wan with
-    # a proto LuCI has no form for (the WAN page then shows no preset). 2.8.9
-    # always writes a plain proto=dhcp interface.
-    grep -q '^src-git qmodem ' feeds.conf.default 2>/dev/null || \
-        echo 'src-git qmodem https://github.com/FUjr/QModem.git^052f8447770014fbcbcad895f56a618a9d5537a4' >> feeds.conf.default
+    # Pinned to v3.3.0 (1913bfb27) - latest stable release.
+    # The 3.x line no longer defines the old "qmodem_runtime" netifd protocol
+    # (verified: no occurrence anywhere in the v3.3.0 tree), so the WAN
+    # interface is still written as a plain proto=dhcp - the reason 2.8.9 was
+    # pinned in the first place. Cross-major jumps skip 3.0-3.2: the upstream
+    # migration note says to back up UCI and to verify at-daemon, SMS backend
+    # and the dial after upgrading.
+    sed -i '\#^src-git qmodem #d' feeds.conf.default 2>/dev/null
+    echo 'src-git qmodem https://github.com/FUjr/QModem.git^1913bfb272de39adb7b1ef79b91706368fd89399' >> feeds.conf.default
     # passwall2 luci app, pinned to 26.4.10 (4b4b84dc1) - the version proven
     # working on the DOTYWRT AW1000. Newer passwall2 hardcodes
     # xray_min_version="26.7.11" AND injects version.min into every generated
     # config, which makes older xray refuse to start; 26.4.10 has neither.
     grep -q '^src-git passwall_luci ' feeds.conf.default 2>/dev/null || \
         echo 'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall2.git^4b4b84dc120bb37592ea51e7107ce4fe0083420f' >> feeds.conf.default
-    # vantage theme + dashboard (external feed); drop the old upstream URL if present
-    sed -i '\#^src-git vantage https://github.com/anothaDev/luci-theme-vantage.git#d' feeds.conf.default 2>/dev/null
-    grep -q '^src-git vantage ' feeds.conf.default 2>/dev/null || \
-        echo 'src-git vantage https://github.com/Ace1337z/luci-theme-vantage.git;main' >> feeds.conf.default
+    # vantage theme + dashboard: dropped. The image ships Footstrap only -
+    # keeping a second JS theme costs space and its luci-app-vantage dashboard
+    # duplicates pages the Vantage-derived widgets now provide.
+    sed -i '\#^src-git vantage #d' feeds.conf.default 2>/dev/null
+    sed -i '\#^src-git fxs #d' feeds.conf.default 2>/dev/null
     # NSS offload: qca-nss-drv + qca-nss-ecm (QSDK 12.5, kernel 6.12 patches)
     grep -q '^src-git nss ' feeds.conf.default 2>/dev/null || \
         echo 'src-git nss https://github.com/qosmio/nss-packages.git;NSS-12.5-K6.x' >> feeds.conf.default
-    # AW1000 RJ11 phone port: kmod-aw1000-fxs, fxsd, luci-app-fxs (packages live in openwrt/)
-    # Upstream, pinned to v0.4.1.
+    # AW1000 RJ11 phone port: kmod-aw1000-fxs, fxsd, luci-app-fxs (packages live in openwrt/).
+    # Upstream v0.7.0 publishes kmod-aw1000-fxs-6.12.94.0.3.0-r1, i.e. the
+    # driver is tested against kernel 6.12.94 - the kernel of tag v25.12.1,
+    # which is this build's default. Do not move the default without moving
+    # that pin: the in-tree kmod is built against the image kernel, so a kernel
+    # outside .94 is unverified for the SLIC.
+    # Upstream, pinned to v0.7.0 (a764a2d39): adds SIP calling through QModem
+    # voice (off by default), HD wideband audio, caller-ID modes, ring patterns,
+    # do-not-disturb and call-history retention. The kernel driver stays 0.3.0.
     # Pinned by full 40-char SHA: an abbreviated one makes src-git fail with
     # "couldn't find remote ref".
-    sed -i '\#^src-git fxs #d' feeds.conf.default 2>/dev/null
-    echo 'src-git fxs https://github.com/Perz3us/openwrt-aw1000-phone.git^901f9dd1fa661fa4858613579fbd83d521565b35' >> feeds.conf.default
+    echo 'src-git fxs https://github.com/Perz3us/openwrt-aw1000-phone.git^a764a2d3934a1aeeeab74f30160994e6a1c5ffe3' >> feeds.conf.default
     # dotycat packages: luci-app-aw1k-led (AW1000 LED controller), etc.
     grep -q '^src-git dotycat ' feeds.conf.default 2>/dev/null || \
         echo 'src-git dotycat https://github.com/dotywrt/dotycat-package.git;dotycat' >> feeds.conf.default
@@ -237,14 +254,20 @@ apply_preset() {
         echo -e "${BOLD_GREEN}PRESET APPLIED${RESET}" || \
         echo -e "${BOLD_RED}WARNING: PRESET NOT FOUND${RESET}"
 
-    # qca-nss-ecm 12.5.2024.11.06 cannot compile against kernel 6.12.112
-    # (struct bond_cb was reworked), and ECM offload bypasses netfilter so it
-    # would defeat the TTL-64 rewrite anyway. A "# CONFIG_... is not set" line
-    # in the preset proved unreliable across fresh feed checkouts, so remove
-    # the package from the tree outright: with no Makefile there is nothing
-    # for defconfig or `make world` to enable.
-    rm -rf package/feeds/nss/qca-nss-ecm feeds/nss/qca-nss-ecm
-    echo -e "${BOLD_GREEN}qca-nss-ecm REMOVED FROM TREE${RESET}"
+    # Firmware version shown in Status -> Overview. Runs after the preset so
+    # its CONFIG_VERSION_* lines are the ones that survive.
+    apply_version
+
+    # qca-nss-ecm stays in the *tree* but not in the *image*: the preset has
+    # "# CONFIG_PACKAGE_kmod-qca-nss-ecm is not set", the same choice
+    # XT-Martinez/aw1000-feed makes. Reasons: ECM 12.5.2024.11.06 does not
+    # build on 6.12.x past the .9x series (ecm_bond_notifier.c, struct bond_cb),
+    # so enabling it would pin the kernel away from the version the AW1000
+    # phone driver is validated against, and ECM forwards established flows
+    # past netfilter, which defeats the TTL rewrite. The sources and their
+    # kernel-port patches stay in nss/feeds/nss/qca-nss-ecm/patches/ so the
+    # experiment is one preset line + TARGET_BRANCH=v25.12.1 away.
+    echo -e "${BOLD_GREEN}qca-nss-ecm sources kept, package not selected (see preset)${RESET}"
 
     # Kconfig variant cycle: upstream packages/net/weechat defines TWO packages
     # in ONE Makefile (weechat-minimal with DEFAULT_VARIANT, and weechat-full
@@ -283,6 +306,13 @@ apply_preset() {
     # alpha package directory so exactly one provider remains.
     rm -rf package/feeds/nikki/mihomo-alpha feeds/nikki/mihomo-alpha
     echo -e "${BOLD_GREEN}mihomo-alpha VARIANT REMOVED (Kconfig cycle)${RESET}"
+    # luci-app-netstat is vendored from packages/luci-app-netstat. If an
+    # upstream feed ever ships the same name, two packages would provide one
+    # Kconfig symbol and defconfig aborts - the same failure shape as
+    # weechat-full above. The vendored copy lives in package/, so removing the
+    # feed copy is safe.
+    rm -rf package/feeds/luci/luci-app-netstat feeds/luci/applications/luci-app-netstat
+    echo -e "${BOLD_GREEN}luci-app-netstat FEED COPY REMOVED (vendored package wins)${RESET}"
 }
 
 run_menuconfig() {
@@ -368,6 +398,58 @@ get_version() {
     version_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
 }
 
+# Firmware version, rendered by LuCI -> Status -> Overview as:
+#
+#     BYTE 25.12(6.12.94) 1.2.1
+#
+# dist version DIST(RELEASE) CODE
+#   DIST    CONFIG_VERSION_DIST     "BYTE"
+#   RELEASE CONFIG_VERSION_NUMBER   "25.12(<kernel>)"  kernel read from the tree
+#   CODE    CONFIG_VERSION_CODE     "<major>.<minor>.<patch>"
+#
+# base-files writes DISTRIB_DESCRIPTION='%D %V %C', so those three fields are
+# exactly the string the status page shows.
+#
+# The patch is derived, not hand-edited: it is the number of commits since
+# FW_BASE in version.env (see that file). Every commit moves 1.2.1 -> 1.2.2.
+# Needs full history: CI checks out with fetch-depth: 0. Without history (or
+# with HEAD still on FW_BASE) FW_PATCH_FALLBACK is used.
+apply_version() {
+    local base maj min patch kernel ver n
+    base=$(sed -n 's/^FW_BASE=//p' "$script_dir/version.env" 2>/dev/null | head -1)
+    maj=$(sed -n 's/^FW_MAJOR=//p' "$script_dir/version.env" 2>/dev/null | head -1)
+    min=$(sed -n 's/^FW_MINOR=//p' "$script_dir/version.env" 2>/dev/null | head -1)
+    patch=$(sed -n 's/^FW_PATCH_FALLBACK=//p' "$script_dir/version.env" 2>/dev/null | head -1)
+    case "$maj" in '' | *[!0-9]*) maj=1 ;; esac
+    case "$min" in '' | *[!0-9]*) min=2 ;; esac
+    case "$patch" in '' | *[!0-9]*) patch=1 ;; esac
+
+    if [ -n "$base" ] && git -C "$script_dir" cat-file -e "${base}^{commit}" 2>/dev/null; then
+        n=$(git -C "$script_dir" rev-list --count "${base}..HEAD" 2>/dev/null)
+        # n=0 means HEAD is still the base commit (local, uncommitted work):
+        # keep the fallback so the build does not claim 1.2.0.
+        case "$n" in '' | *[!0-9]*) n=0 ;; esac
+        [ "$n" -ge 1 ] 2>/dev/null && patch=$n
+    fi
+
+    # LINUX_VERSION-6.12 = .94  ->  6.12.94
+    kernel=$(awk -F' = ' '/^LINUX_VERSION-[0-9]/ { split($1, a, "-"); print a[2] $2; exit }' \
+        include/kernel-version.mk 2>/dev/null)
+    [ -n "$kernel" ] || kernel=$(sed -n 's/^# KERNEL_VERSION:=//p' include/version.mk 2>/dev/null | head -1)
+    [ -n "$kernel" ] || { echo -e "${BOLD_RED}VERSION: kernel version not found${RESET}"; return 0; }
+
+    ver="${maj}.${min}.${patch}"
+    sed -i -e '/^CONFIG_VERSION_DIST=/d' \
+           -e '/^CONFIG_VERSION_NUMBER=/d' \
+           -e '/^CONFIG_VERSION_CODE=/d' .config
+    {
+        echo "CONFIG_VERSION_DIST=\"BYTE\""
+        echo "CONFIG_VERSION_NUMBER=\"25.12(${kernel})\""
+        echo "CONFIG_VERSION_CODE=\"${ver}\""
+    } >> .config
+    echo -e "${BOLD_GREEN}FIRMWARE VERSION: BYTE 25.12(${kernel}) ${ver}${RESET}"
+}
+
 # CI-only: fail fast if the preset did not resolve the required packages.
 ci_check_packages() {
     local missing="" p
@@ -381,15 +463,16 @@ ci_check_packages() {
         forbidden="$forbidden passwall-v1(ships alongside passwall2, cannot coexist)"
     fi
     for p in luci-app-passwall2 \
-             luci-theme-footstrap luci-theme-vantage luci-app-vantage \
-             luci-app-qmodem qmodem \
+             luci-theme-footstrap \
+             luci-app-qmodem qmodem modem_scan tom_modem \
+             luci-app-netstat vnstat2 \
              kmod-aw1000-fxs fxsd luci-app-fxs \
              kmod-qca-nss-drv nss-firmware \
              kmod-qmi_wwan_q luci-app-modeminfo \
-             luci-app-aw1k-led luci-app-ramfree \
-             xray-core luci-app-tailscale-community tailscale \
+             luci-app-aw1k-led luci-app-byte luci-app-ramfree \
+             xray-core \
              luci-app-filemanager \
-             luci-app-qmodem-sms sms-forwarder sms-tool_q ubus-at-daemon \
+             luci-app-qmodem-sms luci-app-qmodem-ttlfw4 sms-forwarder sms-tool_q ubus-at-daemon \
              kmod-ifb kmod-sched-cake kmod-sched-core kmod-ipt-ipset \
              kmod-macvlan kmod-nf-ipt kmod-nft-socket kmod-nf-nathelper \
              kmod-nf-nathelper-extra ipset tc-tiny iptables-nft \
@@ -413,24 +496,35 @@ ci_check_packages() {
             forbidden="$forbidden $p"
         fi
     done
-    # luci-app-nft-ttl rewrites /etc/nftables.d/ttl64.nft with a postrouting
-    # rule keyed on iifname; our byte-ttl owns that file instead.
+    # luci-app-nft-ttl is a third TTL implementation: its own firewall include,
+    # no ECM/NSS handling, and it would race luci-app-qmodem-ttlfw4 over the
+    # same packets. The image ships the qmodem app only.
     if grep -q "^CONFIG_PACKAGE_luci-app-nft-ttl=y$" .config; then
         forbidden="$forbidden luci-app-nft-ttl"
     fi
-    # ECM must not be built: it does not compile on kernel 6.12.112 and it
-    # would bypass the TTL rewrite. apply_preset deletes the package, so any
-    # reappearance means the deletion did not happen.
-    if grep -q "^CONFIG_PACKAGE_kmod-qca-nss-ecm=y$" .config; then
-        forbidden="$forbidden kmod-qca-nss-ecm"
-    fi
     # Size: these must stay out of the image.
     for p in sing-box hysteria naiveproxy xray-plugin v2ray-plugin \
-             luci-theme-argon luci-app-openclash adguardhome \
-             luci-app-adguardhome; do
+             luci-theme-argon luci-theme-vantage luci-app-vantage \
+             luci-app-openclash adguardhome \
+             luci-app-adguardhome \
+             tailscale luci-app-tailscale-community; do
         grep -q "^CONFIG_PACKAGE_${p}=y$" .config && forbidden="$forbidden $p"
     done
-    [ -e package/feeds/nss/qca-nss-ecm ] && forbidden="$forbidden qca-nss-ecm-tree"
+    # Two QModem UIs must never be installed together: luci-app-qmodem (Lua)
+    # and luci-app-qmodem-next (JS) both own the Modem menu and both drive the
+    # same dialer, so the second one loaded wins and the pages disagree.
+    grep -q "^CONFIG_PACKAGE_luci-app-qmodem-next=y$" .config && \
+        forbidden="$forbidden luci-app-qmodem-next(coexists with luci-app-qmodem)"
+    # ECM stays out on purpose (see the preset): its 6.12 port does not build on
+    # the branch kernel, and it would bypass the TTL rewrite. Enabling it is a
+    # deliberate experiment, not something that should slip into a release.
+    grep -q "^CONFIG_PACKAGE_kmod-qca-nss-ecm=y$" .config && \
+        forbidden="$forbidden kmod-qca-nss-ecm(see preset: build-breaker on this kernel)"
+    # Same for the two TTL apps: the Lua one writes its own firewall include
+    # and the fw4 one writes /etc/nftables.d/99-reset-ttl-from-br-lan.nft, so
+    # both would fight over the same packets (and only the fw4 one parks ECM).
+    grep -q "^CONFIG_PACKAGE_luci-app-qmodem-ttl=y$" .config && \
+        forbidden="$forbidden luci-app-qmodem-ttl(Lua variant; use -ttlfw4)"
     # The non-default variants are removed so Kconfig has a single provider per
     # name; if either comes back, "recursive dependency detected!" returns and
     # defconfig aborts before compiling anything.
@@ -444,11 +538,30 @@ ci_check_packages() {
     # resolved via $script_dir rather than assumed relative.
     local repo_root="$(realpath "$script_dir" 2>/dev/null)"
     [ -n "$repo_root" ] || repo_root="$(realpath .)"
-    grep -qE "^[[:space:]]*option ttl4 '64'$" "$repo_root/files/etc/config/qmodem_ttl" 2>/dev/null || \
-        missing="$missing TTL64(qmodem_ttl.ttl4)"
+    # TTL is owned by luci-app-qmodem-ttlfw4 now: one UCI switch and one TTL
+    # value (1-255), and the service also parks ECM while it is on. Assert the
+    # shipped defaults and that the app is in the image, because a missing app
+    # means the image loses TTL rewriting entirely - silently.
+    grep -qE "^[[:space:]]*option ttl '64'$" "$repo_root/files/etc/config/qmodem_ttl" 2>/dev/null || \
+        missing="$missing TTL(qmodem_ttl.ttl)"
     grep -qE "^[[:space:]]*option enable '1'$" "$repo_root/files/etc/config/qmodem_ttl" 2>/dev/null || \
         missing="$missing TTL-ENABLED(qmodem_ttl.enable)"
-    [ -x "$repo_root/files/etc/init.d/byte-ttl" ] || missing="$missing byte-ttl-init"
+    # The image overrides the QModem init script: upstream hooks `iifname
+    # br-lan`, which leaves router-originated traffic (dnsmasq, NTP, proxy
+    # upstream, health checks) with the host TTL. Assert the override exists
+    # and really matches the egress interface, or the build silently ships the
+    # weaker upstream rule.
+    [ -x "$repo_root/files/etc/init.d/qmodem_ttl" ] || \
+        missing="$missing ttl-init-override"
+    grep -q 'oifname' "$repo_root/files/etc/init.d/qmodem_ttl" 2>/dev/null || \
+        missing="$missing TTL-RULE(oifname-egress)"
+    # Offload policy lives in the same service: TTL on -> flow_offloading=1,
+    # TTL off -> 0. A regression here is invisible in the UI - the TTL rule
+    # still loads, offload just stops tracking the switch.
+    grep -q 'offload 1' "$repo_root/files/etc/init.d/qmodem_ttl" 2>/dev/null || \
+        missing="$missing TTL-OFFLOAD(on)"
+    grep -q 'offload 0' "$repo_root/files/etc/init.d/qmodem_ttl" 2>/dev/null || \
+        missing="$missing TTL-OFFLOAD(off)"
     # adguardhome: the LuCI app requires >=0.107.73-r3, but ImmortalWrt
     # 24.10.6 only publishes 0.107.57, so the binary MUST come from our repo
     # (we build 0.107.79). If it ever stops being published the UI becomes
@@ -479,11 +592,51 @@ ci_check_packages() {
     # pass - which reads as "works but keeps dropping".
     [ -x "$repo_root/files/etc/init.d/byte-mtu" ] || missing="$missing byte-mtu-init"
     [ -x "$repo_root/files/etc/hotplug.d/iface/90-byte-mtu" ] || missing="$missing byte-mtu-hotplug"
-    grep -q 'oifname' "$repo_root/files/etc/nftables.d/ttl64.nft" 2>/dev/null || \
-        missing="$missing TTL-RULE(oifname)"
     # Tuning must be verifiable on the device, not just declared: byte-selfcheck
     # logs the observed governor/qdisc/MTU/RPS against the configured values, so
     # a kernel that silently rejects a key shows up instead of going unnoticed.
+    # luci-app-byte ships the AdGuard Home panel. Its backend is an rpcd exec
+    # plugin, so a missing file is a 404 in the UI rather than a build error -
+    # assert the three pieces that make the page work.
+    for f in packages/luci-app-byte/Makefile \
+             packages/luci-app-byte/root/usr/libexec/rpcd/byte \
+             packages/luci-app-byte/root/usr/share/rpcd/acl.d/luci-app-byte.json \
+             packages/luci-app-byte/root/usr/libexec/luci-app-byte/agh-passwall2.sh \
+             packages/luci-app-byte/htdocs/luci-static/resources/view/byte/overview.js; do
+        [ -e "$repo_root/$f" ] || missing="$missing luci-app-byte($f)"
+    done
+    # luci-app-modeminfo was rewritten as a JS view over an rpcd exec plugin.
+    # Assert both halves and assert the Lua ones are gone: the old controller
+    # registered the same menu path, so a half-applied change renders either a
+    # blank page or a duplicate menu entry.
+    for f in packages/luci-app-modeminfo/files/usr/bin/modeminfo \
+             packages/luci-app-modeminfo/files/usr/libexec/rpcd/modeminfo \
+             packages/luci-app-modeminfo/files/usr/share/luci/menu.d/luci-app-modeminfo.json \
+             packages/luci-app-modeminfo/files/usr/share/rpcd/acl.d/luci-app-modeminfo.json \
+             packages/luci-app-modeminfo/files/www/luci-static/resources/view/modeminfo/overview.js; do
+        [ -e "$repo_root/$f" ] || missing="$missing luci-app-modeminfo($f)"
+    done
+    for f in packages/luci-app-modeminfo/files/usr/lib/lua/luci/controller/modeminfo.lua \
+             packages/luci-app-modeminfo/files/usr/lib/lua/luci/view/modeminfo.htm; do
+        if [ -e "$repo_root/$f" ]; then
+            forbidden="$forbidden modeminfo-lua-view($f)"
+        fi
+    done
+    # The upstream promotion badges ("If you like my work…") are removed from
+    # this fork on purpose: no sponsor assets, no shields.io calls from a
+    # router UI on an isolated LAN.
+    if grep -rqi "If you like my work\|shields.io\|Sponsor.svg\|Telegram.svg" \
+        "$repo_root/packages/luci-app-modeminfo/files" 2>/dev/null; then
+        forbidden="$forbidden modeminfo-promo-badge"
+    fi
+    # BYTE branding replaces the theme's LuCI logo. files/ is applied after the
+    # theme package, so these three files are what the browser actually gets.
+    for f in files/www/luci-static/footstrap/logo.svg \
+             files/www/luci-static/footstrap/logo_48.png \
+             files/www/luci-static/footstrap/app-icon-192.png \
+             files/www/luci-static/footstrap/manifest.json; do
+        [ -e "$repo_root/$f" ] || missing="$missing byte-branding($f)"
+    done
     [ -x "$repo_root/files/etc/init.d/byte-selfcheck" ] || missing="$missing byte-selfcheck-init"
     [ -x "$repo_root/files/etc/hotplug.d/iface/91-byte-selfcheck" ] || missing="$missing byte-selfcheck-hotplug"
     [ -x "$repo_root/files/etc/init.d/byte-affinity" ] || missing="$missing byte-affinity-init"
@@ -510,7 +663,7 @@ ci_check_packages() {
     # "base" is deliberately absent: it has no CONFIG_FEED_* symbol and is
     # always emitted by base-files, so requiring one would always fail.
     local f
-    for f in luci packages qmodem nss fxs dotycat vantage passwall_luci \
+    for f in luci packages qmodem nss fxs dotycat passwall_luci \
              routing telephony video nikki; do
         grep -q "^CONFIG_FEED_${f}=y$" .config || \
             forbidden="$forbidden FEED_WITHOUT_REPO_DIR($f)"
@@ -544,12 +697,67 @@ ci_check_packages() {
     # qmodem AT plumbing. override_at_port/sms_at_port pointing at
     # /dev/ttyUSB2 makes tom_modem hang there on the RG500Q: the qmodem
     # "WAN" panel then shows empty Manufacturer/Revision/Temperature and
-    # Connect Status "No" while the uplink is actually up. use_ubus=1 routes
-    # AT through at-daemon, which this image does not ship.
-    grep -q "option use_ubus '0'" "$repo_root/files/etc/config/qmodem" 2>/dev/null || \
-        missing="$missing qmodem-use_ubus0"
+    # Connect Status "No" while the uplink is actually up. Since 3.3.0 every
+    # AT consumer (dial, SMS, the RJ11 phone) must share ubus-at-daemon, so
+    # use_ubus=1 is required and the daemon must actually be in the image.
+    grep -q "option use_ubus '1'" "$repo_root/files/etc/config/qmodem" 2>/dev/null || \
+        missing="$missing qmodem-use_ubus1"
+    grep -q "option at_port '/dev/ttyUSB3'" "$repo_root/files/etc/config/qmodem" 2>/dev/null || \
+        missing="$missing qmodem-at_port"
+    grep -q "^CONFIG_PACKAGE_ubus-at-daemon=y$" "$repo_root/preset" 2>/dev/null || \
+        missing="$missing ubus-at-daemon"
     if grep -qE "^[[:space:]]*option (override_at_port|sms_at_port) " "$repo_root/files/etc/config/qmodem" 2>/dev/null; then
         forbidden="$forbidden qmodem-ttyUSB2-override"
+    fi
+    # AW1000 phone (RJ11). The driver and daemon are built in-tree from the
+    # pinned feed, against the same kernel as the image, so a kernel/tag change
+    # is the only way this silently breaks. Assert the three packages, the
+    # pin, and the 0.7.0 config schema: fxsd ignores unknown options, which
+    # means a stale config does not fail loudly, it just loses the new keys.
+    for pn in kmod-aw1000-fxs fxsd luci-app-fxs; do
+        grep -q "^CONFIG_PACKAGE_${pn}=y$" "$repo_root/preset" 2>/dev/null || \
+            missing="$missing phone($pn)"
+    done
+    grep -q '^[[:space:]]*echo .*src-git fxs .*openwrt-aw1000-phone.*\^a764a2d3934a1aeeeab74f30160994e6a1c5ffe3' \
+        "$repo_root/aw1000_byte.sh" 2>/dev/null || \
+        missing="$missing phone-feed-pin(v0.7.0)"
+    # Kernel/tag pairing: the phone kmod is published for 6.12.94, which is
+    # tag v25.12.1. A default that drifts away from it silently ships an
+    # unverified SLIC driver.
+    grep -q 'target_branch="${TARGET_BRANCH:-v25.12.1}"' "$repo_root/aw1000_byte.sh" 2>/dev/null || \
+        missing="$missing kernel-tag(v25.12.1=6.12.94)"
+    grep -q "default: v25.12.1" "$repo_root/.github/workflows/build.yml" 2>/dev/null || \
+        missing="$missing workflow-tag(v25.12.1)"
+    for k in at_port enabled volume ring_pattern callerid callerid_timing \
+             hd sip ringback history_days; do
+        grep -q "^[[:space:]]*option ${k} " "$repo_root/files/etc/config/fxs" 2>/dev/null || \
+            missing="$missing fxs-config($k)"
+    done
+    grep -q "option at_port 'auto'" "$repo_root/files/etc/config/fxs" 2>/dev/null || \
+        missing="$missing fxs-config(at_port=auto)"
+    # Firmware version: Status -> Overview must read
+    #   BYTE 25.12(<kernel>) <major>.<minor>.<patch>
+    # The patch is derived from commit count since FW_BASE, so this only works
+    # if version.env is present and CI checks out full history.
+    [ -f "$repo_root/version.env" ] || missing="$missing version.env"
+    grep -q '^FW_BASE=[0-9a-f]\{40\}$' "$repo_root/version.env" 2>/dev/null || \
+        missing="$missing version.env(FW_BASE)"
+    grep -q 'apply_version' "$repo_root/aw1000_byte.sh" 2>/dev/null || \
+        missing="$missing apply_version"
+    grep -q 'fetch-depth: 0' "$repo_root/.github/workflows/build.yml" 2>/dev/null || \
+        missing="$missing version(fetch-depth-0)"
+    grep -q '^CONFIG_VERSION_DIST="BYTE"$' "$repo_root/preset" 2>/dev/null || \
+        missing="$missing preset(VERSION_DIST)"
+    # Status -> Overview prints `release.description`; upstream appends the Lua
+    # CI (LuCI) version to it. Assert the override exists and really dropped
+    # that suffix - otherwise the row reads "BYTE ... 1.2.1 / luci-25.12.1".
+    sysview="files/www/luci-static/resources/view/status/include/10_system.js"
+    if [ -e "$repo_root/$sysview" ] &&
+        grep -q "boardinfo.release.description" "$repo_root/$sysview" 2>/dev/null &&
+        ! grep -q "release.description + ' / '" "$repo_root/$sysview" 2>/dev/null; then
+        :
+    else
+        missing="$missing status-firmware-version($sysview)"
     fi
     grep -q '^# CONFIG_USE_APK is not set$' .config || missing="$missing IPK(opkg)"
     if [ -n "$forbidden" ]; then

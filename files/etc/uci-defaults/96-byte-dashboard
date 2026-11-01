@@ -1,0 +1,16 @@
+#!/bin/sh
+# BYTE by ACE - first boot: enable the dashboard status cache.
+#
+# luci-mod-dashboard is a plain package (no service), but the AW1000 widgets
+# only appear once /tmp/aw1000-status exists, which byte-status-cache creates
+# on its first poll. Enable it here so a fresh flash does not need a shell.
+if [ -x /etc/init.d/byte-status-cache ]; then
+	/etc/init.d/byte-status-cache enable 2>/dev/null
+	/etc/init.d/byte-status-cache start 2>/dev/null
+fi
+# The dashboard widget layout is user state: ship the AW1000 widget ids so the
+# cards are visible on the first visit instead of requiring Dashboard -> Layout.
+if [ -x /etc/init.d/luci-mod-dashboard ]; then
+	/etc/init.d/luci-mod-dashboard enable 2>/dev/null
+fi
+exit 0

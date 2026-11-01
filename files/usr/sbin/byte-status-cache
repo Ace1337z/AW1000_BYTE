@@ -1,0 +1,140 @@
+#!/bin/sh
+# BYTE by ACE - status cache for the Footstrap dashboard widgets.
+#
+# The widgets in
+#   /www/luci-static/resources/view/dashboard/include/40_mobile.js
+#   .../45_thermal.js   .../48_nss.js
+# are ported from XT-Martinez/aw1000-feed and talk to the modem only through
+# these files in /tmp/aw1000-status (never AT directly, so any number of open
+# dashboards cost nothing):
+#
+#   live     raw AT replies (serving cell, carriers, CSQ, registration,
+#            operator, message memory, modem temperature) - every poll
+#   static   locks, band preference, model, firmware, SIM, PDP context -
+#            every STATIC_EVERY polls (they change rarely)
+#   history  "<epoch> <mode> <lte rsrp> <nr rsrp> <lte sinr> <nr sinr>"
+#   thermal  "<epoch> <cpu> <nss> <wifi> <modem>", hottest sensor of each
+#            group in degrees C
+#   nss      "<epoch> <ipv4> <ipv6>", connections offloaded by the NSS
+#            firmware; written only when qca-nss-ecm is loaded
+#
+# AT is sent through qmodem's ubus at-daemon - the same serialiser fxsd uses -
+# so a poll can never race the dialer on the same tty. The front-panel LEDs
+# stay owned by luci-app-aw1k-led; this service writes files and nothing else.
+
+CACHE=/tmp/aw1000-status
+PORT="$(uci -q get qmodem.@modem-device[0].at_port 2>/dev/null)"
+POLL="$(uci -q get qmodem.@modem-device[0].status_poll 2>/dev/null)"
+PORT="${PORT:-/dev/ttyUSB3}"
+POLL="${POLL:-10}"
+STATIC_EVERY=6
+HISTORY=31
+
+# One line per bearer in +CGCONTRDP, plus the values the widgets print.
+LIVE_AT='AT+QENG="servingcell";+QCAINFO;+CSQ;+CEREG?;+C5GREG?;+QSPN;+CPMS?;+QTEMP'
+STATIC_AT='AT+QNWLOCK="common/4g";+QNWLOCK="common/5g";+QNWPREFCFG="mode_pref";+QNWPREFCFG="lte_band";+QNWPREFCFG="nr5g_band";+QNWPREFCFG="nsa_nr5g_band";+CGMI;+CGMM;+CGMR;+QCCID;+QUIMSLOT?;+CGCONTRDP'
+
+mkdir -p "$CACHE" 2>/dev/null
+
+# at <command> <timeout>: prints the raw response, or nothing on failure.
+# at-daemon owns the port instance; open is idempotent for an already open
+# port (it returns the existing instance), so calling it every poll is safe.
+at() {
+	ubus -t 20 call at-daemon open "{\"at_port\":\"$PORT\",\"baudrate\":115200}" >/dev/null 2>&1
+	ubus -t 30 call at-daemon sendat \
+		"{\"at_port\":\"$PORT\",\"at_cmd\":$(_json "$1"),\"timeout\":${2:-10}}" 2>/dev/null |
+		jsonfilter -e '@.response' 2>/dev/null
+}
+
+# _json <string>: quote a string for the ubus JSON argument.
+_json() {
+	printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+}
+
+save() {
+	[ -c "$PORT" ] || return 0
+	ubus list at-daemon >/dev/null 2>&1 || return 0
+	at "$2" "${3:-10}" >"$CACHE/$1.tmp" 2>/dev/null
+	[ -s "$CACHE/$1.tmp" ] && mv "$CACHE/$1.tmp" "$CACHE/$1"
+	rm -f "$CACHE/$1.tmp"
+}
+
+# "<mode> <lte rsrp> <nr rsrp> <lte sinr> <nr sinr>" from the saved serving
+# cell. Field numbers follow Quectel's +QENG layout:
+#   LTE   +QENG: "servingcell",<state>,"LTE",<dup>,<mcc>,<mnc>,<cell>,<pci>,
+#         <earfcn>,<band>,<ul_bw>,<dl_bw>,<tac>,<rsrp>,<rsrq>,<rssi>,<sinr>
+#   SA    +QENG: "servingcell",<state>,"NR5G-SA",<dup>,<mcc>,<mnc>,<cell>,
+#         <pci>,<tac>,<arfcn>,<band>,<dl_bw>,<rsrp>,<rsrq>,<sinr>
+#   NSA   +QENG:"LTE",... then +QENG:"NR5G-NSA",<mcc>,<mnc>,<pci>,<rsrp>,
+#         <sinr>,<rsrq>
+serving_cell() {
+	tr -d '"' <"$CACHE/live" 2>/dev/null | awk -F, '
+		function num(v) { return v ~ /^-?[0-9]+$/ ? v : "-" }
+		function d(v) { return v == "" ? "-" : v }
+		/^\+QENG: ?servingcell/ {
+			if ($2 == "SEARCH" || $2 == "LIMSRV") exit
+			if ($3 == "LTE") { mode = "LTE"; lte = num($14); lsinr = num($17) }
+			else if ($3 == "NR5G-SA") { mode = "SA"; nr = num($13); nsinr = num($15) }
+		}
+		/^\+QENG: ?LTE/ { mode = "LTE"; lte = num($12); lsinr = num($15) }
+		/^\+QENG: ?NR5G-NSA/ { nsa = num($5); nsasinr = num($6) }
+		END {
+			if (mode == "LTE" && nsa != "" && nsa != "-") { mode = "NSA"; nr = nsa; nsinr = nsasinr }
+			if (mode != "") print mode, d(lte), d(nr), d(lsinr), d(nsinr)
+		}'
+}
+
+# Hottest SoC zone per group: cpu*/cluster, nss*, wcss* (ath11k radio counts
+# as Wi-Fi), and the modem's own sensor from the saved +QTEMP.
+thermal() {
+	{
+		for z in /sys/class/thermal/thermal_zone*; do
+			echo "$(cat "$z/type" 2>/dev/null) $(cat "$z/temp" 2>/dev/null)"
+		done 2>/dev/null
+		for h in /sys/class/hwmon/hwmon*; do
+			[ "$(cat "$h/name" 2>/dev/null)" = ath11k_hwmon ] &&
+				echo "wcss-radio $(cat "$h/temp1_input" 2>/dev/null)"
+		done 2>/dev/null
+		tr -d '"' <"$CACHE/live" 2>/dev/null |
+			awk -F, '/^\+QTEMP:/ { print "modem", $2 * 1000 }'
+	} | awk -v now="$(date +%s)" '
+		function hot(k, v) { if (!(k in t) || v > t[k]) t[k] = v }
+		function c(k) { return (k in t) ? int(t[k] / 1000 + 0.5) : "-" }
+		$2 !~ /^[0-9]+$/ { next }
+		$1 ~ /^(cpu|cluster)/ { hot("cpu", $2) }
+		$1 ~ /^nss/ { hot("nss", $2) }
+		$1 ~ /^wcss/ { hot("wifi", $2) }
+		$1 == "modem" { hot("modem", $2) }
+		END { print now, c("cpu"), c("nss"), c("wifi"), c("modem") }' >>"$CACHE/thermal"
+	tail -n "$HISTORY" "$CACHE/thermal" >"$CACHE/thermal.tmp" &&
+		mv "$CACHE/thermal.tmp" "$CACHE/thermal"
+}
+
+# ECM is not shipped in this image (it cannot compile on 6.12.112 and it would
+# bypass the TTL rewrite), so this normally writes nothing and the NSS widget
+# stays hidden. Kept so the widget starts working if someone enables ECM with
+# /usr/bin/nss-offload.
+nss() {
+	local ecm=/sys/kernel/debug/ecm
+	[ -r "$ecm/ecm_nss_ipv4/accelerated_count" ] || return 0
+	echo "$(date +%s) $(cat "$ecm/ecm_nss_ipv4/accelerated_count" 2>/dev/null) \
+$(cat "$ecm/ecm_nss_ipv6/accelerated_count" 2>/dev/null || echo -)" >>"$CACHE/nss"
+	tail -n "$HISTORY" "$CACHE/nss" >"$CACHE/nss.tmp" &&
+		mv "$CACHE/nss.tmp" "$CACHE/nss"
+}
+
+n=0
+while :; do
+	save live "$LIVE_AT" 12
+	set -- $(serving_cell)
+	if [ -n "$1" ]; then
+		echo "$(date +%s) $1 ${2:--} ${3:--} ${4:--} ${5:--}" >>"$CACHE/history"
+		tail -n "$HISTORY" "$CACHE/history" >"$CACHE/history.tmp" &&
+			mv "$CACHE/history.tmp" "$CACHE/history"
+	fi
+	thermal
+	nss
+	[ $((n % STATIC_EVERY)) = 0 ] && save static "$STATIC_AT" 20
+	n=$((n + 1))
+	sleep "$POLL"
+done
