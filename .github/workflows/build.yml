@@ -12,9 +12,12 @@ on:
     paths:
       - preset
       - aw1000_byte.sh
+      - .github/workflows/build.yml
+      # version.env drives the firmware version (patch = commits since FW_BASE),
+      # so an edit there changes the image and must start a build.
+      - version.env
       - files/**
       - packages/**
-      - .github/workflows/build.yml
 
 permissions:
   contents: write

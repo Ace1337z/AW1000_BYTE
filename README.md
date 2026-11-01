@@ -156,6 +156,8 @@ Complete history, newest first. Every entry names the symptom it cures.
 | **Modem info rewritten** | The Lua template + controller + cron job are gone: `luci-app-modeminfo` is now a JS view over an rpcd exec plugin. AT is sampled **on demand** and cached for the configured interval, so nothing runs when the page is closed; the old per-minute crontab is removed (it kept the tty busy and woke the modem). Signal quality is shown as RSRP/RSRQ/SINR/RSSI bars with thresholds, 5G NSA/SA metrics, carrier aggregation, cell ID/MCC/MNC, temperature, firmware and IMEI, with the AT port and refresh interval editable in the header. Values are published atomically (`/tmp/modeminfo` rename), one collector at a time (`flock`) |
 | **Promotion badges removed** | Upstream put “If you like my work” Star/Sponsor/Telegram shields in the panel, with `img.shields.io` fallbacks. All three SVGs and the text are deleted, and CI forbids them from returning: a router UI on an isolated LAN must not phone an external image host |
 | **Firmware version in Status** | Status → Overview now reads `BYTE 25.12(6.12.94) 1.2.1` instead of `BYTE by ACE 25.12 FINAL`. The patch number is derived, not typed: it is the commit count since `FW_BASE` in `version.env`, so **every commit moves it by one** (1.2.1 → 1.2.2 → …). The kernel part is read from `include/kernel-version.mk` of the tree being built, so it cannot drift from the image. See [Firmware version](#firmware-version) |
+| **Image filename matches Status** | `rename_output()` used to take the version tag from the static `preset`, so the second commit would have shipped `BYTE 25.12(6.12.94) 1.2.2` in Status inside a file named `...-1.2.1-...`. It now reads `CONFIG_VERSION_CODE` from the generated `.config` (preset only as fallback), so the version in the filename, the version in Status and the commit count are the same number |
+| **`version.env` triggers a build** | It is a build input but was missing from the workflow `paths` filter: changing `FW_MAJOR`/`FW_BASE` alone would have produced no image. Added, together with an assertion that `rename_output()` reads `.config` before `preset` |
 | **Footstrap logo replaced** | `logo.svg` / `logo_48.png` / `app-icon-192.png` / `manifest.json` are overridden in `files/` (applied after the theme package): the "B" mark with the BYTE accent bar instead of the LuCI logo, and the PWA name is BYTE instead of LuCI |
 | **Netstat added** | `luci-app-netstat` vendored in `packages/`. Its `LUCI_DEPENDS:=+vnstat` is unresolvable here: ImmortalWrt 25.12 ships `vnstat2`, which `CONFLICTS` with `vnstat` and does **not** declare `PROVIDES:=vnstat` (upstream added that later). Depending on the bare name made defconfig drop the whole app without a word, so it now depends on `+vnstat2` |
 | **vnStat history survives reboot** | Stock `DatabaseDir` is `/var/lib/vnstat`, which is tmpfs — every reboot wiped the database. Repointed to `/etc/vnstat` (overlay) by `byte-vnstat-db`, which also migrates an existing DB and re-asserts the path after a package upgrade |
@@ -305,6 +307,40 @@ Rendered from `CONFIG_VERSION_DIST`, `CONFIG_VERSION_NUMBER` and
   the release commit and `FW_PATCH_FALLBACK` to its patch number.
 - Override for a one-off build: edit `version.env`, or set the three
   `CONFIG_VERSION_*` values before `make defconfig`.
+
+The same number names the image you download, so the file on disk always
+matches the version in Status:
+
+```
+BYTE_by_ACE-1.2.1-qualcommax-ipq807x-arcadyan_aw1000-squashfs-sysupgrade.bin
+             ^^^^^
+             CONFIG_VERSION_CODE, read from the generated .config
+```
+
+`CONFIG_VERSION_CODE_FILENAMES` is left unset because OpenWrt would fold the
+code into the OpenWrt-style version string; `rename_output()` in
+`aw1000_byte.sh` does the rename after the build instead, and it reads the
+derived value from `.config`, falling back to `preset`, then `build<run>`, then
+the short commit. Reading `preset` first would name every image `1.2.1` while
+Status reported the real version.
+
+### Building
+
+The workflow (`.github/workflows/build.yml`) runs on every push to `main` that
+touches the build inputs — `preset`, `aw1000_byte.sh`, `version.env`, `files/`,
+`packages/`, the workflow itself — and on manual `workflow_dispatch`:
+
+```bash
+# trigger by hand: Actions -> "Build BYTE by ACE firmware (AW1000)" -> Run workflow
+# branch input selects the ImmortalWrt tag; leave v25.12.1 for kernel 6.12.94
+```
+
+Because the version is the commit count since `FW_BASE`, a build of the pushed
+tip *is* the version it reports: no release tag, no separate bump commit. The
+run needs full history (`fetch-depth: 0`) for the count to be right.
+
+A README-only change does not trigger a build on purpose: it cannot change the
+image, and a run costs ~3 h of runner time.
 
 ### Tuning
 

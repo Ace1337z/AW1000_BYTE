@@ -338,13 +338,17 @@ rename_output() {
     # Build/run number in the filename, so a user can tell at a glance which
     # firmware they are flashing. GITHUB_RUN_NUMBER in CI; otherwise the short
     # commit; otherwise no tag at all, so a plain local build still works.
-    # Prefer an explicit series name from the config (VERSION_CODE, e.g.
-    # "FINAL") so a release's files are named after the series rather than an
-    # internal CI counter. Falls back to build<run> then the short commit.
+    # Prefer the version code from the generated .config, because apply_version
+    # derives it from the commit count (1.2.1, 1.2.2, ...). Reading the static
+    # preset here would name every image 1.2.1 while Status reports the real
+    # version, so the file a user downloads would not match the running image.
+    # Falls back to the preset, then build<run>, then the short commit.
     tag="${BUILD_TAG:-}"
     if [ -z "$tag" ]; then
         local code
-        code=$(sed -n 's/^CONFIG_VERSION_CODE="\(.*\)"$/\1/p' "$script_dir/preset" 2>/dev/null | head -1)
+        code=$(sed -n 's/^CONFIG_VERSION_CODE="\(.*\)"$/\1/p' ./.config 2>/dev/null | head -1)
+        [ -n "$code" ] || \
+            code=$(sed -n 's/^CONFIG_VERSION_CODE="\(.*\)"$/\1/p' "$script_dir/preset" 2>/dev/null | head -1)
         [ -n "$code" ] && tag="$code"
     fi
     if [ -z "$tag" ] && [ -n "${GITHUB_RUN_NUMBER:-}" ]; then
@@ -746,8 +750,19 @@ ci_check_packages() {
         missing="$missing apply_version"
     grep -q 'fetch-depth: 0' "$repo_root/.github/workflows/build.yml" 2>/dev/null || \
         missing="$missing version(fetch-depth-0)"
+    # version.env is a build input: without it in the push paths filter, editing
+    # the version would silently produce no new image.
+    awk '/^on:/,/^permissions:/' "$repo_root/.github/workflows/build.yml" 2>/dev/null | \
+        grep -q '^ *- version\.env$' || \
+        missing="$missing version(workflow-path)"
     grep -q '^CONFIG_VERSION_DIST="BYTE"$' "$repo_root/preset" 2>/dev/null || \
         missing="$missing preset(VERSION_DIST)"
+    # Image filenames must carry the derived version, not the static preset
+    # value: rename_output has to read .config first, or the downloaded file
+    # says 1.2.1 while Status says 1.2.2 after the next commit.
+    awk '/^rename_output\(\)/,/^}/' "$repo_root/aw1000_byte.sh" 2>/dev/null | \
+        grep -q 'CONFIG_VERSION_CODE=.*\./\.config' || \
+        missing="$missing rename(VERSION_CODE from .config)"
     # Status -> Overview prints `release.description`; upstream appends the Lua
     # CI (LuCI) version to it. Assert the override exists and really dropped
     # that suffix - otherwise the row reads "BYTE ... 1.2.1 / luci-25.12.1".
