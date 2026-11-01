@@ -87,11 +87,11 @@ park_accel() {
 	}
 }
 
-# offload <0|1> - fw4 flowtable follows the TTL switch, per the requested
-# policy: TTL on -> flow_offloading=1, TTL off -> flow_offloading=0.
+# flow_offload_off - keep fw4's flowtable OFF in every state.
 #
-# WARNING, stated here so nobody re-discovers it in the field: the software
-# flowtable (and any hardware offload) hands established flows to the data
+# Policy: flow_offloading stays 0 whether TTL rewriting is on or off, and the
+# NSS path does not change that. Rationale, stated here so nobody re-discovers
+# it in the field: the software flowtable hands established flows to the data
 # path *after* the first packet, so those packets never reach the postrouting
 # mangle chain and keep the sender's own TTL. In practice:
 #   - clients that already send TTL 64 (phones, Linux, most IoT) look correct
@@ -100,18 +100,20 @@ park_accel() {
 #     the offloaded flow.
 # The first packet of every flow is still rewritten, and router-originated
 # traffic has no offloaded flow, so it is always rewritten.
-# flow_offloading_hw stays 0: nss-dp does not implement it, so a `1` there is
-# accepted by fw4 and then silently unused.
-offload() {
-	local v="$1"
+# On the NSS side ECM does the same bypass, which is why it is parked while
+# TTL is on; when TTL is off ECM may run, but the fw4 flowtable still stays
+# off - a second acceleration path only widens the leak surface.
+# flow_offloading_hw stays 0 as well: nss-dp does not implement it, so a `1`
+# there is accepted by fw4 and then silently unused.
+flow_offload_off() {
 	uci -q get firewall.@defaults[0] >/dev/null 2>&1 || return 0
-	[ "$(uci -q get firewall.@defaults[0].flow_offloading)" = "$v" ] &&
+	[ "$(uci -q get firewall.@defaults[0].flow_offloading)" = "0" ] &&
 		[ "$(uci -q get firewall.@defaults[0].flow_offloading_hw)" = "0" ] &&
 		return 0
-	uci -q set firewall.@defaults[0].flow_offloading="$v"
+	uci -q set firewall.@defaults[0].flow_offloading='0'
 	uci -q set firewall.@defaults[0].flow_offloading_hw='0'
 	uci -q commit firewall
-	logger -t qmodem_ttl "flow_offloading=$v (hw off)"
+	logger -t qmodem_ttl "flow_offloading forced to 0 (hw off)"
 }
 
 start_service() {
@@ -122,8 +124,8 @@ start_service() {
 	# rewriting TTL after the user turned the switch off.
 	if [ "$enable" != "1" ]; then
 		rm -f "$NFT_FILE" "$NFT_LEGACY"
-		offload 0
-		logger -t qmodem_ttl "disabled, include removed, flow_offloading=0"
+		flow_offload_off
+		logger -t qmodem_ttl "disabled, include removed, flow offload kept off"
 		/etc/init.d/firewall reload 2>/dev/null || true
 		return 0
 	fi
@@ -137,7 +139,7 @@ start_service() {
 	[ "$ttl" -le 255 ] 2>/dev/null || ttl=255
 	logger -t qmodem_ttl "TTL/HopLimit $ttl on modem egress (forwarded + router-originated); NSS/ECM parked"
 	park_accel
-	offload 1
+	flow_offload_off
 	rm -f "$NFT_LEGACY"
 	write_rules "$ttl"
 	# The file is a chain fragment for fw4's own table, so it cannot be loaded
@@ -153,10 +155,11 @@ start_service() {
 stop_service() {
 	rm -f "$NFT_FILE" "$NFT_LEGACY"
 	logger -t qmodem_ttl "TTL rewrite off"
-	# TTL off -> flow_offloading=0, per policy. ECM is released back so NSS
-	# acceleration can run; starting it is a no-op when the package is not
-	# installed, which is the shipped configuration.
-	offload 0
+	# TTL off: ECM is released back so NSS acceleration can run, but fw4's
+	# flowtable is still forced to 0 - one acceleration path at a time, and the
+	# flowtable is the one that silently leaks TTL. Starting ECM is a no-op
+	# when the package is not installed, which is the shipped configuration.
+	flow_offload_off
 	[ -x "$ECM_INIT" ] && {
 		"$ECM_INIT" enable 2>/dev/null
 		"$ECM_INIT" start 2>/dev/null

@@ -14,9 +14,10 @@ fi
 
 # TTL/HopLimit is owned by luci-app-qmodem-ttlfw4 (uci qmodem_ttl), whose
 # service this image overrides. It parks qca-nss-ecm (installed or not) and
-# drives fw4's flowtable from the same switch: TTL on -> flow_offloading=1,
-# TTL off -> 0. Do not start ECM or toggle flow_offloading from here - the
-# service owns both, and a second writer is how they end up disagreeing.
+# keeps fw4's flowtable at flow_offloading=0 in both states - the flowtable
+# skips the mangle chain after the first packet. Do not start ECM or toggle
+# flow_offloading from here - the service owns both, and a second writer is
+# how they end up disagreeing.
 if [ -x /etc/init.d/qmodem_ttl ]; then
 	/etc/init.d/qmodem_ttl enable 2>/dev/null
 	/etc/init.d/qmodem_ttl running >/dev/null 2>&1 || \

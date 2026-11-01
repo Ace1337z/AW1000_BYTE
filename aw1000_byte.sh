@@ -642,13 +642,16 @@ ci_check_packages() {
         missing="$missing ttl-init-override"
     grep -q 'oifname' "$repo_root/files/etc/init.d/qmodem_ttl" 2>/dev/null || \
         missing="$missing TTL-RULE(oifname-egress)"
-    # Offload policy lives in the same service: TTL on -> flow_offloading=1,
-    # TTL off -> 0. A regression here is invisible in the UI - the TTL rule
-    # still loads, offload just stops tracking the switch.
-    grep -q 'offload 1' "$repo_root/files/etc/init.d/qmodem_ttl" 2>/dev/null || \
-        missing="$missing TTL-OFFLOAD(on)"
-    grep -q 'offload 0' "$repo_root/files/etc/init.d/qmodem_ttl" 2>/dev/null || \
-        missing="$missing TTL-OFFLOAD(off)"
+    # Offload policy lives in the same service: fw4's flowtable is forced to
+    # flow_offloading=0 in every state (TTL on and off, NSS installed or not),
+    # because it skips the mangle chain after the first packet. A regression to
+    # 1 is invisible in the UI - the TTL rule still loads, only accelerated
+    # flows leak.
+    grep -q "flow_offloading='0'" "$repo_root/files/etc/init.d/qmodem_ttl" 2>/dev/null || \
+        missing="$missing TTL-OFFLOAD(forced-off)"
+    if grep -q "flow_offloading='1'" "$repo_root/files/etc/init.d/qmodem_ttl" 2>/dev/null; then
+        missing="$missing TTL-OFFLOAD(sets-1)"
+    fi
     # adguardhome: the LuCI app requires >=0.107.73-r3, but ImmortalWrt
     # 24.10.6 only publishes 0.107.57, so the binary MUST come from our repo
     # (we build 0.107.79). If it ever stops being published the UI becomes

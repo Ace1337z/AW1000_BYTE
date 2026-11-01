@@ -6,7 +6,9 @@ config main 'main'
 	#             forwards established flows in hardware, past netfilter, where
 	#             the TTL rewrite lives. Carrier tethering detection wins.
 	# enable 0 -> the app removes its rule and starts ECM again, so NSS offload
-	#             and the dashboard's NSS widget work.
+	#             and the dashboard's NSS widget work. fw4's flow_offloading
+	#             stays 0 in both states: it bypasses the same netfilter chain
+	#             and would leak the sender's TTL on accelerated flows.
 	#
 	# ttl is a single value for both IPv4 TTL and IPv6 Hop Limit, range 1-255.
 	# 64 matches a Linux host; 128 matches Windows. Any value the carrier

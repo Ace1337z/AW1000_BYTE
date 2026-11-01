@@ -160,12 +160,15 @@ check_steering() {
 	report vnstat.databasedir /etc/vnstat "$db"
 	[ -d /etc/vnstat ] && report vnstat.dir present present
 }
-# TTL switch and fw4 flowtable must agree, and the include must be the file
-# this build writes. Policy: TTL on -> flow_offloading=1, TTL off -> 0.
+# The fw4 flowtable must stay OFF in both TTL states, and the include must be
+# the file this build writes. Policy: flow_offloading=0 whether the TTL switch
+# is on or off - the flowtable skips the mangle chain after the first packet,
+# so an enabled flowtable leaks the sender's TTL on Windows hosts (128) for
+# the life of the flow.
 # The chain itself is only logged (not asserted): this runs from a hotplug
 # iface event and can fire before qmodem_ttl (START=95) has loaded the include.
 check_ttl() {
-	local en ttl want
+	local en ttl
 	# Before qmodem_ttl (START=95) has run, the offload state is still the
 	# shipped default - asserting here would produce a false MISMATCH on an
 	# early hotplug iface event.
@@ -184,12 +187,9 @@ check_ttl() {
 		else
 			report ttl.value in-1-255 "out-of-range($ttl)"
 		fi
-		want=1
-		report ttl.flow_offloading "$want" "$(uci -q get firewall.@defaults[0].flow_offloading)"
-	else
-		want=0
-		report ttl.flow_offloading "$want" "$(uci -q get firewall.@defaults[0].flow_offloading)"
 	fi
+	# Same expectation in both branches: the flowtable is never wanted.
+	report ttl.flow_offloading 0 "$(uci -q get firewall.@defaults[0].flow_offloading)"
 	report ttl.flow_offloading_hw 0 "$(uci -q get firewall.@defaults[0].flow_offloading_hw)"
 	if [ -r /etc/nftables.d/90-byte-ttl.nft ]; then
 		logger -t "$TAG" "ttl.include: present (chain $(nft list chain inet fw4 byte_ttl >/dev/null 2>&1 && echo loaded || echo NOT-loaded))"

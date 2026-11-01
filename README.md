@@ -45,7 +45,8 @@ sysupgrade -n BYTE_by_ACE-<version>-qualcommax-ipq807x-arcadyan_aw1000-squashfs-
 receive, forward to Telegram/webhook), signal and CA metrics, live dashboard.
 **TTL / Hop Limit** — one switch in *Network → Modem → TTL Configuration*;
 rule matches `oifname "wwan*"`, so forwarded **and** router-originated traffic is
-rewritten. The same switch drives offload: TTL on → `flow_offloading=1`, TTL off → `0`.
+rewritten. FW4 flow offload is pinned off (`flow_offloading=0`, hw `0`) in both
+switch states, because it skips the mangle chain.
 **Phone (RJ11)** — `fxsd` + SLIC driver built in, HD audio, caller ID, DND, history.
 **WiFi** — NSS-accelerated 2.4/5 GHz, both radios up on first boot.
 **UI** — Footstrap theme, BYTE logo/icons, BYTE panel (AdGuard Home wiring, DNS
@@ -110,10 +111,12 @@ nss/                       NSS sources + kernel patches
 
 ## Known limits
 
-- **Offload vs TTL.** With `flow_offloading=1`, a flow is accelerated after its first
+- **Flow offload is off, always.** `flow_offloading=0` and `flow_offloading_hw=0`
+  with the TTL switch on *and* off: the flowtable accelerates a flow after its first
   packet, so later packets skip the mangle chain and keep the sender's TTL. Clients
   that send 64 look right; Windows hosts (128) leak 128 for that flow's life.
-  Router-originated traffic and every flow's first packet are always rewritten.
+  Enabling it in LuCI re-introduces that leak. Router-originated traffic and every
+  flow's first packet are always rewritten.
 - **ECM is not shipped.** `kmod-qca-nss-ecm` is unset: its 12.5 build targets the 6.12.9x
   series and it would defeat the TTL rewrite. The `48_nss` widget therefore stays
   dormant (no debugfs counter). NSS data-path acceleration is unaffected.
@@ -140,8 +143,8 @@ republishing an image built here.
 ### 1.2.x — 2026-11-02
 - Version string `BYTE 25.12(KERNEL) PATCH` in Status and in every filename, derived
   from the commit count; kernel read from the target, not the SDK placeholder.
-- TTL switch now owns offload (`1` on, `0` off, hw always `0`); rule matches both
-  forwarded and router-originated egress; self-check asserts the pairing.
+- Flow offload pinned off (`flow_offloading=0`, hw `0`) in both TTL states; rule
+  matches forwarded and router-originated egress; self-check asserts the pairing.
 - Fixed the theme: the luci feed pin predated Footstrap, so `defconfig` silently
   dropped it and the image shipped Bootstrap — the BYTE branding had nothing to apply to.
 - Fixed CI: signing key is installed by the build script after the clone (the old
