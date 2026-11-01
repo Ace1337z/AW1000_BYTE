@@ -20,6 +20,43 @@ BOLD_YELLOW="${BOLD}${YELLOW}"
 BOLD_BLUE="${BOLD}${BLUE}"
 BOLD_MAGENTA="${BOLD}${MAGENTA}"
 
+# Stable opkg repo signing key, copied into the build tree immediately after
+# the ImmortalWrt clone.
+#
+# base-files only runs usign -G when key-build is missing, so a key that is
+# already there is reused. That matters across builds: CI clones a fresh tree
+# every run, so without this each run invents a new key. The image then ships
+# key N while the published repo is re-signed with key N+1 on the next run,
+# devices keep key N, and opkg prints "Updated list" while discarding every
+# index -- a silent, total repo failure.
+#
+# This lives here, not in a workflow step, because the tree does not exist
+# until the clone below. A workflow step that copied into immortalwrt/ before
+# the clone failed with
+#   cp: cannot create regular file 'builder/immortalwrt/key-build': No such file or directory
+# on any run whose cache restore did not pre-create the directory (i.e. always
+# on a cold cache), and skipped the whole build.
+install_repo_key() {
+    local keydir="$script_dir/repo-key" f
+    if [ ! -d "$keydir" ]; then
+        echo -e "${BOLD_YELLOW}NO repo-key/ IN TREE: base-files will generate a key (local build)${RESET}"
+        return 0
+    fi
+    for f in key-build key-build.pub key-build.ucert; do
+        [ -s "$keydir/$f" ] || {
+            echo -e "${BOLD_RED}REPO KEY INCOMPLETE: missing $keydir/$f${RESET}"
+            return 1
+        }
+    done
+    for f in key-build key-build.pub key-build.ucert; do
+        cp -f "$keydir/$f" "$distro/$f" || return 1
+    done
+    # usign refuses to sign as root unless the private key is 0600.
+    chmod 600 "$distro/key-build" 2>/dev/null || true
+    chmod 644 "$distro/key-build.pub" "$distro/key-build.ucert" 2>/dev/null || true
+    echo -e "${BOLD_GREEN}REPO SIGNING KEY INSTALLED${RESET}"
+}
+
 main_menu() {
     clear 2>/dev/null || true
     echo -e "${BOLD_MAGENTA}##############################################${RESET}"
@@ -93,6 +130,11 @@ main_menu() {
         echo -e "${BOLD_GREEN}DIRECTORY '$distro' ALREADY EXISTS. SKIPPING CLONE${RESET}"
         just_cloned=0
     fi
+    # Must run after the clone: the key is copied *into* the tree.
+    install_repo_key || {
+        echo -e "${BOLD_RED}REPO KEY INSTALL FAILED${RESET}"
+        exit 1
+    }
 }
 
 update_feeds() {
@@ -755,6 +797,19 @@ ci_check_packages() {
     awk '/^on:/,/^permissions:/' "$repo_root/.github/workflows/build.yml" 2>/dev/null | \
         grep -q '^ *- version\.env$' || \
         missing="$missing version(workflow-path)"
+    # Repo signing key: the copy must happen in the build script *after* the
+    # clone (the tree does not exist before it), and no workflow step may copy
+    # into builder/immortalwrt - that failed every cold-cache run outright.
+    keycall=$(grep -n 'install_repo_key ||' "$repo_root/aw1000_byte.sh" 2>/dev/null | cut -d: -f1 | head -1)
+    keyclone=$(grep -n 'GIT CLONE FAILED' "$repo_root/aw1000_byte.sh" 2>/dev/null | cut -d: -f1 | head -1)
+    if [ -n "$keycall" ] && [ -n "$keyclone" ] && [ "$keycall" -gt "$keyclone" ] 2>/dev/null; then
+        :
+    else
+        missing="$missing repo-key(after-clone)"
+    fi
+    if grep -q 'install-repo-key.sh' "$repo_root/.github/workflows/build.yml" 2>/dev/null; then
+        missing="$missing workflow(pre-clone-key-step)"
+    fi
     grep -q '^CONFIG_VERSION_DIST="BYTE"$' "$repo_root/preset" 2>/dev/null || \
         missing="$missing preset(VERSION_DIST)"
     # Image filenames must carry the derived version, not the static preset

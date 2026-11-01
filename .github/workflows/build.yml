@@ -71,18 +71,11 @@ jobs:
           restore-keys: |
             aw1000-${{ env.TARGET_BRANCH }}-
 
-      - name: Install opkg repo signing key
-        if: github.ref_name == 'main'
-        run: |
-          # A stable key keeps the image and the published repo in agreement.
-          # base-files only generates key-build when it is missing, so a
-          # committed key is reused by every future build. Without this each
-          # run invents a new key: the image ships key N, the repo is signed
-          # with key N, but the NEXT build replaces the repo with key N+1 while
-          # devices still hold key N. opkg then prints "Updated list" while
-          # discarding every index, leaving /var/opkg-lists empty and nothing
-          # installable - a silent failure.
-          bash builder/.github/install-repo-key.sh builder/immortalwrt builder/repo-key
+      # The stable opkg signing key is installed by aw1000_byte.sh right after
+      # it clones ImmortalWrt, because the tree does not exist before that. A
+      # step here could only copy into a directory that may not be there yet
+      # (cache restore is what used to create it), and failed the whole build
+      # on a cold cache: cp: cannot create regular file ... No such file or directory
 
       - name: Build firmware
         working-directory: builder
