@@ -29,7 +29,7 @@ config internal 'themes'
 	option Bootstrap '/luci-static/bootstrap'
 	option BootstrapDark '/luci-static/bootstrap-dark'
 	option BootstrapLight '/luci-static/bootstrap-light'
-	option Footstrap '/luci-static/footstrap'
+	option FootStrap '/luci-static/footstrap'
 
 config internal 'apply'
 	option rollback '90'

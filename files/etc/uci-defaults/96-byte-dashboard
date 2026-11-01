@@ -8,8 +8,10 @@ if [ -x /etc/init.d/byte-status-cache ]; then
 	/etc/init.d/byte-status-cache enable 2>/dev/null
 	/etc/init.d/byte-status-cache start 2>/dev/null
 fi
-# The dashboard widget layout is user state: ship the AW1000 widget ids so the
-# cards are visible on the first visit instead of requiring Dashboard -> Layout.
+# Nothing writes the widget layout: with the dashboard API from 2026-09-24 the
+# defaults already list every widget an include declares, so the AW1000 cards
+# appear on the first visit. Only make sure the package's service, where the
+# version has one, is not left disabled.
 if [ -x /etc/init.d/luci-mod-dashboard ]; then
 	/etc/init.d/luci-mod-dashboard enable 2>/dev/null
 fi

@@ -3,9 +3,10 @@
 'require fs';
 'require view.dashboard.lib.charts as charts';
 
-// The connections ECM has offloaded to the NSS firmware, as /usr/sbin/aw1000-leds
-// records them every poll. The firmware's own load figure is not among them:
-// it is only refreshed while the NSS clock scales itself, which is off here.
+// The connections ECM has offloaded to the NSS firmware, as
+// /usr/sbin/byte-status-cache records them every poll. The firmware's own load
+// figure is not among them: it is only refreshed while the NSS clock scales
+// itself, which is off here.
 const FILE = '/tmp/aw1000-status/nss';
 
 function num(v) {

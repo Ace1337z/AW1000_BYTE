@@ -3,8 +3,8 @@
 'require fs';
 'require view.dashboard.lib.charts as charts';
 
-// The AW1000's temperatures, as /usr/sbin/aw1000-leds records them every
-// poll: the hottest sensor of each group, in °C.
+// The AW1000's temperatures, as /usr/sbin/byte-status-cache records them
+// every poll: the hottest sensor of each group, in °C.
 const FILE = '/tmp/aw1000-status/thermal';
 
 // The charts start at 0, so temperatures are plotted from 20 °C up.

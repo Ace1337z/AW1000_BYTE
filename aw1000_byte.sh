@@ -159,14 +159,24 @@ update_feeds() {
     # keeping a second JS theme costs space and its luci-app-vantage dashboard
     # duplicates pages the Vantage-derived widgets now provide.
     sed -i '\#^src-git vantage #d' feeds.conf.default 2>/dev/null
-    # luci feed: the v25.12.1 pin (ed7692cb, 2026-07-06) predates the Footstrap
-    # theme, which landed on the branch on 2026-09-03. defconfig drops unknown
-    # symbols silently, so CONFIG_PACKAGE_luci-theme-footstrap=y was ignored,
-    # the image shipped Bootstrap, and the BYTE logo overrides under files/
-    # (footstrap assets) had no theme to attach to. Pin the last commit of the
-    # theme's landing series: same day, so the feed stays as close to the
-    # release tag as having the theme allows.
-    sed -i -E 's#^(src-git luci https://github\.com/immortalwrt/luci\.git)\^[0-9a-f]+#\1^17b3c7daab81c06396f0d9eb35012777dbc36436#' feeds.conf.default
+    # luci feed: pinned to  2026-10-10  (350fc919675b) - the first 25.12-series
+    # commit that carries the dashboard widget API. The widgets under
+    # files/www/.../view/dashboard/include/ require view/dashboard/lib/{charts,
+    # history,layout,system,widgets}.js and the cards|charts|tabs slot layout,
+    # which landed on 2026-09-24 (ee2fe5b961b5). On an older pin the require
+    # rejects, the widget's load() catch sets failed=true and the dashboard
+    # silently falls back to the stock Router/LAN/WiFi sections.
+    sed -i -E 's#^(src-git luci https://github\.com/immortalwrt/luci\.git)\^[0-9a-f]+#\1^350fc919675bb62e415927afff65697fcb8f775d#' feeds.conf.default
+    # Footstrap theme: upstream standalone repo at v0.14.19 (b9967e43c5ec,
+    # 2026-11-01) instead of the luci feed's copy, which is a divergent older
+    # lineage (fs-appearance.js / menu-footstrap-common.js, no styles/ tree)
+    # and lags the theme author's releases by months.
+    # Order is load-bearing: scripts/feeds resolves a source name that exists
+    # in two feeds by feed order, and only the first one is installed - the
+    # other is skipped silently. Inserting before the luci line makes this repo
+    # win; appending it would leave the image on the luci feed's copy.
+    sed -i '\#^src-git footstrap #d' feeds.conf.default 2>/dev/null
+    sed -i '/^src-git luci /i src-git footstrap https://github.com/VizzleTF/luci-theme-footstrap.git^b9967e43c5ec09aec0771cfeecde35525640fd9d' feeds.conf.default
     sed -i '\#^src-git fxs #d' feeds.conf.default 2>/dev/null
     # NSS offload: qca-nss-drv + qca-nss-ecm (QSDK 12.5, kernel 6.12 patches)
     grep -q '^src-git nss ' feeds.conf.default 2>/dev/null || \
@@ -194,7 +204,9 @@ update_feeds() {
         echo 'src-git nikki https://github.com/nikkinikki-org/OpenWrt-nikki.git^78e1a751d55ed0762811f054ee699049473da7b8' >> feeds.conf.default
     # luci-app-modeminfo is vendored as a local package (its repo has a
     # root-level Makefile that the feeds scanner cannot index); see packages/.
-    # footstrap theme ships in immortalwrt/luci, no external feed needed
+    # luci-theme-footstrap is NOT vendored: it comes from the pinned upstream
+    # feed added above, and its Makefile includes $(TOPDIR)/feeds/luci/luci.mk,
+    # so the luci feed must stay in feeds.conf.default.
 
     echo -e "${BOLD_YELLOW}UPDATING FEEDS${RESET}"
     ./scripts/feeds update -a && ./scripts/feeds install -a || {
@@ -841,8 +853,31 @@ ci_check_packages() {
     awk '/^on:/,/^permissions:/' "$repo_root/.github/workflows/build.yml" 2>/dev/null | \
         grep -q '^ *- version\.env$' || \
         missing="$missing version(workflow-path)"
-    grep -q 'luci\.git\^17b3c7da' "$repo_root/aw1000_byte.sh" 2>/dev/null || \
-        missing="$missing luci-feed-pin(footstrap)"
+    # The dashboard include/*.js widgets need view/dashboard/lib/* from the luci
+    # feed and land as a silent no-op on an older pin, so pin and payload are
+    # both asserted.
+    grep -q 'luci\.git\^350fc919675b' "$repo_root/aw1000_byte.sh" 2>/dev/null || \
+        missing="$missing luci-feed-pin(dashboard-lib)"
+    [ -f feeds/luci/modules/luci-mod-dashboard/htdocs/luci-static/resources/view/dashboard/lib/charts.js ] || \
+        missing="$missing dashboard-lib(charts.js)"
+    # Footstrap comes from the upstream standalone repo, and that feed line must
+    # come BEFORE the luci line: scripts/feeds installs only the first feed that
+    # provides a source name and skips the rest without a word, so a later line
+    # would silently ship the luci feed's divergent older copy.
+    grep -q 'VizzleTF/luci-theme-footstrap\.git\^b9967e43c5ec09aec0771cfeecde35525640fd9d' \
+        "$repo_root/aw1000_byte.sh" 2>/dev/null || \
+        missing="$missing footstrap-feed-pin(0.14.19)"
+    # Order in the generated feeds.conf.default, not in this script: the line is
+    # inserted with sed's `i`, so the two orders below are the whole difference
+    # between shipping 0.14.19 and silently shipping the luci feed's copy.
+    awk '/^src-git luci /{ l = NR } /^src-git footstrap /{ f = NR } END { exit !(f && l && f < l) }' \
+        feeds.conf.default 2>/dev/null || \
+        missing="$missing footstrap-feed-order(before-luci)"
+    # The install directory is the proof: package/feeds/<feed>/<pkg> only exists
+    # for the feed scripts/feeds actually picked, so a lost ordering race shows
+    # up here instead of as an unexpectedly old theme on the router.
+    [ -f package/feeds/footstrap/luci-theme-footstrap/Makefile ] || \
+        missing="$missing footstrap-from-feed(footstrap)"
     # Anything the boot sequence executes must carry the exec bit in git: the
     # image copies these files verbatim, so a 100644 init script is installed
     # and never run (this bit qmodem_ttl once, which made the TTL rule absent).

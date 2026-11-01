@@ -7,9 +7,9 @@
 'require aw1000.mcc as mcc';
 'require aw1000.cell as rf';
 
-// The AW1000's 5G modem, from what /usr/sbin/aw1000-leds saves while it
-// polls the modem for the front panel LEDs. Only that loop talks to the
-// modem, so any number of open dashboards cost no AT commands.
+// The AW1000's 5G modem, from what /usr/sbin/byte-status-cache saves while
+// it polls the modem. Only that loop talks to the modem, so any number of
+// open dashboards cost no AT commands.
 const CACHE = '/tmp/aw1000-status/';
 
 // Where the dashboard's samples keep the per-device [ rx, tx ] byte counts.
