@@ -111,7 +111,7 @@ for tag in "$@"; do
 		echo "| **WiFi** | SSID \`BYTE\` on 2.4 + 5 GHz, open |"
 		echo "| **Proxy** | passwall + passwall2, Xray core |"
 		echo "| **Phone** | RJ11 via \`fxsd\`, PCM slave, SLIC DSP patch |"
-		echo "| **Theme** | Vantage (default), Footstrap, Bootstrap |"
+		echo "| **Theme** | Footstrap (default), Bootstrap |"
 		echo
 		echo "## Feed pins"
 		echo

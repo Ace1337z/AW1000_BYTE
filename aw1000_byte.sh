@@ -810,6 +810,12 @@ ci_check_packages() {
     if grep -q 'install-repo-key.sh' "$repo_root/.github/workflows/build.yml" 2>/dev/null; then
         missing="$missing workflow(pre-clone-key-step)"
     fi
+    # Every local image the README references must exist, or the page renders a
+    # broken image on GitHub. Remote (http) references are skipped.
+    for img in $(grep -oE '!\[[^]]*\]\([^)]*\)' "$repo_root/README.md" 2>/dev/null |
+        sed -e 's/^.*](//' -e 's/)$//' | grep -v '^http'); do
+        [ -e "$repo_root/$img" ] || missing="$missing readme-image($img)"
+    done
     grep -q '^CONFIG_VERSION_DIST="BYTE"$' "$repo_root/preset" 2>/dev/null || \
         missing="$missing preset(VERSION_DIST)"
     # Image filenames must carry the derived version, not the static preset

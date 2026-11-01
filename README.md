@@ -11,7 +11,10 @@ all work out of the box — no setup wizards, no manual feed patching.
 [![Base](https://img.shields.io/badge/ImmortalWrt-25.12-3d8b40?style=for-the-badge)](https://github.com/immortalwrt/immortalwrt)
 [![Kernel](https://img.shields.io/badge/kernel-6.12.94-8e7cc3?style=for-the-badge)](#)
 
-![Vantage dashboard](docs/screenshots/dashboard-dark.png)
+![Dashboard](docs/screenshots/dashboard.png)
+<sub>Dashboard: modem signal, temperatures and NSS-offload cards. Screenshot from
+[XT-Martinez/aw1000-feed](https://github.com/XT-Martinez/aw1000-feed), whose widgets this image ports
+onto `luci-mod-dashboard`.</sub>
 
 ---
 
@@ -180,6 +183,11 @@ Complete history, newest first. Every entry names the symptom it cures.
 | **Cold-cache build failure** | The `Install opkg repo signing key` step ran *before* `aw1000_byte.sh` cloned ImmortalWrt, so `cp` into `builder/immortalwrt/` failed — `cp: cannot create regular file 'builder/immortalwrt/key-build': No such file or directory` — on every run whose cache restore did not happen to pre-create that directory (i.e. every cold cache). The step exited 1 and the run went red before compiling anything: run 41358300178 died exactly there. The key copy now happens inside `aw1000_byte.sh` right after the clone (`install_repo_key()`), where the tree is guaranteed to exist; the workflow step and `.github/install-repo-key.sh` are removed, and CI asserts the call stays after the clone |
 | **`version.env` triggers a build** | It is a build input but was missing from the workflow `paths` filter, so changing `FW_MAJOR`/`FW_BASE` alone produced no image at all. Added |
 | **Image filename matches Status** | `rename_output()` used to take the version tag from the static `preset`, so the second commit would have shipped `BYTE 25.12(6.12.94) 1.2.2` in Status inside a file named `...-1.2.1-...`. It now reads `CONFIG_VERSION_CODE` from the generated `.config` (preset only as fallback), so the version in the filename, the version in Status and the commit count are the same number |
+**Docs**
+| Change | Detail |
+|---|---|
+| **Screenshot replaced** | The README header showed a Vantage dashboard, a theme this image does not ship. It now shows one screenshot of the AW1000 dashboard (modem signal, temperatures, NSS offload), taken from [XT-Martinez/aw1000-feed](https://github.com/XT-Martinez/aw1000-feed) — the feed these widgets were ported from — with the credit line under it. The old dark/light pair is deleted, and the second copy inside `Licensing` is gone: one image, one place. Note the upstream repo declares no licence, so the image is credited to its author rather than relicensed here; a capture of this build should replace it when one is available |
+| **Stale theme line** | The generated release notes still advertised `Vantage (default), Footstrap, Bootstrap` long after `luci-app-vantage` and `luci-theme-vantage` were dropped. Both scripts now say `Footstrap (default), Bootstrap` |
 **Checked, unchanged**
 | | |
 |---|---|
@@ -423,10 +431,3 @@ Prints one line per check and a final `PASS n checks` or `FAIL n mismatches`.
 - **QCA NSS driver and firmware** (QSDK 12.5) — Qualcomm licence applies.
 
 Review both before republishing any image built from this repository.
-
-<details>
-<summary>Screenshots</summary>
-
-![Vantage dashboard, light](docs/screenshots/dashboard-light.png)
-
-</details>
