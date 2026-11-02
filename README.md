@@ -393,6 +393,32 @@ patch `0026` compiles as-is.
 `fullconenat`; on 6.12 the symbol is undefined, so `0026`'s `notifier_block`
 branch is inert here and only pays off if the target ever moves to 6.18.
 
+### NSS feature flags are module flags, not kernel symbols
+
+Worth writing down because it is easy to get wrong: `NSS_DRV_RMNET_ENABLE` and
+its ~40 siblings are **not** kernel config symbols. `qca-nss-drv`'s
+`KernelPackage` block has no `KCONFIG` at all; the options are
+`PKG_CONFIG_DEPENDS` plus `feeds/nss/qca-nss-drv/Config.in`, and the package
+Makefile turns each one into a module define:
+
+```make
+ifndef CONFIG_NSS_DRV_RMNET_ENABLE
+   DRV_MAKE_OPTS += NSS_DRV_RMNET_ENABLE=n
+endif
+```
+
+Consequences: they never appear in `.config.override` and never in any kernel
+`.config`, so `grep CONFIG_NSS_DRV_... .config` proves nothing. What actually
+proves the flag took effect is the built module — ECM's RAWIP front end calls
+`nss_rmnet_rx_get_ifnum`, so:
+
+```
+nm -g build_dir/target-*/linux-qualcommax_ipq807x/qca-nss-drv-*/qca-nss-drv.ko \
+  | grep nss_rmnet_rx_get_ifnum
+```
+
+must print the symbol. The `packages` gate runs exactly that.
+
 ### Runtime fail-safe
 
 `/etc/init.d/byte-selfcheck` gained `check_nss()`:
@@ -435,8 +461,8 @@ it goes green, so the loop after a fix is minutes instead of hours:
 | `tools`, `toolchain` | host tools and cross gcc build | 20-30 min |
 | `config` | `make defconfig` kept every `=y` package `preset` asked for, and names the ones it silently dropped | seconds |
 | `target` | qualcommax 6.12.94 plus `nss/target` patches apply and the kernel builds | 15-25 min |
-| `kconf` | the *built* kernel config really has `NF_CONNTRACK_DSCPREMARK_EXT` and `NSS_DRV_RMNET_ENABLE`, and has no `CONFIG_BONDING` or `ECM_INTERFACE_BOND_ENABLE` left | seconds |
-| `packages` | every enabled package compiles, incl. ECM, NSS drv, vendor modem drivers | 30-50 min |
+| `kconf` | the *built* kernel config really has `NF_CONNTRACK_DSCPREMARK_EXT` (and `.config.override` carries it), and has no `CONFIG_BONDING` or `ECM_INTERFACE_BOND_ENABLE` left | seconds |
+| `packages` | every enabled package compiles, no `*.rej`/`*.orig` anywhere, `qmi_wwan_q` source is really patched, `qca-nss-drv.ko` really exports `nss_rmnet_rx_get_ifnum` | 30-50 min |
 | `js` | `node --check` on every shipped LuCI view | seconds |
 | `image` | squashfs, sysupgrade tar and manifest assemble | 10-20 min |
 | `ondemand`, `repo` | the on-demand package set and the signed opkg repo build | 20-40 min |
@@ -481,6 +507,16 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-02
+- **Gate fix: `NSS_DRV_*` is not a kernel symbol.** The first `kconf` gate run
+  asserted `CONFIG_NSS_DRV_RMNET_ENABLE=y` in the built kernel `.config` and
+  failed — correctly, because `qca-nss-drv`'s `KernelPackage` has no `KCONFIG`;
+  the options are `PKG_CONFIG_DEPENDS` + `Config.in` that the Makefile turns
+  into `DRV_MAKE_OPTS += NSS_DRV_X_ENABLE=n` module defines. They never reach
+  any kernel config. The gate now checks the built `qca-nss-drv.ko` for the
+  `nss_rmnet_rx_get_ifnum` export (the symbol ECM's RAWIP path calls), and
+  `DSCPREMARK` is checked in `.config.override` (where a kmod `KCONFIG` really
+  lands). Both green: kernel `6.12.94`, `CONFIG_NF_CONNTRACK_DSCPREMARK_EXT=y`,
+  no `CONFIG_BONDING`, no `ECM_INTERFACE_BOND_ENABLE` in ECM source.
 - **Config fix: 10 dead `preset` lines removed.** `make defconfig` drops a
   `CONFIG_PACKAGE_x=y` whose symbol no longer exists and only warns, so the
   new `config` gate found lines that had been inert for unknown releases:

@@ -96,6 +96,21 @@ gate_packages()  {
             echo "ok   qmi_wwan_q source has the NSS hook removed"
         fi
     fi
+    # NSS_DRV_RMNET_ENABLE is a module -D flag, not a kernel symbol: the only
+    # place it is observable is the built qca-nss-drv.ko. ECM's RAWIP front end
+    # calls this export, so its absence is a runtime break, not a warning.
+    local drv
+    drv=$(ls "$tree"/build_dir/target-*/linux-qualcommax_ipq807x/qca-nss-drv-*/qca-nss-drv.ko 2>/dev/null | head -1)
+    if [ -n "$drv" ]; then
+        if nm -g "$drv" 2>/dev/null | grep -q ' nss_rmnet_rx_get_ifnum$'; then
+            echo "ok   qca-nss-drv exports nss_rmnet_rx_get_ifnum (NSS_DRV_RMNET_ENABLE compiled in)"
+        else
+            echo "FAIL $drv does not export nss_rmnet_rx_get_ifnum (ECM RAWIP would break)"
+            bad=1
+        fi
+    else
+        echo "note qca-nss-drv.ko not found - cannot check the RMNET export"
+    fi
     return $bad
 }
 # Full world: reuses everything above, then assembles squashfs/sysupgrade.
@@ -145,27 +160,39 @@ gate_js() {
     return $bad
 }
 
-# Kernel-config gate: proves the NSS/DSCPREMARK options reached the *built*
-# kernel config (KCONFIG of a package only lands in .config.override) and that
-# the QSDK bonding front end is really gone.
+# Kernel-config gate: proves the DSCPREMARK kernel patch reached the *built*
+# kernel config and that the QSDK bonding front end is really gone.
+#
+# NSS_DRV_* is deliberately NOT checked here: qca-nss-drv's KernelPackage has
+# no KCONFIG at all. Those options are PKG_CONFIG_DEPENDS + a feed Config.in
+# that the package Makefile turns into `DRV_MAKE_OPTS += NSS_DRV_X_ENABLE=n`,
+# i.e. -D flags for the module. They never appear in any kernel .config, so the
+# real proof is an exported symbol in the built .ko (checked in gate_packages).
 gate_kconf() {
     local ldir kc
     ldir=$(ls -d "$tree"/build_dir/target-*/linux-qualcommax_ipq807x/linux-6.12.* 2>/dev/null | head -1)
     [ -n "$ldir" ] || { echo "no kernel build dir - run the target gate first"; return 1; }
     kc="$ldir/.config"
-    echo "kernel: $(sed -n 's/^# Linux\/.* \([0-9.]*\).*/\1/p' "$ldir/Makefile" | head -1)"
+    echo "kernel: $(awk -F' = ' '/^VERSION = |^PATCHLEVEL = |^SUBLEVEL = /{printf "%s.", $2}' "$ldir/Makefile" | sed 's/\.$//')"
     local bad=0
-    for sym in CONFIG_NF_CONNTRACK_DSCPREMARK_EXT CONFIG_NSS_DRV_RMNET_ENABLE; do
-        if grep -qx "$sym=y" "$kc"; then echo "ok   $sym=y"; else echo "FAIL $sym missing from $kc"; bad=1; fi
-    done
+    if grep -qx 'CONFIG_NF_CONNTRACK_DSCPREMARK_EXT=y' "$kc"; then
+        echo "ok   CONFIG_NF_CONNTRACK_DSCPREMARK_EXT=y"
+    else
+        echo "FAIL CONFIG_NF_CONNTRACK_DSCPREMARK_EXT missing from $kc"; bad=1
+    fi
     if grep -qx 'CONFIG_BONDING=y' "$kc"; then echo "FAIL CONFIG_BONDING=y (ECM bonding front end still enabled)"; bad=1; else echo "ok   CONFIG_BONDING is not set"; fi
     if grep -rq 'ECM_INTERFACE_BOND_ENABLE' "$tree"/feeds/nss/qca-nss-ecm/src 2>/dev/null; then
         echo "FAIL ECM_INTERFACE_BOND_ENABLE still in ECM source"; bad=1
     else
         echo "ok   no ECM_INTERFACE_BOND_ENABLE in ECM source"
     fi
-    if [ -f "$ldir/.config.override" ]; then
-        echo "--- .config.override ---"; cat "$ldir/.config.override"
+    # The KCONFIG line of kmod-nf-conntrack lands in .config.override (a kernel
+    # symbol never appears in the top-level .config); its presence there proves
+    # the package's KCONFIG was honoured and the patch's `default y` was seen.
+    if grep -qx 'CONFIG_NF_CONNTRACK_DSCPREMARK_EXT=y' "$ldir/.config.override"; then
+        echo "ok   .config.override carries it (kmod-nf-conntrack KCONFIG honoured)"
+    else
+        echo "FAIL .config.override lacks NF_CONNTRACK_DSCPREMARK_EXT"; bad=1
     fi
     return $bad
 }
