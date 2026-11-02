@@ -392,13 +392,46 @@ offload, which is no longer what happens. The UCI schema, field names and
 datatypes are identical, so `luci-app-qmodem-ttlfw4` remains the owner of the
 page and of `/etc/config/qmodem_ttl`.
 
+### Local build verification (CI is the release path, not the debugger)
+
+A GitHub run costs about three hours and stops at the first failing package, so
+every unknown used to cost a full run: ndisc6's dead URL, then ndisc6's stale
+patches, then `qmi_wwan_q`'s undefined `rmnet_nss_callbacks` were three separate
+runs for three one-line fixes. That is not a build process, it is a queue.
+
+`scripts/local-verify.sh` reproduces the exact CI job locally and splits it into
+ordered gates. Each gate logs to `/tmp/opencode/gate_<name>.log`, records a
+stamp in `immortalwrt/.local-verify/<name>.ok`, and is skipped on re-run until
+it goes green, so the loop after a fix is minutes instead of hours:
+
+| gate | what it proves | typical cost |
+|------|----------------|--------------|
+| `download` | no source URL is dead or moved (`ndisc6` class) | 5-10 min |
+| `tools`, `toolchain` | host tools and cross gcc build | 20-30 min |
+| `config` | `make defconfig` kept every `=y` package `preset` asked for, and names the ones it silently dropped | seconds |
+| `target` | qualcommax 6.12.94 plus `nss/target` patches apply and the kernel builds | 15-25 min |
+| `kconf` | the *built* kernel config really has `NF_CONNTRACK_DSCPREMARK_EXT` and `NSS_DRV_RMNET_ENABLE`, and has no `CONFIG_BONDING` or `ECM_INTERFACE_BOND_ENABLE` left | seconds |
+| `packages` | every enabled package compiles, incl. ECM, NSS drv, vendor modem drivers | 30-50 min |
+| `js` | `node --check` on every shipped LuCI view | seconds |
+| `image` | squashfs, sysupgrade tar and manifest assemble | 10-20 min |
+| `ondemand`, `repo` | the on-demand package set and the signed opkg repo build | 20-40 min |
+
+`config` is the gate that catches the quiet failure mode: `make defconfig`
+discards a `CONFIG_PACKAGE_x=y` whose package or dependency does not exist and
+prints at most a warning, so a missing LuCI app can reach the image without ever
+failing a build.
+
+Only a green `repo` gate justifies a push. CI then re-confirms the same targets
+and publishes the artifacts; it no longer discovers problems.
+
 ### Open items
 
 - **Untested on hardware.** The changes are build-validated only. Needed on a
   spare unit: `logread | grep byte-selfcheck`, `nss-offload status`, and a
   tcpdump on the modem netdev confirming TTL 64 for both forwarded and
   router-originated traffic.
-- **ECM 12.5 on 6.12.94 with bonding off** has not been compiled yet.
+- **ECM 12.5 on 6.12.94 with bonding off** is being compiled locally before the
+  next push.
 - **ECM state device** availability at boot is assumed from source, not seen.
 - **Recovery path unconfirmed** on the target unit (no serial session yet), so
   no image has been flashed from this branch.
@@ -422,6 +455,19 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-02
+- **New: `scripts/local-verify.sh` — build locally, push once.** CI is a ~3 h
+  run that stops at the first failure, so the last four fixes each cost a full
+  run to discover. The script reproduces the CI job as ordered gates
+  (`download`, `tools`, `toolchain`, `config`, `target`, `kconf`, `packages`,
+  `js`, `image`, `ondemand`, `repo`), logs each to
+  `/tmp/opencode/gate_<name>.log`, and resumes at the first gate that is not
+  yet green. The `config` gate diffs the `=y` set requested by `preset`
+  against what `make defconfig` actually kept, and classifies each loss as
+  "no such package in any feed" or "dependency unmet" — `defconfig` drops
+  those with a warning only. The `kconf` gate asserts the *built* kernel
+  config (not the top-level one) has `NF_CONNTRACK_DSCPREMARK_EXT` and
+  `NSS_DRV_RMNET_ENABLE` and has no `CONFIG_BONDING`. Pushing only after
+  `repo` is green makes CI a publisher instead of a debugger.
 - **Build fix: `qmi_wwan_q` no longer needs `rmnet_nss_callbacks`.** The
   vendor driver defines `CONFIG_QCA_NSS_DRV` on IPQ807x and links against
   `rmnet_nss.ko`, which cannot be selected here (its `+@NSS_DRV_C2C_ENABLE`
