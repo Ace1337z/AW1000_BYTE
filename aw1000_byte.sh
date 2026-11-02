@@ -440,6 +440,26 @@ apply_preset() {
         exit 1
     fi
     echo -e "${BOLD_GREEN}kmod-ipt-ipopt: +kmod-nf-conntrack (xt_DSCP -> nf_conntrack.ko)${RESET}"
+    # ndisc6 1.0.2 no longer exists anywhere fetchable: remlab.net answers 410
+    # Gone (upstream keeps only 1.0.8/1.0.9) and neither the ImmortalWrt nor the
+    # OpenWrt source mirrors ever carried it, so `make world` ended with
+    # "No more mirrors to try - giving up" (run 41400987301). qmodem pulls
+    # ndisc6/rdisc6 in whenever luci-app-qmodem is enabled, so the download sits
+    # on the critical path. Bump the feed copy to 1.0.8 - the release Debian
+    # tracks - and switch the URL to https, because remlab 301-redirects http
+    # to https and a redirect chain is one more way for the fetch to fail.
+    local ndm="$PWD/feeds/qmodem/application/ndisc6/Makefile"
+    if [ -f "$ndm" ]; then
+        sed -i -e 's|^PKG_VERSION:=.*|PKG_VERSION:=1.0.8|' \
+            -e 's|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=https://www.remlab.net/files/ndisc6|' \
+            -e 's|^PKG_MD5SUM:=.*|PKG_MD5SUM:=335a810a0180d36a1e2a5a81c425e2d6|' "$ndm"
+        if ! grep -q '^PKG_VERSION:=1\.0\.8$' "$ndm" || \
+                ! grep -q '^PKG_MD5SUM:=335a810a0180d36a1e2a5a81c425e2d6$' "$ndm"; then
+            echo -e "${BOLD_RED}ndisc6: could not pin 1.0.8${RESET}"
+            exit 1
+        fi
+        echo -e "${BOLD_GREEN}ndisc6: 1.0.2 -> 1.0.8 (1.0.2 answered 410)${RESET}"
+    fi
 }
 
 run_menuconfig() {
@@ -611,7 +631,7 @@ apply_version() {
 
 # CI-only: fail fast if the preset did not resolve the required packages.
 ci_check_packages() {
-    local missing="" forbidden="" p
+    local missing="" forbidden="" p ndm
     # ci_check_packages runs with CWD=immortalwrt, so repo paths must be
     # resolved via $script_dir rather than assumed relative.
     local repo_root="$(realpath "$script_dir" 2>/dev/null)"
@@ -719,6 +739,24 @@ ci_check_packages() {
         package/kernel/linux/modules/netfilter.mk 2>/dev/null | \
         grep -q 'AddDepends/ipt,+kmod-nf-conntrack' || \
         missing="$missing kmod-ipt-ipopt(nf_conntrack dep)"
+    # ndisc6/rdisc6 come in with luci-app-qmodem, so their tarball is on the
+    # `make world` critical path. Upstream remlab.net now keeps only 1.0.8 and
+    # 1.0.9; the feed copy asked for 1.0.2, which answers 410 there and was
+    # never mirrored by ImmortalWrt or OpenWrt - the build died with "No more
+    # mirrors to try - giving up" (run 41400987301). apply_preset() rewrites the
+    # feed Makefile to 1.0.8 with a pinned hash and an https URL; assert all
+    # three, because a feed bump would bring the dead 1.0.2 reference back.
+    ndm="feeds/qmodem/application/ndisc6/Makefile"
+    if [ -f "$ndm" ]; then
+        grep -q '^PKG_VERSION:=1\.0\.8$' "$ndm" || \
+            missing="$missing ndisc6-1.0.8(1.0.2 is 410 upstream)"
+        grep -q '^PKG_MD5SUM:=335a810a0180d36a1e2a5a81c425e2d6$' "$ndm" || \
+            missing="$missing ndisc6-md5(pinned)"
+        grep -q '^PKG_SOURCE_URL:=https://www\.remlab\.net/files/ndisc6$' "$ndm" || \
+            missing="$missing ndisc6-url(https, no redirect)"
+    else
+        missing="$missing ndisc6-feed-Makefile"
+    fi
     # Ruby's Kconfig defaults RUBY_ENABLE_YJIT to y on aarch64 and that pulls
     # rust/host into the build. The Rust host package downloads prebuilt LLVM
     # from ci-artifacts.rust-lang.org, and rust-lang rotates those out, so the

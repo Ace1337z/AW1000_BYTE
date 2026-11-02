@@ -271,6 +271,27 @@ for a package that is not installed. The correct long-term shape is to build
 them as on-demand packages (`build-ondemand-packages.sh`) and drop them from
 `preset`; that is deferred until the image is confirmed booting.
 
+### ndisc6 1.0.2 is gone (build fix)
+`luci-app-qmodem` pulls `ndisc6` and `rdisc6` in (`PACKAGE_luci-app-qmodem_INCLUDE_ndisc6`
+/ `_INCLUDE_rdisc6`), so the tarball for them sits on the `make world` critical
+path. The qmodem feed copy still asked for `ndisc6-1.0.2.tar.bz2` from
+`http://www.remlab.net/files/ndisc6`; remlab keeps only 1.0.8 and 1.0.9 now, so
+the URL answers `301` to https and the file itself `410 Gone`. Neither the
+ImmortalWrt nor the OpenWrt source mirrors ever carried 1.0.2, so the build ran
+out of mirrors:
+```
+Download failed.
+No more mirrors to try - giving up.
+```
+(run `41400987301`, after ~3 h of compiling).
+`apply_preset()` now rewrites the feed `Makefile` in place to `PKG_VERSION:=1.0.8`
+(the release Debian itself tracks), `PKG_MD5SUM:=335a810a0180d36a1e2a5a81c425e2d6`,
+and `PKG_SOURCE_URL:=https://www.remlab.net/files/ndisc6` — https on purpose,
+because the http URL is a `301` and every extra redirect is another way for a
+CI fetch to fail. Bumping in place is cheaper than vendoring the tarball: the
+package is autotools with a shipped `configure`, and 1.0.8 needs no patches.
+CI asserts the version, the hash and the https URL, since a feed bump would
+drag the dead 1.0.2 reference back.
 ### Conntrack events on 6.12 (checked, no action)
 
 ECM registers a conntrack notifier to release state as soon as a connection is
@@ -344,6 +365,11 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-02
+- **Build fix: `ndisc6` 1.0.2 → 1.0.8.** Upstream removed 1.0.2 and the
+  OpenWrt/ImmortalWrt mirrors never had it, so the download ended with "No more
+  mirrors to try - giving up" ~3 h into the build. The feed copy is bumped in
+  `apply_preset()` with a pinned MD5 and an https source URL; CI asserts all
+  three.
 - **Build fix: `RUBY_ENABLE_YJIT` off.** It defaults to `y` on aarch64 and
   pulls `rust/host` in, whose prebuilt-LLVM download now 404s upstream (build
   dies ~3 h in). YJIT cannot work on a cross-compiled aarch64 target anyway.
