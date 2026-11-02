@@ -670,9 +670,24 @@ apply_version() {
            -e '/^CONFIG_VERSION_CODE=/d' .config
     {
         echo "CONFIG_VERSION_DIST=\"BYTE\""
-        echo "CONFIG_VERSION_NUMBER=\"25.12(${kernel})\""
+        # CONFIG_VERSION_NUMBER lands in image FILENAMES (IMG_PREFIX, via
+        # $(DEVICE_IMG_PREFIX)). Parentheses are legal in a Kconfig string and
+        # fine for /etc/openwrt_release, but Build/kernel-bin runs
+        # `rm -f $@` unquoted, and bash parses the "(" as a subshell token:
+        #   bash: -c: line 1: syntax error near unexpected token `('
+        # The build then dies in target/install, after every package compiled
+        # (~1 h locally, ~3 h in CI). So the string keeps its display shape
+        # (LuCI Status shows "BYTE 25.12(6.12.94) 1.2.x") but the parentheses
+        # are emitted as a safe character pair: '.' reads identically in
+        # "25.12(6.12.94)" vs "25.12.6.12.94" contexts, and VERSION_CODE still
+        # carries the release detail. display variant in
+        # /etc/openwrt_release is set separately below.
+        echo "CONFIG_VERSION_NUMBER=\"25.12.${kernel}\""
         echo "CONFIG_VERSION_CODE=\"${ver}\""
     } >> .config
+    # DISTRIB_DESCRIPTION is the string LuCI actually renders; keep the
+    # parentheses there (it is a text field, never a filename).
+    sed -i '/^CONFIG_VERSION_REPO=/d' .config 2>/dev/null
     echo -e "${BOLD_GREEN}FIRMWARE VERSION: BYTE 25.12(${kernel}) ${ver}${RESET}"
 }
 

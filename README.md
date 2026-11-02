@@ -110,6 +110,12 @@ patch is `git rev-list --count FW_BASE..HEAD`, so there is no manual bump. The
 build aborts if the kernel version cannot be resolved rather than shipping
 `25.12(x)`.
 
+The parentheses are display-only. `CONFIG_VERSION_NUMBER` is built as
+`25.12.6.12.94` because that string also lands inside every image filename, and
+a `(` there breaks `Build/kernel-bin`'s unquoted `rm -f $@` (bash subshell
+token). At first boot `98-byte-version` rewrites `DISTRIB_DESCRIPTION` to the
+`25.12(<kernel>)` form using `/proc/version`, so Status and filenames agree.
+
 ## Build
 
 CI builds on every push to `main` that touches `preset`, `aw1000_byte.sh`,
@@ -528,6 +534,16 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-02
+- **Build fix: `25.12(6.12.94)` broke image assembly.** `CONFIG_VERSION_NUMBER`
+  flows into `IMG_PREFIX` → every image filename, and `Build/kernel-bin` runs
+  `rm -f $@` unquoted: bash parsed the `(` as a subshell token and killed
+  `target/install` after all packages had compiled — the failure class that
+  costs a whole run to discover, since CI had never reached image assembly.
+  The version string is now `25.12.6.12.94` (safe in filenames), and the
+  display form `25.12(6.12.94)` is restored at first boot by
+  `files/etc/uci-defaults/98-byte-version`, rewriting `DISTRIB_DESCRIPTION`
+  from the running kernel's `/proc/version`. LuCI Status still shows
+  `BYTE 25.12(6.12.94) <code>`.
 - **Gate fix: two false failures in the `packages` post-checks.** (1) With
   `set -o pipefail`, `nm -g <45 MB unstripped .ko> | grep -q` is a SIGPIPE
   race: `grep -q` exits on the first match, nm keeps writing, dies 141, and

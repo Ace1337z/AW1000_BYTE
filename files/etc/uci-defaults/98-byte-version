@@ -16,6 +16,14 @@ for f in /etc/openwrt_release; do
 	[ -f "$f" ] || continue
 	grep -q "BYTE-STABLE" "$f" 2>/dev/null && continue
 	sed -i "s/^DISTRIB_REVISION='\(.*\)'$/DISTRIB_REVISION='\1 ($CODE)'/" "$f"
+	# CONFIG_VERSION_NUMBER cannot carry parentheses - they end up inside
+	# image filenames and break Build/kernel-bin's unquoted `rm -f $@`
+	# ("syntax error near unexpected token `('"). So the version string is
+	# built as 25.12.6.12.94 and the release description is rewritten at
+	# first boot into the display form 25.12(6.12.94), using the running
+	# kernel's own version from /proc/version.
+	kver=$(awk '{print $3; exit}' /proc/version 2>/dev/null)
+	[ -n "$kver" ] && sed -i "s|^DISTRIB_DESCRIPTION='25\.12\.[0-9.]*'|DISTRIB_DESCRIPTION='25.12($kver)'|" "$f"
 	sed -i "s/^DISTRIB_DESCRIPTION='\(.*\)'$/DISTRIB_DESCRIPTION='\1 ($CODE)'/" "$f"
 done
 
