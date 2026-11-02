@@ -534,6 +534,17 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-03
+- **Build fix (CI-only): duplicate `luci-app-netstat` dropped its i18n
+  package.** The vendored app was de-duplicated against the `feeds/luci` copy
+  only, but the app also lives in `feeds/dotycat` — whose copy has no `po/`.
+  With both scanned, the package scanner kept the dotycat one silently
+  (`CONFIG_OVERRIDE_PKGS="luci-app-netstat"` in `.config` was the only trace),
+  so `luci-i18n-netstat-zh-cn` never existed and the new preset-index assert
+  correctly failed run `41538042529` at 10 min. Reproduced locally by
+  restoring the `package/feeds/dotycat/luci-app-netstat` symlink: symbol gone
+  from `.config`; removing it: symbol back. `apply_preset()` now removes the
+  dotycat copy too, and `ci_check_packages()` fails if any feed copy of the
+  app survives in a scanned location.
 - **Build fix (CI-only): stray `VERSION_REPO` delete killed run 41536683898
   at 8 min.** The parenthesized-`VERSION_NUMBER` fix accidentally left a
   `sed -i '/^CONFIG_VERSION_REPO=/d'` in `apply_version()`. On CI, where

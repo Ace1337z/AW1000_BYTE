@@ -388,11 +388,15 @@ apply_preset() {
     rm -rf package/feeds/nikki/mihomo-alpha feeds/nikki/mihomo-alpha
     echo -e "${BOLD_GREEN}mihomo-alpha VARIANT REMOVED (Kconfig cycle)${RESET}"
     # luci-app-netstat is vendored from packages/luci-app-netstat. If an
-    # upstream feed ever ships the same name, two packages would provide one
-    # Kconfig symbol and defconfig aborts - the same failure shape as
-    # weechat-full above. The vendored copy lives in package/, so removing the
-    # feed copy is safe.
-    rm -rf package/feeds/luci/luci-app-netstat feeds/luci/applications/luci-app-netstat
+    # upstream feed ever ships the same name, two package directories with one
+    # PKG_NAME collide and the scanner keeps ONE silently (CONFIG_OVERRIDE_PKGS
+    # shows the winner). The dotycat feed copy has no po/, so when it wins the
+    # i18n subpackage symbol vanishes and every preset i18n selection drops -
+    # reproduced locally: both dirs present => luci-i18n-netstat-zh-cn missing
+    # from .config. Remove BOTH feed locations (the vendored copy lives in
+    # package/ and has po/).
+    rm -rf package/feeds/luci/luci-app-netstat feeds/luci/applications/luci-app-netstat \
+           package/feeds/dotycat/luci-app-netstat
     echo -e "${BOLD_GREEN}luci-app-netstat FEED COPY REMOVED (vendored package wins)${RESET}"
     # luci-app-ramfree is vendored for the same reason: the luci feed is pinned
     # to 350fc919 (the first pin with view/dashboard/lib) and ImmortalWrt added
@@ -1036,6 +1040,15 @@ ci_check_packages() {
     # defconfig, so assert the source directories.
     for p in luci-app-netstat luci-app-ramfree luci-app-byte luci-app-modeminfo; do
         [ -f "$repo_root/packages/$p/Makefile" ] || missing="$missing vendored($p)"
+    done
+    # ...and that no feed copy of the vendored netstat app survived anywhere
+    # it would be scanned: a leftover duplicate PKG_NAME makes the scanner
+    # keep the feed copy (which lacks po/) and the i18n symbol disappears
+    # from .config. The feeds/ source dir itself is harmless (nothing scans
+    # it directly) and stays for the next feeds update.
+    for dup in package/feeds/luci/luci-app-netstat package/feeds/dotycat/luci-app-netstat \
+               feeds/luci/applications/luci-app-netstat; do
+        [ -e "$dup" ] && forbidden="$forbidden netstat-feed-copy-remains($dup - duplicate PKG_NAME drops the i18n symbol)"
     done
     # The self-check reads these files as the source of truth; a missing key
     # would make it assert the wrong thing.
