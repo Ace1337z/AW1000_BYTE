@@ -228,6 +228,18 @@ the wiring instead: the package still carries
 `KCONFIG:=CONFIG_NF_CONNTRACK_DSCPREMARK_EXT=y`, and the patch still has
 `default y`.
 
+The patch also touches `net/netfilter/xt_DSCP.c`: the DSCP target flags the
+connection so ECM can carry the mark into accelerated flows. That makes
+`xt_DSCP.ko` import `nf_conntrack.ko`, and `package/kernel`'s ELF dependency
+checker aborts the whole build when a module's import has no declared provider
+(`Package kmod-ipt-ipopt is missing dependencies for the following libraries:
+nf_conntrack.ko`) — it does not care that the provider is already installed,
+only that the package never says so. `kmod-ipt-ipopt` is defined in
+`package/kernel/linux/modules/netfilter.mk` and `AddDepends/ipt` emits
+`DEPENDS+=`, so `apply_preset()` rewrites that one line to
+`$(call AddDepends/ipt,+kmod-nf-conntrack)`. No flash cost: `kmod-nf-conntrack`
+is in the image regardless.
+
 ### Conntrack events on 6.12 (checked, no action)
 
 ECM registers a conntrack notifier to release state as soon as a connection is
@@ -301,6 +313,11 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-02
+- **Build fix: `kmod-ipt-ipopt` declares the conntrack dependency.** The
+  DSCPREMARK patch makes `xt_DSCP.ko` import `nf_conntrack.ko`, which the
+  kernel-package dependency checker treats as a hard error until the package
+  names the provider. `apply_preset()` switches the `ipt-ipopt` block to
+  `$(call AddDepends/ipt,+kmod-nf-conntrack)`; CI asserts the rewritten block.
 - **NSS/ECM ships and stays on.** `qca-nss-ecm` is back in the image and is
   never stopped by the TTL service. Modem egress (`wwan*`, `rmnet*`) is
   excluded from acceleration by ECM patch `0027`, so the TTL rewrite always

@@ -400,6 +400,46 @@ apply_preset() {
     # "Release RAM" entry would vanish. The package is ~1 KB of ucode + JSON.
     rm -rf package/feeds/luci/luci-app-ramfree feeds/luci/applications/luci-app-ramfree
     echo -e "${BOLD_GREEN}luci-app-ramfree VENDORED (missing at luci pin)${RESET}"
+    # xt_DSCP now calls the DSCPREMARK conntrack extension (kernel patch
+    # 0600-6), so xt_DSCP.ko imports nf_conntrack.ko. kmod-ipt-ipopt does not
+    # declare that dependency and package/kernel's ELF dependency checker then
+    # fails the whole build with
+    #   Package kmod-ipt-ipopt is missing dependencies for the following
+    #   libraries: nf_conntrack.ko
+    # (it resolves the import to the provider and finds it missing from the
+    # package's own provides list). AddDepends/ipt emits DEPENDS+=, so appending
+    # the kmod to that call adds it next to +kmod-ipt-core without touching the
+    # shared macro. kmod-nf-conntrack is already in the image, so this costs no
+    # flash and no boot time - it only records what the module already needs.
+    local nfm="$PWD/package/kernel/linux/modules/netfilter.mk"
+    if [ ! -f "$nfm" ]; then
+        echo -e "${BOLD_RED}package/kernel/linux/modules/netfilter.mk not found${RESET}"
+        exit 1
+    fi
+    if ! awk '/^define KernelPackage\/ipt-ipopt$/,/^endef$/' "$nfm" | \
+            grep -q 'AddDepends/ipt,+kmod-nf-conntrack'; then
+        # Anchor on the block, not on the file: AddDepends/ipt is shared by a
+        # dozen kmod packages and only xt_DSCP grew the import. The block has a
+        # single bare `$(call AddDepends/ipt)` line; rewrite just that one and
+        # keep its indentation.
+        awk -v rep='$(call AddDepends/ipt,+kmod-nf-conntrack)' '
+            /^define KernelPackage\/ipt-ipopt$/ { blk = 1 }
+            blk && /^[[:space:]]*\$\(call AddDepends\/ipt\)[[:space:]]*$/ {
+                match($0, /^[[:space:]]*/)
+                print substr($0, 1, RLENGTH) rep
+                blk = 0
+                next
+            }
+            /^endef$/ { blk = 0 }
+            { print }
+        ' "$nfm" >"$nfm.tmp" && mv "$nfm.tmp" "$nfm"
+    fi
+    if ! awk '/^define KernelPackage\/ipt-ipopt$/,/^endef$/' "$nfm" | \
+            grep -q 'AddDepends/ipt,+kmod-nf-conntrack'; then
+        echo -e "${BOLD_RED}kmod-ipt-ipopt still lacks +kmod-nf-conntrack${RESET}"
+        exit 1
+    fi
+    echo -e "${BOLD_GREEN}kmod-ipt-ipopt: +kmod-nf-conntrack (xt_DSCP -> nf_conntrack.ko)${RESET}"
 }
 
 run_menuconfig() {
@@ -669,6 +709,16 @@ ci_check_packages() {
         missing="$missing ecm-KCONFIG-dscpremark"
     grep -q '^+	default y$' "$repo_root/nss/target/linux/qualcommax/patches-6.12/0600-6-qca-nss-ecm-support-netfilter-DSCPREMARK.patch" 2>/dev/null || \
         missing="$missing dscpremark-default-y"
+    # The same patch makes xt_DSCP.ko import nf_conntrack.ko. The kernel-package
+    # dependency checker resolves that import to its provider package and aborts
+    # if kmod-ipt-ipopt does not declare it ("Package kmod-ipt-ipopt is missing
+    # dependencies for the following libraries: nf_conntrack.ko"). apply_preset()
+    # appends it to AddDepends/ipt; assert the rewritten block, because a
+    # netfilter.mk change upstream would silently drop it again.
+    awk '/^define KernelPackage\/ipt-ipopt$/,/^endef$/' \
+        package/kernel/linux/modules/netfilter.mk 2>/dev/null | \
+        grep -q 'AddDepends/ipt,+kmod-nf-conntrack' || \
+        missing="$missing kmod-ipt-ipopt(nf_conntrack dep)"
     # ECM must never be parked by the TTL service: modem egress is excluded in
     # the ECM source instead, so TTL and NSS run together. A script that stops
     # ECM re-introduces the old mutual-exclusion and loses LAN offload.
