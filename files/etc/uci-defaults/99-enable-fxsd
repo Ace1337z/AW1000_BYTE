@@ -85,10 +85,10 @@ if [ -x /etc/init.d/byte-affinity ]; then
 	/etc/init.d/byte-affinity start 2>/dev/null
 fi
 
-# NSS/ECM is NOT parked here any more: luci-app-qmodem-ttlfw4 owns that
-# decision. With TTL rewriting enabled (the shipped default) it stops ECM at
-# start; turning TTL off in LuCI starts ECM again so NSS offload works. Doing
-# both here and there produced a race whose loser was the TTL rule.
+# NSS/ECM is never parked. qca-nss-ecm ships enabled and both this script and
+# /etc/init.d/qmodem_ttl leave it alone: the modem data netdevs are excluded
+# from acceleration inside ECM itself (qca-nss-ecm patch 0027), so NSS offload
+# for bridge/LAN/WiFi and the TTL rewrite on the uplink run at the same time.
 # Ensure the modem dial interface remains the default route (qmodem can
 # leave network.wan.defaultroute unset on a fresh UCI).
 if uci -q get network.wan >/dev/null 2>&1; then

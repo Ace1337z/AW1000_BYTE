@@ -196,6 +196,77 @@ check_ttl() {
 	fi
 }
 
+# NSS/ECM must be loaded and accelerating, and it must never accelerate modem
+# egress: the TTL rewrite is a netfilter rule and an accelerated flow bypasses
+# netfilter. qca-nss-ecm patch 0027 registers wwan*/rmnet* as UNKNOWN with an
+# invalid accelerator ifnum, so the rule create is rejected and those flows
+# stay on the host path.
+#
+# The interface table is dumped through ECM's state char device. Its major is
+# exported in debugfs; the device node is not created by the image. Output mask
+# 16 selects ECM_STATE_FILE_OUTPUT_INTERFACES (512, the *_CHAIN variant, only
+# prints hash-chain lengths), and is restored to CONNECTIONS (1) afterwards.
+ECM_STATE_MASK=/sys/kernel/debug/ecm/ecm_state/state_file_output_mask
+ECM_ACCEL=/sys/kernel/debug/ecm/ecm_classifier_default/accel_mode
+
+ecm_state_dump() {
+	local maj node=/tmp/.ecm_state_dev
+	maj=$(cat /sys/kernel/debug/ecm/ecm_state/state_dev_major 2>/dev/null)
+	[ -n "$maj" ] || return 1
+	[ -w "$ECM_STATE_MASK" ] || return 1
+	# 16 = ECM_STATE_FILE_OUTPUT_INTERFACES: every interface instance with its
+	# name and ae_interface_identifier. 512 would be INTERFACES_CHAIN, which
+	# only prints per-hash-chain lengths, not the interfaces themselves.
+	echo 16 >"$ECM_STATE_MASK" 2>/dev/null || return 1
+	rm -f "$node"
+	mknod "$node" c "$maj" 0 2>/dev/null || {
+		echo 1 >"$ECM_STATE_MASK" 2>/dev/null
+		return 1
+	}
+	cat "$node" 2>/dev/null
+	rm -f "$node"
+	# Restore the default: 1 = ECM_STATE_FILE_OUTPUT_CONNECTIONS.
+	echo 1 >"$ECM_STATE_MASK" 2>/dev/null
+}
+
+check_nss() {
+	local mode dump=/tmp/.ecm_iface_state leak
+	if [ ! -d /sys/module/ecm ]; then
+		logger -t "$TAG" "nss.ecm: SKIP (not loaded)"
+		return
+	fi
+	report nss.ecm loaded loaded
+	mode=$(cat "$ECM_ACCEL" 2>/dev/null)
+	report nss.accel_mode 0 "$mode"
+	if ! ecm_state_dump >"$dump" 2>/dev/null; then
+		logger -t "$TAG" "nss.modem_excluded: SKIP (ECM state device unavailable)"
+		rm -f "$dump"
+		return
+	fi
+	# Lines look like
+	#   ifaces.iface.<subtype>.iface.name=wwan0
+	#   ifaces.iface.<subtype>.iface.ae_interface_identifier=-1
+	# in that order, so the name is known when the id is read. The subtype
+	# segment is not fixed (ethernet/bridge/pppoe/unknown/...), so match on the
+	# leaf key only; with mask 16 nothing but ifaces is in the dump.
+	leak=$(awk -F= '
+		/\.name=/ { n = $2 }
+		/\.ae_interface_identifier=/ {
+			a = $2 + 0
+			if (n ~ /^(wwan|rmnet)/ && a >= 0) print n " ae=" a
+		}' "$dump" | head -5)
+	rm -f "$dump"
+	if [ -n "$leak" ]; then
+		logger -t "$TAG" "ECM_MODEM_LEAK: modem iface has an accelerator id: $leak"
+		logger -t "$TAG" "stopping ECM: TTL rewrite must stay authoritative"
+		/etc/init.d/qca-nss-ecm stop 2>/dev/null
+		fails=$((fails + 1))
+	else
+		oks=$((oks + 1))
+		logger -t "$TAG" "nss.modem_excluded: OK (no wwan/rmnet iface accelerated)"
+	fi
+}
+
 start() {
 	logger -t "$TAG" "begin (mtu=$MTU_WANT governor=$GOV_WANT cpumask=$CPUMASK)"
 	check_cpu
@@ -204,6 +275,7 @@ start() {
 	check_zram
 	check_steering
 	check_ttl
+	check_nss
 	if [ "$fails" -eq 0 ]; then
 		logger -t "$TAG" "PASS ${oks} checks, 0 mismatches"
 	else

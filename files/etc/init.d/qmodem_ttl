@@ -1,9 +1,9 @@
 #!/bin/sh /etc/rc.common
 # TTL / Hop Limit rewrite for the modem uplink - BYTE by ACE override.
 #
-# Same UCI schema, same LuCI page and the same ECM parking as QModem's
-# luci-app-qmodem-ttlfw4, but the rule is written on the OUTPUT interface in
-# the postrouting hook instead of on `iifname br-lan`.
+# Same UCI schema and the same LuCI page as QModem's luci-app-qmodem-ttlfw4,
+# but the rule is written on the OUTPUT interface in the postrouting hook
+# instead of on `iifname br-lan`, and NSS/ECM is never parked.
 #
 # Why the override exists:
 #   Upstream writes
@@ -16,10 +16,15 @@
 #   forwarded and locally-originated traffic leaving through the modem, which
 #   is the set we actually want, and it still never touches LAN or loopback.
 #
-# Why ECM is stopped while this is on: ECM forwards established flows inside
-# the NSS engine, past netfilter, so an offloaded flow keeps the client's
-# original TTL. Turning TTL on parks ECM; turning TTL off (enable='0') starts
-# ECM again so NSS offload works. The two are mutually exclusive on this SoC.
+# Why NSS/ECM keeps running (2026-11-02 decision):
+#   ECM accelerates bridge, LAN<->WiFi and local flows in the NSS cores. It is
+#   NEVER stopped by this service. The TTL rewrite wins on the WAN because the
+#   modem data netdevs (wwan*, rmnet*) are excluded from acceleration inside
+#   ECM itself (qca-nss-ecm patch 0027): they are registered as UNKNOWN with an
+#   invalid accelerator ifnum, so the NSS rule create is rejected and those
+#   flows stay on the host stack, where this nft rule always applies.
+#   Do not "fix" a TTL problem by stopping ECM - it no longer changes the WAN
+#   path, only the LAN one.
 START=95
 STOP=13
 USE_PROCD=1
@@ -33,6 +38,7 @@ NFT_FILE="$NFT_DIR/90-byte-ttl.nft"
 # old `iifname br-lan` rule keeps running next to ours.
 NFT_LEGACY="$NFT_DIR/99-reset-ttl-from-br-lan.nft"
 ECM_INIT=/etc/init.d/qca-nss-ecm
+ACCEL=/sys/kernel/debug/ecm/ecm_classifier_default/accel_mode
 
 # modem_ifs: every wwan-ish data interface present right now. qmodem creates
 # wwan0/wwan0_1 after boot and again on every redial, so the file is rewritten
@@ -45,10 +51,10 @@ modem_ifs() {
 		wwan* | rmnet*) out="$out $n" ;;
 		esac
 	done
-	# Interfaces that do not exist yet still need a rule for the first packets
-	# after they appear; nft rejects a rule for a missing interface only in
-	# `oifname { ... }` sets, so use one rule per name and keep the two known
-	# names in the list.
+	# Interfaces that do not exist yet still need a rule: the name in an nft
+	# `oifname` expression is a plain string match, not a device binding, so a
+	# rule for wwan0 is valid before qmodem creates it. Keep the two names the
+	# AW1000 QModem stack uses, in case the modem has not dialled yet.
 	case " $out " in *" wwan0 "*) ;; *) out="$out wwan0" ;; esac
 	case " $out " in *" wwan0_1 "*) ;; *) out="$out wwan0_1" ;; esac
 	echo "$out"
@@ -64,9 +70,9 @@ write_rules() {
 		# TTL unrewritten. A separate chain may share the hook safely.
 		echo "chain byte_ttl {"
 		echo "    type filter hook postrouting priority mangle; policy accept;"
-		# oifname matches forwarded *and* locally-originated egress; the hook
-		# priority (mangle) is before the conntrack-confirm work that ECM
-		# would otherwise accelerate past.
+		# oifname matches forwarded *and* locally-originated egress, so the
+		# rewrite covers router-originated traffic as well as LAN/WiFi
+		# clients. Modem egress is on the host path by construction.
 		for i in $(modem_ifs); do
 			echo "    oifname \"$i\" ip ttl set $ttl comment \"BYTE TTL $ttl on $i\""
 			echo "    oifname \"$i\" ip6 hoplimit set $ttl comment \"BYTE HL $ttl on $i\""
@@ -75,34 +81,35 @@ write_rules() {
 	} >"$NFT_FILE"
 }
 
-park_accel() {
-	# Software fast paths and NSS ECM both skip netfilter; with TTL rewriting
-	# enabled either one would leak the original value on accelerated flows.
+# ensure_accel - keep NSS/ECM loaded and accelerating in every TTL state.
+#
+# The firmware policy is "NSS always on": it accelerates everything except the
+# modem egress, which ECM excludes at the source. This function therefore only
+# drops *software* fast paths (which would bypass this nft rule and are not
+# part of the image) and re-asserts the accelerator; it never stops ECM.
+ensure_accel() {
 	for m in shortcut_fe_cm fast_classifier; do
 		lsmod 2>/dev/null | grep -q "^${m} " && rmmod "$m" 2>/dev/null
 	done
-	[ -x "$ECM_INIT" ] && {
-		"$ECM_INIT" stop 2>/dev/null
-		"$ECM_INIT" disable 2>/dev/null
-	}
+	[ -x "$ECM_INIT" ] || return 0
+	"$ECM_INIT" enabled 2>/dev/null || "$ECM_INIT" enable 2>/dev/null
+	"$ECM_INIT" running >/dev/null 2>&1 || "$ECM_INIT" start 2>/dev/null
+	# 0 = ECM_CLASSIFIER_ACCELERATION_MODE_ACCEL. Re-assert it so a manual
+	# `nss-offload off` cannot leave the LAN path unaccelerated after a
+	# reload or reboot.
+	if [ -e "$ACCEL" ] && [ "$(cat "$ACCEL" 2>/dev/null)" != "0" ]; then
+		echo 0 >"$ACCEL" 2>/dev/null
+	fi
 }
 
 # flow_offload_off - keep fw4's flowtable OFF in every state.
 #
-# Policy: flow_offloading stays 0 whether TTL rewriting is on or off, and the
-# NSS path does not change that. Rationale, stated here so nobody re-discovers
-# it in the field: the software flowtable hands established flows to the data
-# path *after* the first packet, so those packets never reach the postrouting
-# mangle chain and keep the sender's own TTL. In practice:
-#   - clients that already send TTL 64 (phones, Linux, most IoT) look correct
-#     on the wire, because nothing rewrites or decrements their TTL;
-#   - clients that send 128 (Windows) or 255 leak that value for the life of
-#     the offloaded flow.
-# The first packet of every flow is still rewritten, and router-originated
-# traffic has no offloaded flow, so it is always rewritten.
-# On the NSS side ECM does the same bypass, which is why it is parked while
-# TTL is on; when TTL is off ECM may run, but the fw4 flowtable still stays
-# off - a second acceleration path only widens the leak surface.
+# Policy: flow_offloading stays 0 whether TTL rewriting is on or off. The
+# software flowtable hands established flows to the data path *after* the first
+# packet, so those packets never reach the postrouting mangle chain and keep
+# the sender's own TTL (Windows 128, some IoT 255). NSS/ECM is the only
+# acceleration path this image uses, and it is TTL-safe for WAN because the
+# modem egress is excluded from it.
 # flow_offloading_hw stays 0 as well: nss-dp does not implement it, so a `1`
 # there is accepted by fw4 and then silently unused.
 flow_offload_off() {
@@ -119,13 +126,15 @@ flow_offload_off() {
 start_service() {
 	config_load qmodem_ttl
 	config_get enable main enable '1'
+	# NSS/ECM runs regardless of the TTL switch. See ensure_accel().
+	ensure_accel
+	flow_offload_off
 	# Disabled must also mean "no stale include": fw4 slurps /etc/nftables.d/*.nft
 	# at every boot, so a file left behind by a previous enable would keep
 	# rewriting TTL after the user turned the switch off.
 	if [ "$enable" != "1" ]; then
 		rm -f "$NFT_FILE" "$NFT_LEGACY"
-		flow_offload_off
-		logger -t qmodem_ttl "disabled, include removed, flow offload kept off"
+		logger -t qmodem_ttl "disabled, include removed, NSS/ECM left running"
 		/etc/init.d/firewall reload 2>/dev/null || true
 		return 0
 	fi
@@ -137,9 +146,7 @@ start_service() {
 	# produce a rule nft refuses (which would silently leave TTL unmodified).
 	[ "$ttl" -ge 1 ] 2>/dev/null || ttl=1
 	[ "$ttl" -le 255 ] 2>/dev/null || ttl=255
-	logger -t qmodem_ttl "TTL/HopLimit $ttl on modem egress (forwarded + router-originated); NSS/ECM parked"
-	park_accel
-	flow_offload_off
+	logger -t qmodem_ttl "TTL/HopLimit $ttl on modem egress (forwarded + router-originated); NSS running, modem egress excluded from accel"
 	rm -f "$NFT_LEGACY"
 	write_rules "$ttl"
 	# The file is a chain fragment for fw4's own table, so it cannot be loaded
@@ -154,16 +161,8 @@ start_service() {
 
 stop_service() {
 	rm -f "$NFT_FILE" "$NFT_LEGACY"
-	logger -t qmodem_ttl "TTL rewrite off"
-	# TTL off: ECM is released back so NSS acceleration can run, but fw4's
-	# flowtable is still forced to 0 - one acceleration path at a time, and the
-	# flowtable is the one that silently leaks TTL. Starting ECM is a no-op
-	# when the package is not installed, which is the shipped configuration.
+	logger -t qmodem_ttl "TTL rewrite off; NSS/ECM left running"
 	flow_offload_off
-	[ -x "$ECM_INIT" ] && {
-		"$ECM_INIT" enable 2>/dev/null
-		"$ECM_INIT" start 2>/dev/null
-	}
 	/etc/init.d/firewall reload 2>/dev/null
 }
 

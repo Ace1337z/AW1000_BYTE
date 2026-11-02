@@ -2691,16 +2691,17 @@ CONFIG_PACKAGE_kmod-phy-aquantia=y
 # CONFIG_PACKAGE_kmod-phylink is not set
 CONFIG_PACKAGE_kmod-qca-nss-dp=y
 CONFIG_PACKAGE_kmod-qca-nss-drv=y
-# CONFIG_PACKAGE_kmod-qca-nss-ecm is not set
-# ECM is NOT shipped. Decision (2026-11-02): leave the NSS widget path exactly
-# as XT-Martinez/aw1000-feed ships it - the 48_nss widget stays dormant, and no
-# build depends on ECM compiling. That removes the kernel-version straitjacket:
-# ECM 12.5.2024.11.06 fails on 6.12.112 in ecm_bond_notifier.c ('struct
-# bond_cb'), so enabling it would pin the whole image to an older kernel for a
-# feature that also bypasses netfilter and defeats the TTL rewrite. NSS data
-# path acceleration (qca-nss-drv, rmnet raw-IP binding, NSS WiFi) stays on;
-# only ECM - the flow-offload engine - is out. /usr/bin/nss-offload and
-# luci-app-qmodem-ttlfw4 are written to tolerate its absence.
+CONFIG_PACKAGE_kmod-qca-nss-ecm=y
+# ECM is ALWAYS ON (decision 2026-11-02, "NSS always on, TTL always wins").
+# It accelerates bridge / LAN<->WiFi / local flows in the NSS cores; modem
+# egress (wwan*/rmnet*) is excluded in the ECM source itself (patch 0027) so
+# the TTL rewrite, which is a netfilter rule, always applies to WAN traffic.
+# Excluded modem interfaces are registered as UNKNOWN with an invalid NSS
+# ifnum: ECM still tracks the connection but the NSS rule create is rejected
+# and the flow stays on the host stack. The bonding front end is disabled in
+# the package Makefile (ECM_INTERFACE_BOND_ENABLE never set): its notifier
+# uses a QSDK-only 'struct bond_cb' that mainline 6.12 does not have, and no
+# AW1000 configuration has a bond device. See README "Engineering log".
 CONFIG_PACKAGE_nss-firmware=y
 CONFIG_NSS_FIRMWARE_VERSION_12_5=y
 CONFIG_NSS_MEM_PROFILE_HIGH=y
@@ -5355,9 +5356,11 @@ CONFIG_PACKAGE_sms-forwarder=y
 CONFIG_PACKAGE_sms-tool_q=y
 CONFIG_PACKAGE_ubus-at-daemon=y
 # CONFIG_PACKAGE_luci-app-nft-ttl is not set
-# TTL is handled by luci-app-qmodem-ttlfw4 (uci qmodem_ttl), which also parks
-# qca-nss-ecm while the rewrite is active. luci-app-nft-ttl is a different app
-# with its own include and no NSS handling, so it stays out.
+# TTL is handled by luci-app-qmodem-ttlfw4 (uci qmodem_ttl). The rewrite is
+# always installed and qca-nss-ecm is never parked: modem egress is excluded
+# from acceleration in the ECM source (patch 0027), so NSS and the rewrite
+# coexist. luci-app-nft-ttl is a different app with its own include and no NSS
+# handling, so it stays out.
 CONFIG_PACKAGE_luci-app-modeminfo=y
 CONFIG_PACKAGE_luci-app-aw1k-led=y
 CONFIG_PACKAGE_luci-app-byte=y

@@ -50,8 +50,11 @@ sysupgrade -n BYTE_by_ACE-<version>-qualcommax-ipq807x-arcadyan_aw1000-squashfs-
   metrics, live dashboard.
 - **TTL / Hop Limit** — one switch in *Network → Modem → TTL Configuration*;
   the rule matches `oifname "wwan*"`, so forwarded **and** router-originated
-  traffic is rewritten. FW4 flow offload is held at `0` (hardware `0`) in both
-  switch states, because it skips the mangle chain.
+  traffic is rewritten. It runs **while NSS/ECM is accelerating**: the modem
+  data netdevs are excluded from acceleration inside ECM itself (patch `0027`),
+  so WAN packets always reach netfilter. FW4 flow offload is still held at `0`
+  (hardware `0`) in both switch states, because the software flowtable skips
+  the mangle chain too.
 - **Phone (RJ11)** — `fxsd` with the SLIC driver built in: HD audio, caller ID,
   DND, call history.
 - **WiFi** — NSS-accelerated 2.4/5 GHz; both radios up on first boot.
@@ -59,8 +62,8 @@ sysupgrade -n BYTE_by_ACE-<version>-qualcommax-ipq807x-arcadyan_aw1000-squashfs-
   PassWall2 DNS wiring, system strip, shortcuts), a JS modem-info view, dashboard
   widgets and Netstat backed by persistent vnStat history.
 - **Dashboard widgets** — Mobile (status card, signal chart, traffic chart,
-  detail tab), Temperature, and NSS offload. The NSS widget stays hidden unless
-  `qca-nss-ecm` is loaded, which it is not by default.
+  detail tab), Temperature, and NSS offload. The NSS widget is live:
+  `qca-nss-ecm` ships and stays loaded.
 - **Proxy** — PassWall2 with Xray; first-run rules in place.
 - **Remote** — Tailscale on demand; `tailscaled` starts only once credentials
   exist.
@@ -145,12 +148,139 @@ nss/                       NSS sources + kernel patches
   TTL: clients that send 64 look right, Windows hosts (128) leak 128 for the
   life of the flow. Enabling it in LuCI re-introduces that leak.
   Router-originated traffic and every flow's first packet are still rewritten.
-- **ECM is not shipped.** `kmod-qca-nss-ecm` is unset: its 12.5 tree needs the
-  QSDK bonding API (`struct bond_cb`, `bond_register_cb`, `bond_get_id`) that
-  mainline 6.12 does not export, and ECM bypasses netfilter, which would defeat
-  the TTL rewrite. NSS acceleration of the radios is unaffected.
+- **Hardware offload has a narrow meaning here.** ECM accelerates bridge,
+  LAN↔WiFi and local flows in the NSS cores. It does **not** accelerate the
+  modem uplink — that is deliberate, and it is what keeps the TTL rewrite
+  authoritative. Peak WAN throughput therefore comes from the CPU path plus
+  NSS driver queues, not from a flow-offload shortcut.
 - **No hardware flow offload.** `flow_offloading_hw` stays `0` — `nss-dp` does
   not implement it, so fw4 would accept a `1` and silently ignore it.
+
+## Engineering log
+
+Running record of the NSS/ECM work. Two policies drive everything here:
+
+1. **NSS always on.** `qca-nss-ecm` is loaded and accelerating regardless of the
+   TTL switch. No service stops it, no LuCI toggle parks it.
+2. **TTL always wins.** No packet leaves the modem with a TTL the carrier can
+   fingerprint — neither forwarded LAN/WiFi traffic nor traffic the router
+   originates itself.
+
+### Why this needed source changes
+
+ECM's whole point is to move established flows into the NSS engine, which runs
+*below* netfilter. A netfilter `ttl set` rule cannot see an offloaded packet.
+The old workarounds were both bad: park ECM while TTL is on (loses all LAN
+offload, and the switch becomes a speed toggle), or accept the leak (fails
+tethering detection).
+
+The chosen route keeps both: **accelerate everything except the modem egress.**
+
+### Patch `0027` — modem egress excluded from acceleration
+
+`nss/feeds/nss/qca-nss-ecm/patches/0027-ecm-interface-exclude-modem-egress-from-acceleration.patch`
+
+In `ecm_interface_establish_and_ref()`, right after the netdev fields are read,
+a `wwan*` / `rmnet*` device is registered through
+`ecm_interface_unknown_interface_establish()` with `ae_interface_num = -1`.
+
+- ECM still tracks the connection, so the LAN side classifies normally.
+- The NSS front end rejects rule creation for any interface whose accelerator
+  id is negative (`ecm_nss_non_ported_ipv4.c`, `from_nss_iface_id < 0 ||
+  to_nss_iface_id < 0`), so those flows stay on the host stack.
+- Bridge, LAN↔WiFi and local flows are untouched and still accelerated.
+
+Generated against ECM `30fbfa4` (the exact `PKG_SOURCE_VERSION` the feed pins)
+and validated on a tree with every feed patch `0001`–`0025` applied: hunks land
+at offset 14, clean.
+
+### Bonding front end is compiled out
+
+The package forces `ECM_INTERFACE_BOND_ENABLE=y` whenever `kmod-bonding` is
+selected. `ecm_bond_notifier.c` uses `struct bond_cb` and `bond_register_cb()`,
+which are QSDK kernel additions — they do not exist in mainline
+`v6.12.74`/`v6.12.94`/`v6.12.112` (zero hits in `gregkh/linux`, no declaration
+in `include/net/bonding.h` or `netdevice.h`). Enabling it breaks every mainline
+build.
+
+`apply_preset()` therefore deletes the `+PACKAGE_kmod-bonding:kmod-bonding`
+dependency line and every `ECM_INTERFACE_BOND_ENABLE` line from the package
+Makefile, then hard-fails if anything survives. The source Makefile drops
+`ecm_bond_notifier.o` on its own; only three externs remain in
+`ecm_front_end_common.h`, which is fine. No AW1000 configuration has a bond
+device.
+
+### DSCPREMARK conntrack extension
+
+ECM's `KCONFIG:=CONFIG_NF_CONNTRACK_DSCPREMARK_EXT=y` means the kernel must
+provide that extension. Patch
+`nss/target/linux/qualcommax/patches-6.12/0600-6-qca-nss-ecm-support-netfilter-DSCPREMARK.patch`
+restores it, with its Kconfig entry changed from `depends on NETFILTER_ADVANCED`
+to `default y`. The generic `config-6.12` leaves that symbol unset, but
+`kmod-nf-conntrack` forces `CONFIG_NETFILTER_ADVANCED=y` through its own
+`KCONFIG`, so the original dependency would in fact resolve. It is still
+removed: an extension ECM links against should not depend on menu visibility
+chosen by another package.
+
+`KCONFIG` in a kmod package is written to `$(LINUX_DIR)/.config.override`, not to
+the top-level `.config`, so CI cannot grep `.config` for the symbol. It asserts
+the wiring instead: the package still carries
+`KCONFIG:=CONFIG_NF_CONNTRACK_DSCPREMARK_EXT=y`, and the patch still has
+`default y`.
+
+### Conntrack events on 6.12 (checked, no action)
+
+ECM registers a conntrack notifier to release state as soon as a connection is
+destroyed. That block is behind `CONFIG_NF_CONNTRACK_EVENTS`, which the generic
+`config-6.12` leaves unset but `kmod-nf-conntrack-netlink` (shipped, `preset`
+line 2570) forces to `y` through its `KCONFIG`, so the code *is* compiled in.
+
+Verified against `v6.12.94`: the API still exists, but lives in
+`include/net/netfilter/nf_conntrack_ecache.h` (not `nf_conntrack.h`), with
+`.ct_event` as the >= 5.15 member and `nf_conntrack_unregister_notifier(net)`
+taking one argument. `ecm_conntrack_notifier.c` reaches it through
+`nf_conntrack_core.h`, which it already includes, so the mainline branch of
+patch `0026` compiles as-is.
+
+`CONFIG_NF_CONNTRACK_CHAIN_EVENTS` only exists in ImmortalWrt's `hack-6.18`
+(`952-net-conntrack-events-support-multiple-registrant.patch`), pulled in by
+`fullconenat`; on 6.12 the symbol is undefined, so `0026`'s `notifier_block`
+branch is inert here and only pays off if the target ever moves to 6.18.
+
+### Runtime fail-safe
+
+`/etc/init.d/byte-selfcheck` gained `check_nss()`:
+
+- asserts ECM is loaded and `accel_mode == 0` (`ACCEL`);
+- dumps ECM's interface table through the state char device (`state_dev_major`
+  from debugfs, output mask `16` = `INTERFACES`, restored to `1` afterwards) and
+  flags any `ifaces.iface.<subtype>.iface.name` matching `^(wwan|rmnet)` whose
+  `ae_interface_identifier >= 0`;
+- on a hit, logs `ECM_MODEM_LEAK` and stops `qca-nss-ecm` — losing LAN offload
+  is the lesser failure compared to a TTL leak.
+
+`/usr/bin/nss-offload status` shows ECM load state, `accel_mode` and whether the
+`byte_ttl` chain is live. `nss-offload off` remains as a panic button and says
+so; it no longer claims to fix WAN TTL, because WAN was never accelerated.
+
+### LuCI page
+
+`files/www/luci-static/resources/view/qmodem/ttl.js` overrides the app's page.
+Only the wording changes: the stock text warns that enabling TTL disables NSS
+offload, which is no longer what happens. The UCI schema, field names and
+datatypes are identical, so `luci-app-qmodem-ttlfw4` remains the owner of the
+page and of `/etc/config/qmodem_ttl`.
+
+### Open items
+
+- **Untested on hardware.** The changes are build-validated only. Needed on a
+  spare unit: `logread | grep byte-selfcheck`, `nss-offload status`, and a
+  tcpdump on the modem netdev confirming TTL 64 for both forwarded and
+  router-originated traffic.
+- **ECM 12.5 on 6.12.94 with bonding off** has not been compiled yet.
+- **ECM state device** availability at boot is assumed from source, not seen.
+- **Recovery path unconfirmed** on the target unit (no serial session yet), so
+  no image has been flashed from this branch.
 
 ## Credits
 
@@ -171,6 +301,15 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-02
+- **NSS/ECM ships and stays on.** `qca-nss-ecm` is back in the image and is
+  never stopped by the TTL service. Modem egress (`wwan*`, `rmnet*`) is
+  excluded from acceleration by ECM patch `0027`, so the TTL rewrite always
+  applies on the WAN while bridge/LAN/WiFi stays offloaded. Bonding front end
+  compiled out (`struct bond_cb` is QSDK-only); DSCPREMARK conntrack extension
+  restored with `default y`; `byte-selfcheck` detects an accelerated modem
+  interface and stops ECM as a fail-safe. See *Engineering log*.
+- Menu banner lost the leftover contact line; the NSS status cache no longer
+  claims ECM is missing.
 - Footstrap moved to the upstream standalone repo, pinned to v0.14.19, and the
   luci feed bumped to a commit that carries `view/dashboard/lib/*` — the
   dashboard widgets now render instead of failing their `require` silently.

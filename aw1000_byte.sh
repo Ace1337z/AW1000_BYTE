@@ -61,7 +61,6 @@ main_menu() {
     clear 2>/dev/null || true
     echo -e "${BOLD_MAGENTA}##############################################${RESET}"
     echo -e "${BOLD_MAGENTA}          BYTE by ACE BUILD MENU                ${RESET}"
-    echo -e "${BOLD_MAGENTA}            TELEGRAM: @NIALVPN                ${RESET}"
     echo -e "${BOLD_MAGENTA}##############################################${RESET}"
     echo -e "${BOLD_BLUE}DISTRO: IMMORTALWRT${RESET}"
     echo -e "${BOLD_BLUE}BUILD MENU:${RESET}"
@@ -325,16 +324,31 @@ apply_preset() {
         exit 1
     }
 
-    # qca-nss-ecm stays in the *tree* but not in the *image*: the preset has
-    # "# CONFIG_PACKAGE_kmod-qca-nss-ecm is not set", the same choice
-    # XT-Martinez/aw1000-feed makes. Reasons: ECM 12.5.2024.11.06 does not
-    # build on 6.12.x past the .9x series (ecm_bond_notifier.c, struct bond_cb),
-    # so enabling it would pin the kernel away from the version the AW1000
-    # phone driver is validated against, and ECM forwards established flows
-    # past netfilter, which defeats the TTL rewrite. The sources and their
-    # kernel-port patches stay in nss/feeds/nss/qca-nss-ecm/patches/ so the
-    # experiment is one preset line + TARGET_BRANCH=v25.12.1 away.
-    echo -e "${BOLD_GREEN}qca-nss-ecm sources kept, package not selected (see preset)${RESET}"
+    # qca-nss-ecm is enabled in the image (see preset). Its bonding front end
+    # must be compiled out: ecm_bond_notifier.c registers 'struct bond_cb' /
+    # bond_register_cb(), which are QSDK kernel additions that do not exist in
+    # mainline (checked in v6.12.74, v6.12.94 and v6.12.112), so enabling the
+    # front end breaks the build on every mainline kernel. The package forces
+    # it on whenever kmod-bonding is selected, so remove the dependency and
+    # the guard. No AW1000 configuration has a bond device, and every
+    # '#ifdef ECM_INTERFACE_BOND_ENABLE' block then drops out.
+    local ecm_mk="$PWD/feeds/nss/qca-nss-ecm/Makefile"
+    if [ ! -f "$ecm_mk" ]; then
+        echo -e "${BOLD_RED}qca-nss-ecm Makefile not found${RESET}"
+        exit 1
+    fi
+    sed -i '/PACKAGE_kmod-bonding:kmod-bonding/d' "$ecm_mk"
+    sed -i '/ifneq (\$(CONFIG_PACKAGE_kmod-bonding),)/,/^endif$/d' "$ecm_mk"
+    sed -i '/ECM_INTERFACE_BOND_ENABLE/d' "$ecm_mk"
+    if grep -q 'ECM_INTERFACE_BOND_ENABLE' "$ecm_mk"; then
+        echo -e "${BOLD_RED}qca-nss-ecm still references ECM_INTERFACE_BOND_ENABLE${RESET}"
+        exit 1
+    fi
+    if grep -q 'PACKAGE_kmod-bonding' "$ecm_mk"; then
+        echo -e "${BOLD_RED}qca-nss-ecm still depends on kmod-bonding${RESET}"
+        exit 1
+    fi
+    echo -e "${BOLD_GREEN}qca-nss-ecm: bonding front end disabled${RESET}"
 
     # Kconfig variant cycle: upstream packages/net/weechat defines TWO packages
     # in ONE Makefile (weechat-minimal with DEFAULT_VARIANT, and weechat-full
@@ -551,7 +565,11 @@ apply_version() {
 
 # CI-only: fail fast if the preset did not resolve the required packages.
 ci_check_packages() {
-    local missing="" p
+    local missing="" forbidden="" p
+    # ci_check_packages runs with CWD=immortalwrt, so repo paths must be
+    # resolved via $script_dir rather than assumed relative.
+    local repo_root="$(realpath "$script_dir" 2>/dev/null)"
+    [ -n "$repo_root" ] || repo_root="$(realpath .)"
     # openclash / adguardhome are intentionally not shipped (size); the
     # proxy stack is passwall + passwall2 with the Xray core only.
     # passwall v1 is deliberately absent: it and passwall2 both install redirect
@@ -566,7 +584,7 @@ ci_check_packages() {
              luci-app-qmodem qmodem modem_scan tom_modem \
              luci-app-netstat vnstat2 \
              kmod-aw1000-fxs fxsd luci-app-fxs \
-             kmod-qca-nss-drv nss-firmware \
+             kmod-qca-nss-drv kmod-qca-nss-ecm nss-firmware \
              kmod-qmi_wwan_q luci-app-modeminfo \
              luci-app-aw1k-led luci-app-byte luci-app-ramfree \
              xray-core \
@@ -589,7 +607,6 @@ ci_check_packages() {
     # copies would collide on the same file during rootfs assembly.
     # kmod-usb-net-qmi-wwan (upstream generic) also matches the RG500Q IDs
     # (0x2c7c:0x0800) and races qmi_wwan_q for /dev/cdc-wdm0, crashing the dial.
-    local forbidden=""
     for p in kmod-usb-net-qmi-wwan kmod-usb-net-qmi-wwan-quectel kmod-usb-net-qmi-wwan-fibocom; do
         if grep -q "^CONFIG_PACKAGE_${p}=y$" .config; then
             forbidden="$forbidden $p"
@@ -614,14 +631,46 @@ ci_check_packages() {
     # same dialer, so the second one loaded wins and the pages disagree.
     grep -q "^CONFIG_PACKAGE_luci-app-qmodem-next=y$" .config && \
         forbidden="$forbidden luci-app-qmodem-next(coexists with luci-app-qmodem)"
-    # ECM stays out on purpose (see the preset): its 6.12 port does not build on
-    # the branch kernel, and it would bypass the TTL rewrite. Enabling it is a
-    # deliberate experiment, not something that should slip into a release.
-    grep -q "^CONFIG_PACKAGE_kmod-qca-nss-ecm=y$" .config && \
-        forbidden="$forbidden kmod-qca-nss-ecm(see preset: build-breaker on this kernel)"
+    # ECM is ALWAYS ON and must stay that way: bridge / LAN<->WiFi / local
+    # flows are accelerated by it. Modem egress is excluded in the ECM source
+    # (patch 0027) so the TTL rewrite always wins on the WAN path. A build
+    # without ECM silently loses the dashboard NSS widget and all LAN offload.
+    grep -q "^CONFIG_PACKAGE_kmod-qca-nss-ecm=y$" .config || \
+        missing="$missing kmod-qca-nss-ecm"
+    # ECM's bonding front end cannot compile on a mainline kernel: ecm_bond_notifier.c
+    # uses QSDK-only 'struct bond_cb' / bond_register_cb(). kmod-bonding must
+    # stay out and the package Makefile must not force ECM_INTERFACE_BOND_ENABLE.
+    # apply_preset() strips both; a regression here costs a 3 h build.
+    grep -q "^CONFIG_PACKAGE_kmod-bonding=y$" .config && \
+        forbidden="$forbidden kmod-bonding(ECM bond notifier cannot compile here)"
+    grep -q 'ECM_INTERFACE_BOND_ENABLE' feeds/nss/qca-nss-ecm/Makefile 2>/dev/null && \
+        forbidden="$forbidden ECM_BOND_ENABLE(bond notifier cannot compile here)"
+    # Patch 0027 is the whole TTL guarantee: modem egress must never be
+    # accelerated. Patch 0600-6 provides the DSCPREMARK conntrack extension
+    # that ECM's KCONFIG selects and links against.
+    [ -f "$repo_root/nss/feeds/nss/qca-nss-ecm/patches/0027-ecm-interface-exclude-modem-egress-from-acceleration.patch" ] || \
+        missing="$missing ecm-patch-0027(modem-egress-exclusion)"
+    [ -f "$repo_root/nss/target/linux/qualcommax/patches-6.12/0600-6-qca-nss-ecm-support-netfilter-DSCPREMARK.patch" ] || \
+        missing="$missing dscpremark-patch"
+    # KCONFIG in a kmod package lands in $(LINUX_DIR)/.config.override, never in
+    # the top-level .config, so the wiring is asserted here instead: the package
+    # must still request the symbol, and the patch must keep it unconditional
+    # (`default y`). kmod-nf-conntrack does force NETFILTER_ADVANCED=y, so the
+    # upstream `depends on NETFILTER_ADVANCED` would resolve - but that is an
+    # implicit chain through another package's KCONFIG. `default y` keeps the
+    # extension visible no matter what, which is what ECM links against.
+    grep -q 'KCONFIG:=CONFIG_NF_CONNTRACK_DSCPREMARK_EXT=y' feeds/nss/qca-nss-ecm/Makefile 2>/dev/null || \
+        missing="$missing ecm-KCONFIG-dscpremark"
+    grep -q '^+	default y$' "$repo_root/nss/target/linux/qualcommax/patches-6.12/0600-6-qca-nss-ecm-support-netfilter-DSCPREMARK.patch" 2>/dev/null || \
+        missing="$missing dscpremark-default-y"
+    # ECM must never be parked by the TTL service: modem egress is excluded in
+    # the ECM source instead, so TTL and NSS run together. A script that stops
+    # ECM re-introduces the old mutual-exclusion and loses LAN offload.
+    grep -q "qca-nss-ecm stop" "$repo_root/files/etc/init.d/qmodem_ttl" 2>/dev/null && \
+        forbidden="$forbidden ttl-stops-ecm(must stay loaded)"
     # Same for the two TTL apps: the Lua one writes its own firewall include
     # and the fw4 one writes /etc/nftables.d/99-reset-ttl-from-br-lan.nft, so
-    # both would fight over the same packets (and only the fw4 one parks ECM).
+    # both would fight over the same packets.
     grep -q "^CONFIG_PACKAGE_luci-app-qmodem-ttl=y$" .config && \
         forbidden="$forbidden luci-app-qmodem-ttl(Lua variant; use -ttlfw4)"
     # The non-default variants are removed so Kconfig has a single provider per
@@ -633,14 +682,10 @@ ci_check_packages() {
         forbidden="$forbidden mihomo-alpha-variant(Kconfig-cycle)"
     # TTL must default to 64 on the modem uplink - this is the single most
     # important behaviour of the image (tethering detection).
-    # NOTE: ci_check_packages runs with CWD=immortalwrt, so repo paths must be
-    # resolved via $script_dir rather than assumed relative.
-    local repo_root="$(realpath "$script_dir" 2>/dev/null)"
-    [ -n "$repo_root" ] || repo_root="$(realpath .)"
     # TTL is owned by luci-app-qmodem-ttlfw4 now: one UCI switch and one TTL
-    # value (1-255), and the service also parks ECM while it is on. Assert the
-    # shipped defaults and that the app is in the image, because a missing app
-    # means the image loses TTL rewriting entirely - silently.
+    # value (1-255), and the rewrite is always installed. Assert the shipped
+    # defaults and that the app is in the image, because a missing app means
+    # the image loses TTL rewriting entirely - silently.
     grep -qE "^[[:space:]]*option ttl '64'$" "$repo_root/files/etc/config/qmodem_ttl" 2>/dev/null || \
         missing="$missing TTL(qmodem_ttl.ttl)"
     grep -qE "^[[:space:]]*option enable '1'$" "$repo_root/files/etc/config/qmodem_ttl" 2>/dev/null || \
@@ -654,6 +699,12 @@ ci_check_packages() {
         missing="$missing ttl-init-override"
     grep -q 'oifname' "$repo_root/files/etc/init.d/qmodem_ttl" 2>/dev/null || \
         missing="$missing TTL-RULE(oifname-egress)"
+    # The LuCI page is overridden too: the packaged copy still warns that
+    # enabling TTL disables NSS. files/ is copied over the package rootfs
+    # (include/image.mk prepare_rootfs), so the override must exist or the UI
+    # ships the wrong advice.
+    [ -f "$repo_root/files/www/luci-static/resources/view/qmodem/ttl.js" ] || \
+        missing="$missing ttl-luci-override"
     # Offload policy lives in the same service: fw4's flowtable is forced to
     # flow_offloading=0 in every state (TTL on and off, NSS installed or not),
     # because it skips the mangle chain after the first packet. A regression to
@@ -998,7 +1049,6 @@ rebuild_menu() {
     clear 2>/dev/null || true
     echo -e "${BOLD_MAGENTA}##############################################${RESET}"
     echo -e "${BOLD_MAGENTA}          BYTE by ACE REBUILD MENU              ${RESET}"
-    echo -e "${BOLD_MAGENTA}            TELEGRAM: @NIALVPN                ${RESET}"
     echo -e "${BOLD_MAGENTA}##############################################${RESET}"
     echo -e "${BOLD_BLUE}REBUILD MENU:${RESET}"
     echo -e "1) FIRMWARE & PACKAGE UPDATE (FULL REBUILD)"

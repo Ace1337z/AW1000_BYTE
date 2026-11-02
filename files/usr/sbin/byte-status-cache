@@ -110,10 +110,10 @@ thermal() {
 		mv "$CACHE/thermal.tmp" "$CACHE/thermal"
 }
 
-# ECM is not shipped in this image (it cannot compile on 6.12.112 and it would
-# bypass the TTL rewrite), so this normally writes nothing and the NSS widget
-# stays hidden. Kept so the widget starts working if someone enables ECM with
-# /usr/bin/nss-offload.
+# ECM ships and stays loaded, so the NSS widget is live. The counters appear
+# only once the NSS front end has registered its debugfs nodes; the modem
+# uplink is deliberately excluded from acceleration (patch 0027), so WAN flows
+# never show up here.
 nss() {
 	local ecm=/sys/kernel/debug/ecm
 	[ -r "$ecm/ecm_nss_ipv4/accelerated_count" ] || return 0
