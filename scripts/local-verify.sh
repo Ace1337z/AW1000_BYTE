@@ -79,13 +79,24 @@ gate_target()    { in_tree make target/compile -j"$JOBS"; }
 # that fails leaves a .rej and the build carries on with the old source.
 gate_packages()  {
     in_tree make package/compile -j"$JOBS" || return 1
-    local bad=0 rej
-    rej=$(find "$tree"/build_dir -name '*.rej' -o -name '*.orig' 2>/dev/null | head -20)
+    local bad=0 rej touched=0
+    # $(PATCH) runs with -f: a failed hunk leaves .rej and the build continues
+    # with the old source. .rej is always a failure. .orig alone is not:
+    # patch renames the pre-image to .orig when it succeeds, so the test is
+    # whether the patched file differs from its .orig backup.
+    rej=$(find "$tree"/build_dir -name '*.rej' 2>/dev/null | head -20)
     if [ -n "$rej" ]; then
         echo "failed patch hunks present (patch ran with -f):"
         echo "$rej"
         bad=1
     fi
+    local f
+    while IFS= read -r f; do
+        if diff -q "${f%.orig}" "$f" >/dev/null 2>&1; then
+            echo "FAIL ${f%.orig} is identical to its .orig (patch produced no change)"
+            bad=1
+        fi
+    done < <(find "$tree"/build_dir -name '*.orig' 2>/dev/null | head -200)
     local src
     src=$(ls -d "$tree"/build_dir/target-*/linux-qualcommax_ipq807x/qmi_wwan_q-*/qmi_wwan_q.c 2>/dev/null | head -1)
     if [ -n "$src" ]; then

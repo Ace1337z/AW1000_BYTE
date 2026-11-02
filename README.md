@@ -503,8 +503,8 @@ and publishes the artifacts; it no longer discovers problems.
   spare unit: `logread | grep byte-selfcheck`, `nss-offload status`, and a
   tcpdump on the modem netdev confirming TTL 64 for both forwarded and
   router-originated traffic.
-- **ECM 12.5 on 6.12.94 with bonding off** is being compiled locally before the
-  next push.
+- **ECM 12.5 on 6.12.94 with bonding off**: compiled locally (ipk produced);
+  hardware test still pending.
 - **ECM state device** availability at boot is assumed from source, not seen.
 - **Recovery path unconfirmed** on the target unit (no serial session yet), so
   no image has been flashed from this branch.
@@ -528,6 +528,17 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-02
+- **Milestone: ECM 12.5 compiled on 6.12.94 with bonding compiled out.** The
+  whole NSS stack built locally: `kmod-qca-nss-ecm`, `kmod-qca-nss-drv` (with
+  `nss_rmnet_rx_get_ifnum` exported), `kmod-qca-nss-dp`, `kmod-qca-ssdk`, and
+  the qmodem vendor drivers (`quectel_QMI_WWAN` patched, `fibocom_QMI_WWAN`,
+  `simcom_QMI_WWAN`). This was the biggest open compile risk and it is closed.
+- **Gate fix: `packages` false-failed on `.orig` files.** `$(PATCH)` renames
+  the pre-image to `.orig` on *success*, so flagging every `.orig` as a failed
+  hunk was wrong — 21 of 21 `.orig` files had a matching patched file that
+  differed from the backup (patch applied). The gate now only fails on
+  `*.rej` (always a failure) or on a file identical to its `.orig` (patch
+  produced no change, e.g. the `mtools` `config.guess` refresh).
 - **Build fix: `luci-app-modeminfo` died with `Error 127`.** Its vendored
   Makefile used `$(CHMOD) 755 ...` in `Package/install`, but `CHMOD` is not
   defined anywhere in the OpenWrt/ImmortalWrt buildroot (no such variable in
