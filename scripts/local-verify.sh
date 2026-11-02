@@ -145,28 +145,56 @@ gate_repo() {
 # dependency is missing, so a featured=y package can vanish without any error.
 # This compares what `preset` asked for against what .config actually kept, and
 # classifies each loss: package not in any feed, or dependency not satisfied.
+# It also fails on the opposite drift: a symbol preset marks "not set" that
+# defconfig re-enabled anyway (e.g. a stale =y in a reused tree).
 gate_config() {
     in_tree make defconfig
     local want got missing
     want=$(grep -oE '^CONFIG_PACKAGE_[A-Za-z0-9_.+-]+=y' "$repo_root/preset" | sed 's/^CONFIG_PACKAGE_//;s/=y$//' | sort -u)
     got=$(grep -oE '^CONFIG_PACKAGE_[A-Za-z0-9_.+-]+=y' "$tree/.config" | sed 's/^CONFIG_PACKAGE_//;s/=y$//' | sort -u)
     missing=$(comm -23 <(echo "$want") <(echo "$got"))
-    [ -n "$missing" ] || { echo "every requested package survived defconfig"; return 0; }
-    local kconf="$tree/tmp/.config-package.in"
-    # Names that never appear in the package index cannot be selected at all.
-    local absent="" refused=""
-    while IFS= read -r p; do
-        [ -n "$p" ] || continue
-        if [ -f "$kconf" ] && grep -qE "^[[:space:]]*(menu)?config PACKAGE_${p}\$" "$kconf"; then
-            refused="$refused $p"
-        else
-            absent="$absent $p"
-        fi
-    done <<< "$missing"
-    echo "requested but NOT in .config:"
-    [ -n "$absent" ] && { echo "  no such package in any feed:"; for p in $absent; do echo "    $p"; done; }
-    [ -n "$refused" ] && { echo "  package exists but dependency unmet (defconfig refused it):"; for p in $refused; do echo "    $p"; done; }
-    return 1
+    local bad=0
+    if [ -n "$missing" ]; then
+        local kconf="$tree/tmp/.config-package.in"
+        # Names that never appear in the package index cannot be selected at all.
+        local absent="" refused=""
+        while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            if [ -f "$kconf" ] && grep -qE "^[[:space:]]*(menu)?config PACKAGE_${p}\$" "$kconf"; then
+                refused="$refused $p"
+            else
+                absent="$absent $p"
+            fi
+        done <<< "$missing"
+        echo "requested but NOT in .config:"
+        [ -n "$absent" ] && { echo "  no such package in any feed:"; for p in $absent; do echo "    $p"; done; }
+        [ -n "$refused" ] && { echo "  package exists but dependency unmet (defconfig refused it):"; for p in $refused; do echo "    $p"; done; }
+        bad=1
+    fi
+    # Reverse drift: preset says "not set" but .config has =y anyway. Happens
+    # when a reused tree keeps an old selection that a dependency change
+    # should have removed (found: geoview/v2ray-geoip after passwall2's geo
+    # deps were stripped - defconfig preserves an explicit =y with no
+    # dependent, so the ~7.4 MB would have shipped unnoticed).
+    local extra
+    extra=$(comm -13 <(echo "$want") <(echo "$got") | grep -vE '^(busybox|libc|libgcc|libpthread|librt)$' || true)
+    if [ -n "$extra" ]; then
+        echo "=y in .config but NOT requested by preset:"
+        for p in $extra; do
+            if grep -qE "^# CONFIG_PACKAGE_${p} is not set$" "$repo_root/preset"; then
+                echo "  $p (preset explicitly says not set!)"
+            else
+                echo "  $p (pulled in by a dependency - verify this is wanted)"
+            fi
+        done
+        # Only an explicit preset "not set" is fatal; dependency-pulled =y is
+        # normal (kmods pulled by luci apps, etc.) and just gets reported.
+        for p in $extra; do
+            grep -qE "^# CONFIG_PACKAGE_${p} is not set$" "$repo_root/preset" && { bad=1; break; }
+        done
+    fi
+    [ "$bad" = 0 ] && echo "every requested package survived defconfig; no preset-not-set symbol is enabled"
+    return $bad
 }
 
 # LuCI JS gate: node parses every view we ship before the image is assembled.
