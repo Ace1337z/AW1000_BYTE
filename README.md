@@ -528,6 +528,15 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-02
+- **Gate fix: two false failures in the `packages` post-checks.** (1) With
+  `set -o pipefail`, `nm -g <45 MB unstripped .ko> | grep -q` is a SIGPIPE
+  race: `grep -q` exits on the first match, nm keeps writing, dies 141, and
+  the pipeline "fails" while the symbol is present — the same file printed
+  `ok` in one run and `FAIL` in the next. The check now captures `nm` output
+  and greps the variable. (2) `config.guess`/`config.sub` `.orig` pairs are
+  exempted from the identical-to-`.orig` test:
+  `scripts/refresh-config-sub-guess.sh` refreshes them wholesale and a no-op
+  refresh leaves the pair identical.
 - **Milestone: ECM 12.5 compiled on 6.12.94 with bonding compiled out.** The
   whole NSS stack built locally: `kmod-qca-nss-ecm`, `kmod-qca-nss-drv` (with
   `nss_rmnet_rx_get_ifnum` exported), `kmod-qca-nss-dp`, `kmod-qca-ssdk`, and

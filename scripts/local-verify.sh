@@ -83,7 +83,9 @@ gate_packages()  {
     # $(PATCH) runs with -f: a failed hunk leaves .rej and the build continues
     # with the old source. .rej is always a failure. .orig alone is not:
     # patch renames the pre-image to .orig when it succeeds, so the test is
-    # whether the patched file differs from its .orig backup.
+    # whether the patched file differs from its .orig backup. config.guess and
+    # config.sub are exempt: scripts/refresh-config-sub-guess.sh refreshes them
+    # wholesale, and a no-op refresh leaves an identical .orig pair.
     rej=$(find "$tree"/build_dir -name '*.rej' 2>/dev/null | head -20)
     if [ -n "$rej" ]; then
         echo "failed patch hunks present (patch ran with -f):"
@@ -92,6 +94,7 @@ gate_packages()  {
     fi
     local f
     while IFS= read -r f; do
+        case "${f##*/}" in config.guess.orig | config.sub.orig) continue ;; esac
         if diff -q "${f%.orig}" "$f" >/dev/null 2>&1; then
             echo "FAIL ${f%.orig} is identical to its .orig (patch produced no change)"
             bad=1
@@ -110,10 +113,14 @@ gate_packages()  {
     # NSS_DRV_RMNET_ENABLE is a module -D flag, not a kernel symbol: the only
     # place it is observable is the built qca-nss-drv.ko. ECM's RAWIP front end
     # calls this export, so its absence is a runtime break, not a warning.
-    local drv
+    local drv syms
     drv=$(ls "$tree"/build_dir/target-*/linux-qualcommax_ipq807x/qca-nss-drv-*/qca-nss-drv.ko 2>/dev/null | head -1)
     if [ -n "$drv" ]; then
-        if nm -g "$drv" 2>/dev/null | grep -q ' nss_rmnet_rx_get_ifnum$'; then
+        # Do NOT pipe nm into grep -q: with `set -o pipefail`, grep -q exiting
+        # early SIGPIPEs nm on this 45 MB unstripped module and the whole
+        # pipeline reports failure even though the symbol is present.
+        syms=$(nm -g "$drv" 2>/dev/null | grep ' nss_rmnet_rx_get_ifnum$' | head -1)
+        if [ -n "$syms" ]; then
             echo "ok   qca-nss-drv exports nss_rmnet_rx_get_ifnum (NSS_DRV_RMNET_ENABLE compiled in)"
         else
             echo "FAIL $drv does not export nss_rmnet_rx_get_ifnum (ECM RAWIP would break)"
