@@ -12,7 +12,9 @@ LUCI_TITLE:=LuCI App for Modem Information
 LUCI_DESCRIPTION:=This LuCI app provides modem information in a web interface.
 # JS view + rpcd exec plugin; the AT tool is QModem's sms_tool_q (plain
 # sms_tool does not exist in this image), and the FXS/qmi drivers come from
-# their own packages.
+# their own packages. $(CHMOD) does not exist in this buildroot - the original
+# Makefile line expanded to "755 <file>" and killed the build with Error 127,
+# so Package/install uses INSTALL_BIN, which copies AND sets 0755.
 LUCI_DEPENDS:=+luci-base +rpcd +libubox +ubus +sms-tool_q +kmod-usb-serial-option
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
@@ -40,8 +42,11 @@ define Build/Compile
 endef
 
 define Package/$(PKG_NAME)/install
-	$(CP) ./files/* $(1)/
-	$(CHMOD) 755 $(1)/usr/bin/modeminfo $(1)/usr/libexec/rpcd/modeminfo
+	$(INSTALL_DIR) $(1)/usr/bin $(1)/usr/libexec/rpcd
+	$(INSTALL_BIN) ./files/usr/bin/modeminfo $(1)/usr/bin/modeminfo
+	$(INSTALL_BIN) ./files/usr/libexec/rpcd/modeminfo $(1)/usr/libexec/rpcd/modeminfo
+	$(CP) ./files/etc $(1)/
+	$(CP) ./files/www $(1)/
 endef
 
 $(eval $(call BuildPackage,$(PKG_NAME)))

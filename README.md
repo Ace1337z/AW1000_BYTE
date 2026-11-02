@@ -435,10 +435,31 @@ must print the symbol. The `packages` gate runs exactly that.
 `byte_ttl` chain is live. `nss-offload off` remains as a panic button and says
 so; it no longer claims to fix WAN TTL, because WAN was never accelerated.
 
-### LuCI page
+### LuCI pages
 
-`files/www/luci-static/resources/view/qmodem/ttl.js` overrides the app's page.
-Only the wording changes: the stock text warns that enabling TTL disables NSS
+#### modeminfo — SA support
+
+The vendored `luci-app-modeminfo` reads its data from a Quectel modem with one
+AT batch (`at+csq;+qnwinfo;+qcainfo;+qeng="servingcell";+qspn` via
+`sms_tool_q`) and parses both registration modes:
+
+- **NR5G-SA**: `+QENG: "servingcell","NOCONN","NR5G-SA",...` — RSRP/RSRQ/SINR,
+  MCC/MNC, cell ID (hex + decimal) all extracted, field offsets 5/6/7/13/14/15
+  match the SA row layout (SA servingcell has no LTE anchor columns, which is
+  why the SA and NSA awk indices differ).
+- **NR5G-NSA**: same fields from the `"NR5G-NSA"` row (fields 2/3/5/6/7/8).
+- The Network line (`LTE|NR5G-NSA|NR5G-SA` greps) and the view both fall back
+  NSA→SA (`m.nr5g_nsa_rsrp || m.nr5g_sa_rsrp`), so a pure-SA camp shows SA
+  metrics, an NSA camp shows NR + LTE, and LTE-only shows LTE.
+
+`parse_carrier()` also types carrier aggregation rows (`+QCAINFO` PCC/SCC) as
+`NR5G*` vs `LTE*`, so SA band aggregation displays correctly. Verified by
+`sh -n` / `node --check` plus a compile of the package; a live check against a
+camped-SA modem needs the hardware session.
+
+#### ttl page
+
+`files/www/luci-static/resources/view/qmodem/ttl.js` overrides the app's page.Only the wording changes: the stock text warns that enabling TTL disables NSS
 offload, which is no longer what happens. The UCI schema, field names and
 datatypes are identical, so `luci-app-qmodem-ttlfw4` remains the owner of the
 page and of `/etc/config/qmodem_ttl`.
@@ -507,6 +528,14 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-02
+- **Build fix: `luci-app-modeminfo` died with `Error 127`.** Its vendored
+  Makefile used `$(CHMOD) 755 ...` in `Package/install`, but `CHMOD` is not
+  defined anywhere in the OpenWrt/ImmortalWrt buildroot (no such variable in
+  `rules.mk` or `include/`), so the line expanded to `755 <file>` and bash
+  tried to execute it. `Package/install` rewritten with `INSTALL_BIN`, which
+  copies and sets 0755 in one step. Confirmed: package builds, ipk produced.
+  SA support audited at the same time and it is complete — see
+  `luci-app-modeminfo` notes above.
 - **Gate fix: `NSS_DRV_*` is not a kernel symbol.** The first `kconf` gate run
   asserted `CONFIG_NSS_DRV_RMNET_ENABLE=y` in the built kernel `.config` and
   failed — correctly, because `qca-nss-drv`'s `KernelPackage` has no `KCONFIG`;
