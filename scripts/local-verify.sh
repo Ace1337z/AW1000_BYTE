@@ -75,7 +75,29 @@ gate_download()  { in_tree make download -j"$JOBS"; }
 gate_tools()     { in_tree make tools/compile -j"$JOBS"; }
 gate_toolchain() { in_tree make toolchain/compile -j"$JOBS"; }
 gate_target()    { in_tree make target/compile -j"$JOBS"; }
-gate_packages()  { in_tree make package/compile -j"$JOBS"; }
+# packages also proves the *post-patch* state: $(PATCH) runs with -f, so a hunk
+# that fails leaves a .rej and the build carries on with the old source.
+gate_packages()  {
+    in_tree make package/compile -j"$JOBS" || return 1
+    local bad=0 rej
+    rej=$(find "$tree"/build_dir -name '*.rej' -o -name '*.orig' 2>/dev/null | head -20)
+    if [ -n "$rej" ]; then
+        echo "failed patch hunks present (patch ran with -f):"
+        echo "$rej"
+        bad=1
+    fi
+    local src
+    src=$(ls -d "$tree"/build_dir/target-*/linux-qualcommax_ipq807x/qmi_wwan_q-*/qmi_wwan_q.c 2>/dev/null | head -1)
+    if [ -n "$src" ]; then
+        if grep -q '#define CONFIG_QCA_NSS_DRV' "$src"; then
+            echo "FAIL $src still defines CONFIG_QCA_NSS_DRV (patch not applied)"
+            bad=1
+        else
+            echo "ok   qmi_wwan_q source has the NSS hook removed"
+        fi
+    fi
+    return $bad
+}
 # Full world: reuses everything above, then assembles squashfs/sysupgrade.
 gate_image()     { in_tree make -j"$JOBS"; }
 gate_ondemand()  { bash "$repo_root/.github/build-ondemand-packages.sh" "$tree"; }

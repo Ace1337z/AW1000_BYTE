@@ -479,6 +479,34 @@ apply_preset() {
         fi
         echo -e "${BOLD_GREEN}ndisc6: 1.0.2 -> 1.0.8 (1.0.2 answered 410)${RESET}"
     fi
+    # A patch directory is only applied if Build/Prepare actually calls
+    # $(Build/Patch). qmi_wwan_q overrides Build/Prepare (copy src/ flat into
+    # PKG_BUILD_DIR) and never called it, so patches/0001-disable-qca-nss-hook
+    # existed, was copied into the feed, and was never applied: modpost kept
+    # failing with "rmnet_nss_callbacks ... undefined!" (run 41469086214). The
+    # copy stays flat because the patch is -p1 against PKG_BUILD_DIR root; only
+    # the patch step is appended.
+    local qmm="$PWD/feeds/qmodem/driver/quectel_QMI_WWAN/Makefile"
+    if [ -f "$qmm" ]; then
+        if ! grep -qF '$(Build/Patch)' "$qmm"; then
+            awk '
+                /^define Build\/Prepare$/ { blk = 1 }
+                blk && /\$\(CP\) \.\/src\// {
+                    print
+                    print "\t$(Build/Patch)"
+                    blk = 0
+                    next
+                }
+                /^endef$/ { blk = 0 }
+                { print }
+            ' "$qmm" >"$qmm.tmp" && mv "$qmm.tmp" "$qmm"
+        fi
+        if ! grep -qF '$(Build/Patch)' "$qmm"; then
+            echo -e "${BOLD_RED}qmi_wwan_q: Build/Prepare does not apply patches${RESET}"
+            exit 1
+        fi
+        echo -e "${BOLD_GREEN}qmi_wwan_q: Build/Prepare applies patches/ (NSS hook stripped)${RESET}"
+    fi
 }
 
 run_menuconfig() {
@@ -801,6 +829,11 @@ ci_check_packages() {
     grep -qF '$(CP) ./src/* $(PKG_BUILD_DIR)/' \
         feeds/qmodem/driver/quectel_QMI_WWAN/Makefile 2>/dev/null || \
         missing="$missing qmi_wwan_q-prepare-flattened(patch is -p1)"
+    # ... and Build/Prepare must actually run the patch step: a build that only
+    # ships patches/ still fails modpost (run 41469086214).
+    grep -qF '$(Build/Patch)' \
+        feeds/qmodem/driver/quectel_QMI_WWAN/Makefile 2>/dev/null || \
+        missing="$missing qmi_wwan_q-patches-never-applied(Build/Prepare skips Build/Patch)"
     # rmnet-nss cannot be selected (C2C unmet) and is not wanted: assert it
     # stays out so the patch and the image agree.
     grep -q '^CONFIG_PACKAGE_kmod-rmnet-nss=y$' .config && \

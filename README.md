@@ -344,11 +344,36 @@ The driver keeps its own QMAP implementation (`qmap_mode`/`rx_qmap` module
 params, no `rmnet_data` imports), so `wwan*` netdevs are created exactly as
 before. Verified by building the patched `qmi_wwan_q.ko` against a kernel tree:
 `nm -u qmi_wwan_q.ko | grep rmnet` is empty, and the unpatched source fails
-modpost with the symbol above. CI asserts the patch is present in the repo,
+modpost with the symbol above.
+
+That first fix did not take, and the reason is worth keeping: **the patch was
+never applied.** `quectel_QMI_WWAN` defines its own `Build/Prepare`
+(`mkdir -p $(PKG_BUILD_DIR)` + `$(CP) ./src/* $(PKG_BUILD_DIR)/`) and, unlike
+`Build/Prepare/Default`, it never calls `$(Build/Patch)`. A package that
+overrides `Build/Prepare` and skips that call has an inert `patches/` directory:
+the file is copied into the feed, listed in the repo, and never read. Run
+`41469086214` therefore failed at the same modpost line as `41456411377`, 1 h
+50 m in. The hand test that "proved" the patch worked had applied it with
+`patch -p1` directly, which validated the *content* and not the build path —
+exactly the kind of gap the local gates in
+[Local build verification](#local-build-verification-ci-is-the-release-path-not-the-debugger)
+exist to close.
+
+`apply_preset()` now appends `$(Build/Patch)` to that `Build/Prepare` (after the
+flattening copy, which the `-p1` patch needs), and the tree was scanned for the
+same class of bug: of every package under `feeds/` and `package/` that ships
+`patches/*.patch`, this was the only one whose `Build/Prepare` did not reach
+`$(Build/Patch)` or `Build/Prepare/Default`. CI asserts the call is present, and
+the `packages` gate additionally fails on any `*.rej`/`*.orig` left in
+`build_dir` — `$(PATCH)` runs with `-f`, so a non-applying hunk would otherwise
+be silent.
+
+CI asserts the patch is present in the repo,
 that the `nss/` overlay copied it into `feeds/qmodem`, that it still removes
 both `#define` lines, that `Build/Prepare` still flattens `./src/*` into
-`PKG_BUILD_DIR` (the patch is `-p1` against the build root), and that
-`kmod-rmnet-nss` stays out of the image.
+`PKG_BUILD_DIR` (the patch is `-p1` against the build root), that the same
+`Build/Prepare` runs `$(Build/Patch)`, and that `kmod-rmnet-nss` stays out of
+the image.
 ### Conntrack events on 6.12 (checked, no action)
 
 ECM registers a conntrack notifier to release state as soon as a connection is
@@ -455,6 +480,15 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-02
+- **Build fix: the `qmi_wwan_q` patch was never applied.** `quectel_QMI_WWAN`
+  overrides `Build/Prepare` and never called `$(Build/Patch)`, so its
+  `patches/` directory was inert — run `41469086214` failed at the same
+  `modpost: "rmnet_nss_callbacks" ... undefined!` line as `41456411377`.
+  `apply_preset()` appends `$(Build/Patch)` after the flattening `$(CP)`, and
+  the tree was scanned for the same pattern (this was the only package under
+  `feeds/` + `package/` with patches that skipped the patch step). The new
+  `packages` gate fails on leftover `*.rej`/`*.orig`, since `$(PATCH)` runs
+  with `-f` and a failed hunk is otherwise silent.
 - **New: `scripts/local-verify.sh` — build locally, push once.** CI is a ~3 h
   run that stops at the first failure, so the last four fixes each cost a full
   run to discover. The script reproduces the CI job as ordered gates
