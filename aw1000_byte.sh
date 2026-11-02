@@ -650,7 +650,7 @@ apply_version() {
 
 # CI-only: fail fast if the preset did not resolve the required packages.
 ci_check_packages() {
-    local missing="" forbidden="" p ndm
+    local missing="" forbidden="" p ndm qmp
     # ci_check_packages runs with CWD=immortalwrt, so repo paths must be
     # resolved via $script_dir rather than assumed relative.
     local repo_root="$(realpath "$script_dir" 2>/dev/null)"
@@ -782,6 +782,29 @@ ci_check_packages() {
     else
         missing="$missing ndisc6-feed-Makefile"
     fi
+    # qmi_wwan_q 1.5 defines CONFIG_QCA_NSS_DRV on every IPQ807x/IPQ5018/IPQ8074
+    # target and then references rmnet_nss_callbacks from the separate
+    # rmnet_nss.ko. That module is unselectable here (its DEPENDS include
+    # +@NSS_DRV_C2C_ENABLE, a chip-to-chip path an AW1000 does not want), so
+    # modpost aborts: "rmnet_nss_callbacks" [qmi_wwan_q.ko] undefined! (run
+    # 41456411377). The patch drops the two #define lines; the driver keeps its
+    # own QMAP implementation and only the optional NSS RX hand-off goes away.
+    # ECM excludes wwan*/rmnet* anyway (patch 0027), so no WAN offload is lost.
+    qmp="$repo_root/nss/feeds/qmodem/driver/quectel_QMI_WWAN/patches/0001-disable-qca-nss-hook.patch"
+    [ -f "$qmp" ] || missing="$missing qmi_wwan_q-no-nss-patch"
+    [ -f "feeds/qmodem/driver/quectel_QMI_WWAN/patches/0001-disable-qca-nss-hook.patch" ] || \
+        missing="$missing qmi_wwan_q-patch-not-copied(nss/ overlay)"
+    grep -q '^-#define CONFIG_QCA_NSS_DRV$' "$qmp" 2>/dev/null || \
+        missing="$missing qmi_wwan_q-patch-no-define-removal"
+    # The patch is -p1 against PKG_BUILD_DIR root, so Build/Prepare must keep
+    # copying the *contents* of src/ (a move to 'cp -r src' would break it).
+    grep -qF '$(CP) ./src/* $(PKG_BUILD_DIR)/' \
+        feeds/qmodem/driver/quectel_QMI_WWAN/Makefile 2>/dev/null || \
+        missing="$missing qmi_wwan_q-prepare-flattened(patch is -p1)"
+    # rmnet-nss cannot be selected (C2C unmet) and is not wanted: assert it
+    # stays out so the patch and the image agree.
+    grep -q '^CONFIG_PACKAGE_kmod-rmnet-nss=y$' .config && \
+        forbidden="$forbidden kmod-rmnet-nss(unselectable, C2C dep; patch handles it)"
     # Ruby's Kconfig defaults RUBY_ENABLE_YJIT to y on aarch64 and that pulls
     # rust/host into the build. The Rust host package downloads prebuilt LLVM
     # from ci-artifacts.rust-lang.org, and rust-lang rotates those out, so the

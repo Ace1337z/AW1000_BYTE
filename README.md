@@ -312,6 +312,43 @@ musl, and `make install --prefix=/usr` puts them at `/usr/bin/ndisc6`,
 expect.
 CI asserts the version, the hash, the https URL, that `patches/` is gone and
 that the c99 line is gone, since a feed bump would drag all three back.
+### qmi_wwan_q and the missing `rmnet_nss_callbacks`
+The vendor modem driver `quectel_QMI_WWAN` (qmodem feed, `qmi_wwan_q` 1.5)
+defines `CONFIG_QCA_NSS_DRV` unconditionally when the target pinctrl is
+IPQ807x/IPQ5018/IPQ8074 — true here — and then references the global
+`rmnet_nss_callbacks` that lives in the separate `rmnet_nss.ko`
+(`feeds/qmodem/driver/nss/rmnet-nss`). Nothing in the image provides it, and
+modpost refuses to link an undefined symbol in a module:
+```
+ERROR: modpost: "rmnet_nss_callbacks" [qmi_wwan_q-1.5/qmi_wwan_q.ko] undefined!
+```
+(run `41456411377`, ~1 h in).
+`rmnet-nss` looks like the fix, but it cannot be selected: its `DEPENDS` are
+`+kmod-qca-nss-drv +@NSS_DRV_RMNET_ENABLE +@NSS_DRV_C2C_ENABLE`, and C2C is
+the chip-to-chip NSS path (`config NSS_DRV_C2C_ENABLE`, `default n`, only
+prompted for ipq806x/ipq807x). An AW1000 has one SoC, so pulling in the C2C
+front end to satisfy a dependency would add code for a topology that does not
+exist. Enabling it was rejected for that reason, not because it fails to build.
+So the NSS hand-off is compiled out in the driver instead
+(`nss/feeds/qmodem/driver/quectel_QMI_WWAN/patches/0001-disable-qca-nss-hook.patch`,
+two `#define CONFIG_QCA_NSS_DRV` lines removed, everything else untouched).
+What is lost: `qmi_wwan_q` normally hands received modem packets to the NSS
+core (`qca_nss_rx_handler` → `nss_cb->nss_tx()`) and creates an NSS context per
+QMAP device. Without it the modem path stays on the host stack. That is also
+the path this image wants: ECM patch `0027` excludes `wwan*`/`rmnet*` from
+acceleration so the TTL rewrite always applies, so no accelerated WAN flow
+existed to lose. LAN/WiFi acceleration (the reason NSS ships) is untouched —
+`CONFIG_NSS_DRV_RMNET_ENABLE=y` stays because ECM's RAWIP front end uses
+`nss_rmnet_rx_get_ifnum`.
+The driver keeps its own QMAP implementation (`qmap_mode`/`rx_qmap` module
+params, no `rmnet_data` imports), so `wwan*` netdevs are created exactly as
+before. Verified by building the patched `qmi_wwan_q.ko` against a kernel tree:
+`nm -u qmi_wwan_q.ko | grep rmnet` is empty, and the unpatched source fails
+modpost with the symbol above. CI asserts the patch is present in the repo,
+that the `nss/` overlay copied it into `feeds/qmodem`, that it still removes
+both `#define` lines, that `Build/Prepare` still flattens `./src/*` into
+`PKG_BUILD_DIR` (the patch is `-p1` against the build root), and that
+`kmod-rmnet-nss` stays out of the image.
 ### Conntrack events on 6.12 (checked, no action)
 
 ECM registers a conntrack notifier to release state as soon as a connection is
@@ -385,6 +422,13 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-02
+- **Build fix: `qmi_wwan_q` no longer needs `rmnet_nss_callbacks`.** The
+  vendor driver defines `CONFIG_QCA_NSS_DRV` on IPQ807x and links against
+  `rmnet_nss.ko`, which cannot be selected here (its `+@NSS_DRV_C2C_ENABLE`
+  dependency is the chip-to-chip NSS path, useless on a single-SoC AW1000), so
+  modpost failed with an undefined symbol. The NSS hand-off is compiled out by
+  a feed patch; QMAP mode is unchanged and ECM never accelerated
+  `wwan*`/`rmnet*` anyway, so no usable offload is lost.
 - **Build fix: `ndisc6` 1.0.2 → 1.0.8.** Upstream removed 1.0.2 and the
   OpenWrt/ImmortalWrt mirrors never had it, so the download ended with "No more
   mirrors to try - giving up" ~3 h into the build. The feed copy is bumped in
