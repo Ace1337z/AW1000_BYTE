@@ -80,6 +80,15 @@ sing-box
 firewall4
 ucode-mod-digest
 
+# --- passwall2 geo add-ons ----------------------------------------------
+# Stripped from the image because the node is VLESS over plain ws: no
+# geoip:/geosite: routing rule matches, xray loads the .dat files lazily, and
+# passwall2 disables geoview cleanly when the binary is missing. Install these
+# if you add geo-based routing rules in passwall2.
+geoview
+v2ray-geoip
+v2ray-geosite
+chinadns-ng
 # --- OpenClash (clash) ---
 luci-app-openclash
 haproxy

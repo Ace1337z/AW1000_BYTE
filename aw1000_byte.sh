@@ -400,6 +400,24 @@ apply_preset() {
     # "Release RAM" entry would vanish. The package is ~1 KB of ucode + JSON.
     rm -rf package/feeds/luci/luci-app-ramfree feeds/luci/applications/luci-app-ramfree
     echo -e "${BOLD_GREEN}luci-app-ramfree VENDORED (missing at luci pin)${RESET}"
+    # luci-app-passwall2 hard-depends on geoview + v2ray-geoip + v2ray-geosite
+    # (~7.4 MB of ipks, ~3.4 MB in squashfs). The node this image is built for
+    # is VLESS over plain WebSocket (security=none): no geoip:/geosite: routing
+    # rules exist, xray only loads the .dat files when such a rule matches, and
+    # passwall2 auto-disables geoview when the binary is absent
+    # (nftables.sh: enable_geoview_ip=0 if `first_type geoview` is empty).
+    # v2ray-geoip itself ships an 18-byte empty geoip.dat stub to
+    # /usr/share/xray/, proving the file is optional. Users who need geo-based
+    # routing can opkg install them from the self-hosted repo.
+    local psm="$PWD/feeds/passwall_luci/luci-app-passwall2/Makefile"
+    if [ -f "$psm" ] && grep -q '+geoview' "$psm"; then
+        sed -i -e 's/ +geoview +v2ray-geoip +v2ray-geosite//' "$psm"
+        if grep -qE '\+(geoview|v2ray-geoip|v2ray-geosite)\b' "$psm"; then
+            echo -e "${BOLD_RED}luci-app-passwall2: geo deps still present${RESET}"
+            exit 1
+        fi
+        echo -e "${BOLD_GREEN}luci-app-passwall2: geoview/geoip/geosite deps dropped (~7.4 MB)${RESET}"
+    fi
     # xt_DSCP now calls the DSCPREMARK conntrack extension (kernel patch
     # 0600-6), so xt_DSCP.ko imports nf_conntrack.ko. kmod-ipt-ipopt does not
     # declare that dependency and package/kernel's ELF dependency checker then
@@ -738,6 +756,13 @@ ci_check_packages() {
              iptables-mod-conntrack-extra iptables-mod-ipopt ruby \
              rpcd-mod-rpcsys; do
         grep -q "^CONFIG_PACKAGE_${p}=y$" .config || missing="$missing $p"
+    done
+    # passwall2's geo deps are stripped in apply_preset() (~7.4 MB): this node
+    # is VLESS over plain ws, no geoip:/geosite: routing rule ever matches, and
+    # passwall2 degrades gracefully without geoview. Assert they stay OUT.
+    for p in geoview v2ray-geoip v2ray-geosite; do
+        grep -q "^CONFIG_PACKAGE_${p}=y$" .config && \
+            forbidden="$forbidden $p(passwall2 geo deps stripped: ~7.4 MB)"
     done
     # NSS ECM needs these drv features compiled in
     for p in CONFIG_NSS_DRV_IPV6_ENABLE CONFIG_NSS_DRV_VIRT_IF_ENABLE \

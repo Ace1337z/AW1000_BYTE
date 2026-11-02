@@ -533,7 +533,20 @@ Review both before republishing an image built here.
 
 ## Changelog
 
-### 1.2.x — 2026-11-02
+### 1.2.x — 2026-11-03
+- **Size: passwall2 geo dependencies dropped (~7.4 MB).** `luci-app-passwall2`
+  hard-pulled `geoview` (2 677 KB), `v2ray-geoip` (4 083 KB) and
+  `v2ray-geosite` (613 KB). The target node is VLESS over plain WebSocket, so
+  no `geoip:`/`geosite:` routing rule ever matches, xray loads the `.dat`
+  files lazily, and passwall2 auto-disables geoview when the binary is absent.
+  Stripped via an `apply_preset()` DEPENDS rewrite (hard-fails if the feed
+  Makefile changes shape), CI asserts all three stay out of `.config`, and
+  all four (incl. `chinadns-ng`) are published in the on-demand repo for
+  anyone who adds geo routing. `xray-core` itself stays untouched: a trimmed
+  `main/distro/all/all.go` was built and measured — 131 072 bytes saved of a
+  28.7 MB binary (0.43%), because `infra/conf/` (one Go package importing all
+  25 protocol parsers) and `app/dns` (DoQ) keep quic-go/grpc reachable. Not
+  worth a permanent fork.
 - **Build fix: `25.12(6.12.94)` broke image assembly.** `CONFIG_VERSION_NUMBER`
   flows into `IMG_PREFIX` → every image filename, and `Build/kernel-bin` runs
   `rm -f $@` unquoted: bash parsed the `(` as a subshell token and killed
@@ -664,7 +677,9 @@ Review both before republishing an image built here.
   states; the rule matches forwarded and router-originated egress and the
   self-check asserts the pairing.
 - Version string `BYTE 25.12(KERNEL) PATCH` in Status and in every filename,
-  derived from the commit count with the kernel read from the target.
+  with the parentheses display-only (see [Firmware version](#firmware-version)),
+  derived from the commit count with the kernel read from the target; the
+  passwall2 geo add-ons are published on demand rather than in the image.
 - Modem info rewritten as a JS view over an rpcd plugin: on-demand AT sampling
   with `flock` and atomic publish, no cron, no daemon, no external badges.
 - Tuning applied and self-checked: BBR/`fq`, BDP-sized buffers, TFO, larger NAPI
