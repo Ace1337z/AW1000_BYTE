@@ -534,6 +534,16 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-03
+- **Build fix (CI-only): stray `VERSION_REPO` delete killed run 41536683898
+  at 8 min.** The parenthesized-`VERSION_NUMBER` fix accidentally left a
+  `sed -i '/^CONFIG_VERSION_REPO=/d'` in `apply_version()`. On CI, where
+  `.config` is regenerated from `preset` every run, that delete emptied the
+  symbol before `make defconfig`, and `include/version.mk` falls back to
+  `https://downloads.immortalwrt.org/releases/25.12.1` — which the existing
+  `VERSION_REPO(apk-only-mirror)` forbidden assert then correctly rejected.
+  The local tree passed only because its `.config` still carried our repo URL
+  from an earlier build: a local-vs-CI divergence this exact class of gate is
+  supposed to surface. Line removed; the assert stays.
 - **Size: passwall2 geo dependencies dropped (~7.4 MB).** `luci-app-passwall2`
   hard-pulled `geoview` (2 677 KB), `v2ray-geoip` (4 083 KB) and
   `v2ray-geosite` (613 KB). The target node is VLESS over plain WebSocket, so

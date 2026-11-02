@@ -703,9 +703,6 @@ apply_version() {
         echo "CONFIG_VERSION_NUMBER=\"25.12.${kernel}\""
         echo "CONFIG_VERSION_CODE=\"${ver}\""
     } >> .config
-    # DISTRIB_DESCRIPTION is the string LuCI actually renders; keep the
-    # parentheses there (it is a text field, never a filename).
-    sed -i '/^CONFIG_VERSION_REPO=/d' .config 2>/dev/null
     echo -e "${BOLD_GREEN}FIRMWARE VERSION: BYTE 25.12(${kernel}) ${ver}${RESET}"
 }
 
