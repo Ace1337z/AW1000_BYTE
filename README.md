@@ -289,9 +289,29 @@ No more mirrors to try - giving up.
 and `PKG_SOURCE_URL:=https://www.remlab.net/files/ndisc6` — https on purpose,
 because the http URL is a `301` and every extra redirect is another way for a
 CI fetch to fail. Bumping in place is cheaper than vendoring the tarball: the
-package is autotools with a shipped `configure`, and 1.0.8 needs no patches.
-CI asserts the version, the hash and the https URL, since a feed bump would
-drag the dead 1.0.2 reference back.
+package is autotools with a shipped `configure`.
+The version bump alone was not enough (run `41438049720`, ~3 h again), because
+the feed copy also carries two 1.0.2-only patches and a `-std=c99` flag:
+- `100-favor_bsd.patch` inserts `#define __FAVOR_BSD 1` next to `_BSD_SOURCE`
+  in `src/trace-{tcp,udp}.c`. 1.0.8 rewrote both files around C11 `alignas` and
+  no longer undefines `_GNU_SOURCE`, so `Hunk #1 FAILED at 24` and the patch
+  aborted with `.prepared_…` error.
+- `110-strverscmp.patch` copies glibc's `strverscmp` into the old `rdnssd/`
+  directory (`rdnssd/Makefile.am`, `Makefile.in`, new `strverscmp.c`). 1.0.8
+  moved the daemon to `rdnss/` with a different `Makefile.am`, and musl exports
+  `strverscmp` in `libc.so` anyway.
+- `TARGET_CFLAGS += -std=c99` fails on 1.0.8's aligned payload buffers:
+  `src/trace-tcp.c:52: error: expected expression before 'struct'` (`alignas`
+  is C11, so the target build needs the default gnu17).
+`apply_preset()` therefore drops the whole `patches/` directory and the c99
+line alongside the version bump. Verified locally by cross-building
+`ndisc6-1.0.8` with an `aarch64-linux-musl` toolchain and CFLAGS `-Os`:
+`ndisc6`, `rdisc6` and `rdnssd` all link, `rdnssd`'s `strverscmp` resolves from
+musl, and `make install --prefix=/usr` puts them at `/usr/bin/ndisc6`,
+`/usr/bin/rdisc6`, `/usr/sbin/rdnssd` — the paths the feed's install rules
+expect.
+CI asserts the version, the hash, the https URL, that `patches/` is gone and
+that the c99 line is gone, since a feed bump would drag all three back.
 ### Conntrack events on 6.12 (checked, no action)
 
 ECM registers a conntrack notifier to release state as soon as a connection is
@@ -368,8 +388,10 @@ Review both before republishing an image built here.
 - **Build fix: `ndisc6` 1.0.2 → 1.0.8.** Upstream removed 1.0.2 and the
   OpenWrt/ImmortalWrt mirrors never had it, so the download ended with "No more
   mirrors to try - giving up" ~3 h into the build. The feed copy is bumped in
-  `apply_preset()` with a pinned MD5 and an https source URL; CI asserts all
-  three.
+  `apply_preset()` with a pinned MD5 and an https source URL, and the feed's two
+  1.0.2-only patches (BSD `struct` headers, a `strverscmp` copy) plus the
+  `-std=c99` flag are dropped — 1.0.8 is C11 (`alignas`) and needs none of
+  them. CI asserts all five.
 - **Build fix: `RUBY_ENABLE_YJIT` off.** It defaults to `y` on aarch64 and
   pulls `rust/host` in, whose prebuilt-LLVM download now 404s upstream (build
   dies ~3 h in). YJIT cannot work on a cross-compiled aarch64 target anyway.

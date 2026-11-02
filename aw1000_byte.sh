@@ -452,7 +452,26 @@ apply_preset() {
     if [ -f "$ndm" ]; then
         sed -i -e 's|^PKG_VERSION:=.*|PKG_VERSION:=1.0.8|' \
             -e 's|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=https://www.remlab.net/files/ndisc6|' \
-            -e 's|^PKG_MD5SUM:=.*|PKG_MD5SUM:=335a810a0180d36a1e2a5a81c425e2d6|' "$ndm"
+            -e 's|^PKG_MD5SUM:=.*|PKG_MD5SUM:=335a810a0180d36a1e2a5a81c425e2d6|' \
+            -e '/^TARGET_CFLAGS += -std=c99$/d' "$ndm"
+        # The feed's two patches are 1.0.2-only and cannot apply to 1.0.8:
+        #   100-favor_bsd  adds #define __FAVOR_BSD next to _BSD_SOURCE in
+        #     src/trace-{tcp,udp}.c; 1.0.8 rewrote those files (C11 alignas) and
+        #     no longer undefines _GNU_SOURCE, so the hunk has no context.
+        #   110-strverscmp ships a copy of glibc strverscmp into rdnssd/,
+        #     because the old rdnssd/ layout lacked it; 1.0.8 moved the daemon
+        #     to rdnss/ and musl exports strverscmp now.
+        # Neither is needed: 1.0.8 builds clean against aarch64 musl (checked
+        # with a musl-cross toolchain), so drop the whole directory.
+        rm -rf "$(dirname "$ndm")/patches"
+        # `TARGET_CFLAGS += -std=c99` also has to go: 1.0.8 uses `alignas` code
+        # (src/trace-udp.c, src/trace-tcp.c) which is C11, and building it as
+        # c99 fails with "expected expression before 'struct'". The toolchain
+        # default (gnu17) builds it.
+        if grep -q '^TARGET_CFLAGS += -std=c99$' "$ndm"; then
+            echo -e "${BOLD_RED}ndisc6: c99 flag still present${RESET}"
+            exit 1
+        fi
         if ! grep -q '^PKG_VERSION:=1\.0\.8$' "$ndm" || \
                 ! grep -q '^PKG_MD5SUM:=335a810a0180d36a1e2a5a81c425e2d6$' "$ndm"; then
             echo -e "${BOLD_RED}ndisc6: could not pin 1.0.8${RESET}"
@@ -754,6 +773,12 @@ ci_check_packages() {
             missing="$missing ndisc6-md5(pinned)"
         grep -q '^PKG_SOURCE_URL:=https://www\.remlab\.net/files/ndisc6$' "$ndm" || \
             missing="$missing ndisc6-url(https, no redirect)"
+        # 1.0.2-era patches cannot apply to 1.0.8 and the c99 flag breaks its
+        # C11 `alignas` code; the build failed on both in run 41438049720.
+        [ -d "$(dirname "$ndm")/patches" ] && \
+            forbidden="$forbidden ndisc6-patches(1.0.2-only)"
+        grep -q '^TARGET_CFLAGS += -std=c99$' "$ndm" && \
+            forbidden="$forbidden ndisc6-c99(1.0.8 needs C11)"
     else
         missing="$missing ndisc6-feed-Makefile"
     fi
