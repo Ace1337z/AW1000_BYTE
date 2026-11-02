@@ -240,6 +240,37 @@ only that the package never says so. `kmod-ipt-ipopt` is defined in
 `$(call AddDepends/ipt,+kmod-nf-conntrack)`. No flash cost: `kmod-nf-conntrack`
 is in the image regardless.
 
+### Ruby YJIT and the Rust host build (regression, fixed)
+
+`PACKAGE_ruby` ships only so the on-demand OpenClash package can install from
+this project's opkg repo; nothing in the image runs Ruby. Its Kconfig entry
+`RUBY_ENABLE_YJIT` is `default y if x86_64||aarch64`, so on this target it was
+silently on, and `PKG_BUILD_DEPENDS:=ruby/host RUBY_ENABLE_YJIT:rust/host`
+dragged the Rust host compiler into every build.
+
+That Rust host build does not compile Rust from scratch: `x.py` fetches a
+prebuilt `rust-dev-<ver>-x86_64-unknown-linux-gnu.tar.xz` from
+`ci-artifacts.rust-lang.org/rustc-builds/<commit>/` and only builds LLVM if the
+download fails. Those artifacts are rotated out over time — a build on
+2026-11-02 spent ~3 h and then died with
+
+```
+curl: (22) The requested URL returned error: 404
+ERROR: failed to download llvm from ci
+```
+
+even though nothing in the image is written in Rust. YJIT cannot work here in
+any case: Ruby 3.4 does not support cross-compiling YJIT, and the build host is
+x86_64 while the target is aarch64, so the interpreter falls back to the
+non-JIT path regardless. `preset` now pins
+`# CONFIG_RUBY_ENABLE_YJIT is not set`, and CI fails the build if that line
+disappears or if `CONFIG_PACKAGE_rust=y` ever shows up.
+
+Note for later: `ruby` + `ruby-yaml` are several megabytes in the image purely
+for a package that is not installed. The correct long-term shape is to build
+them as on-demand packages (`build-ondemand-packages.sh`) and drop them from
+`preset`; that is deferred until the image is confirmed booting.
+
 ### Conntrack events on 6.12 (checked, no action)
 
 ECM registers a conntrack notifier to release state as soon as a connection is
@@ -313,6 +344,11 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-02
+- **Build fix: `RUBY_ENABLE_YJIT` off.** It defaults to `y` on aarch64 and
+  pulls `rust/host` in, whose prebuilt-LLVM download now 404s upstream (build
+  dies ~3 h in). YJIT cannot work on a cross-compiled aarch64 target anyway.
+  CI rejects a rebuild that turns it back on, and rejects
+  `CONFIG_PACKAGE_rust=y`.
 - **Build fix: `kmod-ipt-ipopt` declares the conntrack dependency.** The
   DSCPREMARK patch makes `xt_DSCP.ko` import `nf_conntrack.ko`, which the
   kernel-package dependency checker treats as a hard error until the package

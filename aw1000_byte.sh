@@ -719,6 +719,18 @@ ci_check_packages() {
         package/kernel/linux/modules/netfilter.mk 2>/dev/null | \
         grep -q 'AddDepends/ipt,+kmod-nf-conntrack' || \
         missing="$missing kmod-ipt-ipopt(nf_conntrack dep)"
+    # Ruby's Kconfig defaults RUBY_ENABLE_YJIT to y on aarch64 and that pulls
+    # rust/host into the build. The Rust host package downloads prebuilt LLVM
+    # from ci-artifacts.rust-lang.org, and rust-lang rotates those out, so the
+    # build dies on an HTTP 404 after ~3 h. YJIT cannot work here anyway: Ruby
+    # 3.4 does not support cross-compiling YJIT, and the build host (x86_64)
+    # differs from the target (aarch64).
+    grep -q '^# CONFIG_RUBY_ENABLE_YJIT is not set$' .config || \
+        missing="$missing ruby-yjit-off(rust-host-llvm-404)"
+    # The target rust compiler package is never wanted: it is only a dependency
+    # of YJIT and of Rust application packages, none of which ship.
+    grep -q '^CONFIG_PACKAGE_rust=y$' .config && \
+        forbidden="$forbidden rust-target-package(huge, unused)"
     # ECM must never be parked by the TTL service: modem egress is excluded in
     # the ECM source instead, so TTL and NSS run together. A script that stops
     # ECM re-introduces the old mutual-exclusion and loses LAN offload.
