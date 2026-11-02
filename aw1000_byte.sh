@@ -394,6 +394,12 @@ apply_preset() {
     # feed copy is safe.
     rm -rf package/feeds/luci/luci-app-netstat feeds/luci/applications/luci-app-netstat
     echo -e "${BOLD_GREEN}luci-app-netstat FEED COPY REMOVED (vendored package wins)${RESET}"
+    # luci-app-ramfree is vendored for the same reason: the luci feed is pinned
+    # to 350fc919 (the first pin with view/dashboard/lib) and ImmortalWrt added
+    # the app after that pin, so a pinned build would silently drop it and the
+    # "Release RAM" entry would vanish. The package is ~1 KB of ucode + JSON.
+    rm -rf package/feeds/luci/luci-app-ramfree feeds/luci/applications/luci-app-ramfree
+    echo -e "${BOLD_GREEN}luci-app-ramfree VENDORED (missing at luci pin)${RESET}"
 }
 
 run_menuconfig() {
@@ -793,6 +799,12 @@ ci_check_packages() {
     [ -x "$repo_root/files/etc/init.d/byte-selfcheck" ] || missing="$missing byte-selfcheck-init"
     [ -x "$repo_root/files/etc/hotplug.d/iface/91-byte-selfcheck" ] || missing="$missing byte-selfcheck-hotplug"
     [ -x "$repo_root/files/etc/init.d/byte-affinity" ] || missing="$missing byte-affinity-init"
+    # Vendored LuCI apps live in packages/ and are copied into ./package/ by the
+    # build script. If one goes missing the preset entry is silently dropped by
+    # defconfig, so assert the source directories.
+    for p in luci-app-netstat luci-app-ramfree luci-app-byte luci-app-modeminfo; do
+        [ -f "$repo_root/packages/$p/Makefile" ] || missing="$missing vendored($p)"
+    done
     # The self-check reads these files as the source of truth; a missing key
     # would make it assert the wrong thing.
     for k in net.ipv4.tcp_congestion_control net.core.default_qdisc \
@@ -906,8 +918,10 @@ ci_check_packages() {
         missing="$missing version(workflow-path)"
     # The dashboard include/*.js widgets need view/dashboard/lib/* from the luci
     # feed and land as a silent no-op on an older pin, so pin and payload are
-    # both asserted.
-    grep -q 'luci\.git\^350fc919675b' "$repo_root/aw1000_byte.sh" 2>/dev/null || \
+    # both asserted. The pin lives in feeds.conf.default (written with sed from
+    # the pattern below), so assert the generated line, not a string in this
+    # script - the literal "luci.git^<sha>" never appears here.
+    grep -q 'luci\.git\^350fc919675bb62e415927afff65697fcb8f775d' feeds.conf.default 2>/dev/null || \
         missing="$missing luci-feed-pin(dashboard-lib)"
     [ -f feeds/luci/modules/luci-mod-dashboard/htdocs/luci-static/resources/view/dashboard/lib/charts.js ] || \
         missing="$missing dashboard-lib(charts.js)"

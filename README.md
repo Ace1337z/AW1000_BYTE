@@ -310,6 +310,13 @@ Review both before republishing an image built here.
   interface and stops ECM as a fail-safe. See *Engineering log*.
 - Menu banner lost the leftover contact line; the NSS status cache no longer
   claims ECM is missing.
+- `luci-app-ramfree` is vendored in `packages/`: the luci feed is pinned to the
+  first commit that carries `view/dashboard/lib/*`, and ImmortalWrt added the
+  app after that pin, so a pinned build dropped it and the *Release RAM* entry
+  disappeared. The CI assert for the feed pin was also looking for a literal
+  `luci.git^<sha>` that the script never contains (it writes the pin with
+  `sed`), so every build failed on a false negative; it now greps the generated
+  `feeds.conf.default` line.
 - Footstrap moved to the upstream standalone repo, pinned to v0.14.19, and the
   luci feed bumped to a commit that carries `view/dashboard/lib/*` — the
   dashboard widgets now render instead of failing their `require` silently.
