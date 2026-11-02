@@ -692,6 +692,20 @@ ci_check_packages() {
     if grep -q '^CONFIG_PACKAGE_luci-app-passwall=y$' .config; then
         forbidden="$forbidden passwall-v1(ships alongside passwall2, cannot coexist)"
     fi
+    # preset can drift from the feeds. A CONFIG_PACKAGE_x=y whose symbol no
+    # longer exists is dropped by defconfig with at most a warning, so a
+    # requested app can vanish from the image without failing anything (found:
+    # luci-app-cpufreq, luci-lib-nixio_openssl, and three *_INCLUDE_*
+    # sub-options whose parent app had left the luci feed). Assert every
+    # requested symbol is still declared in the generated package index.
+    pidx="tmp/.config-package.in"
+    if [ -f "$pidx" ]; then
+        for rp in $(grep -oE '^CONFIG_PACKAGE_[A-Za-z0-9_.+-]+=y$' "$repo_root/preset" | \
+                sed 's/^CONFIG_PACKAGE_//;s/=y$//'); do
+            grep -qE "^[[:space:]]*(menu)?config PACKAGE_${rp}\$" "$pidx" || \
+                missing="$missing preset-no-such-package:$rp"
+        done
+    fi
     for p in luci-app-passwall2 \
              luci-theme-footstrap \
              luci-app-qmodem qmodem modem_scan tom_modem \

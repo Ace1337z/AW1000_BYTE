@@ -124,7 +124,7 @@ gate_config() {
     local absent="" refused=""
     while IFS= read -r p; do
         [ -n "$p" ] || continue
-        if [ -f "$kconf" ] && grep -q "^config PACKAGE_${p}\$" "$kconf"; then
+        if [ -f "$kconf" ] && grep -qE "^[[:space:]]*(menu)?config PACKAGE_${p}\$" "$kconf"; then
             refused="$refused $p"
         else
             absent="$absent $p"

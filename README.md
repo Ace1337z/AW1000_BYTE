@@ -444,7 +444,8 @@ it goes green, so the loop after a fix is minutes instead of hours:
 `config` is the gate that catches the quiet failure mode: `make defconfig`
 discards a `CONFIG_PACKAGE_x=y` whose package or dependency does not exist and
 prints at most a warning, so a missing LuCI app can reach the image without ever
-failing a build.
+failing a build. Its first run found ten such lines in `preset`, including a
+LuCI app that no longer exists in this luci pin — see the changelog.
 
 Only a green `repo` gate justifies a push. CI then re-confirms the same targets
 and publishes the artifacts; it no longer discovers problems.
@@ -480,6 +481,19 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-02
+- **Config fix: 10 dead `preset` lines removed.** `make defconfig` drops a
+  `CONFIG_PACKAGE_x=y` whose symbol no longer exists and only warns, so the
+  new `config` gate found lines that had been inert for unknown releases:
+  `luci-app-cpufreq` + its zh-cn i18n and `CONFIG_DEFAULT_luci-app-cpufreq`
+  (ImmortalWrt's `emortal/cpufreq` is daemon-only, no LuCI app),
+  `luci-lib-nixio_openssl` (current luci has a single nixio build),
+  `luci-app-diskman_INCLUDE_{btrfs_progs,lsblk}` and
+  `luci-app-rclone_INCLUDE_{rclone-webui,rclone-ng}` (parent apps are `not
+  set`), `luci-app-passwall2_Basic_Core_Xray` (that option no longer exists;
+  `xray-core` is a hard `LUCI_DEPENDS`), and `knot-resolver_dnstap`.
+  `ci_check_packages()` now asserts every requested symbol is declared in
+  `tmp/.config-package.in`, so this cannot drift again. 320 requested
+  symbols, 0 missing.
 - **Build fix: the `qmi_wwan_q` patch was never applied.** `quectel_QMI_WWAN`
   overrides `Build/Prepare` and never called `$(Build/Patch)`, so its
   `patches/` directory was inert — run `41469086214` failed at the same
