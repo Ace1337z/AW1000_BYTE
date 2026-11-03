@@ -1,0 +1,22 @@
+#!/bin/sh
+# BYTE by ACE - first boot / upgrade: the box calls itself BYTE.
+#
+# Why a script and not just the shipped /etc/config/system: sysupgrade without
+# `-n` keeps the old /etc/config/system, so every unit flashed before this
+# change would keep answering as BYTE_by_ACE forever. The theme header prints
+# the hostname as its wordmark, so the header read `BYTE_by_ACE` even though the
+# logo said BYTE.
+#
+# Only the old value is rewritten. A hostname the admin chose deliberately is
+# left alone - this fixes our own default, it does not own the setting.
+
+cur=$(uci -q get system.@system[0].hostname)
+if [ "$cur" = "BYTE_by_ACE" ] || [ "$cur" = "OpenWrt" ]; then
+	uci -q set system.@system[0].hostname='BYTE'
+	uci -q commit system
+	# dnsmasq advertises the old name over DHCP/mDNS until it is restarted;
+	# network reload is enough and does not drop the LAN.
+	/etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
+fi
+
+exit 0

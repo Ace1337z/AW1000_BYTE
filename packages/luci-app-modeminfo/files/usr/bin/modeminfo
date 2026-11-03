@@ -1,205 +1,329 @@
 #!/bin/sh
-# Copyright (C) 2024 - 2025 SolomonRicky <yizhen.c02@gmail.com>
+# luci-app-modeminfo - AT collector for the BYTE build.
+#
+# The image already runs /usr/sbin/byte-status-cache, which polls the modem
+# every 10 s through qmodem's at-daemon and writes:
+#
+#   /tmp/aw1000-status/live     +QENG "servingcell", +QCAINFO, +CSQ, +CEREG?,
+#                               +C5GREG?, +QSPN, +CPMS?, +QTEMP
+#   /tmp/aw1000-status/static   +CGMI, +CGMM, +CGMR, +CGSN, +QCCID, +QUIMSLOT?,
+#                               +CGCONTRDP, band locks/preferences
+#
+# so this app does not open the AT port itself. Two pollers on one tty
+# interleave their replies and both parse garbage, and at-daemon is the only
+# process allowed to own the serialiser. Reading the cache also makes the page
+# free to refresh as often as it likes.
+#
+# The one exception is a box where the cache service is missing or has never
+# written a file: then (and only then) the collector sends its own AT batch
+# with sms_tool_q so the page still shows something.
+#
+# Output is one "Key: value" line per reading plus one "PCC:"/"SCCn:" row per
+# carrier. The rpcd backend (/usr/libexec/rpcd/modeminfo) keys the scalars into
+# JSON and passes the carrier rows through untouched.
 
-# AT tool: this image ships QModem's fork as sms_tool_q; plain sms_tool only
-# exists if the packages-feed variant is installed. Prefer whichever is there.
-SMS="$(command -v sms_tool_q 2>/dev/null || command -v sms_tool 2>/dev/null)"
-[ -n "$SMS" ] || { logger -t modeminfo "no AT tool (sms_tool_q/sms_tool)"; exit 0; }
+CACHE=/tmp/aw1000-status
+LIVE="$CACHE/live"
+STATIC="$CACHE/static"
+PORT="$(uci -q get modeminfo.settings.comm 2>/dev/null)"
+[ -n "$PORT" ] || PORT=/dev/ttyUSB3
 
-# Fetch comm port from setting
-commport=$(uci -q get modeminfo.settings.comm)
-[ -n "$commport" ] || commport=/dev/ttyUSB3
-[ -c "$commport" ] || { logger -t modeminfo "AT port $commport missing"; exit 0; }
+TMPBASE=""
+cleanup() { [ -n "$TMPBASE" ] && rm -f "$TMPBASE.live" "$TMPBASE.static"; }
+trap cleanup EXIT
 
-# Modem information from the command to be parsed
-signal=$("$SMS" -d $commport at "at+csq;+qnwinfo;+qcainfo;+qeng=\"servingcell\";+qspn" | tr -d '\r')
+# Only used when the shared cache has never been written. Deliberately writes
+# to a private temp file: those cache files belong to byte-status-cache.
+fallback_poll() {
+	AT="$(command -v sms_tool_q 2>/dev/null || command -v sms_tool 2>/dev/null)"
+	[ -n "$AT" ] && [ -c "$PORT" ] || return 1
 
-# Store the output from cat /sys/kernel/debug/usb/devices into a variable
-usbd=$(cat /sys/kernel/debug/usb/devices)
-
-# Check for different drivers and set the PROTO variable accordingly
-if echo "$usbd" | grep -q "Driver=qmi_wwan_q"; then
-    protocol="quectel-cm"
-elif echo "$usbd" | grep -q "Driver=qmi_wwan"; then
-    protocol="qmi"
-elif echo "$usbd" | grep -q "Driver=cdc_mbim"; then
-    protocol="mbim"
-elif echo "$usbd" | grep -q "Driver=cdc_ether"; then
-    protocol="ecm"
-else
-    protocol="unknown"
-fi
-
-# Extract LTE, NR5G-NSA, NR5G-SA network type dynamically
-network=$(echo "$signal" | grep 'QENG' | grep -oE 'LTE|NR5G-NSA|NR5G-SA' | tr '\n' ' ')
-
-# Extract modem model and manufacturer using ATI command and ensure no extra newlines
-modem=$("$SMS" -d $commport at "ati" | sed -n '2{h}; 3{H; x; s/\n/ /p}' | tr -d '\r\n')
-
-# Extract revision using AT+QGMR command and remove newlines
-revision=$("$SMS" -d $commport at "at+qgmr" | sed '1d')
-
-# Extract ISP from the $signal output (QSPN part)
-isp=$(echo "$signal" | grep 'QSPN:' | awk -F\" '{print $2}' | tr -d '\r' | tr -d '\n')
-
-# Extract temperature using AT+QTEMP (if supported by the modem)
-temperature=$("$SMS" -d $commport at "at+qtemp" | awk -F[,:] '/^\+QTEMP/{print $3}' | sort -r | head -n1 | xargs)
-[ -z "$temperature" ] && temperature="N/A"
-
-imei=$("$SMS" -d $commport at "at+cgsn" | sed '1d')
-
-# Extract data for CSQ
-csq=$(echo "$signal" | grep 'csq:' | awk -F'[ ,:]' '{print $3}')
-csqper=$(echo "$signal" | grep 'csq:' | awk -F, '{print $2}')
-
-# Extract data for LTE
-rssi_lte=$(echo "$signal" | grep 'QCAINFO: "PCC"' | awk -F, '{print $9}')
-rsrq_lte=$(echo "$signal" | grep 'QCAINFO: "PCC"' | awk -F, '{print $8}')
-rsrp_lte=$(echo "$signal" | grep 'QCAINFO: "PCC"' | awk -F, '{print $7}')
-sinr_lte=$(echo "$signal" | grep 'QCAINFO: "PCC"' | awk -F, '{print $10}' | sed 's/[[:space:]]*$//')
-if echo "$signal" | grep -q 'QENG: "servingcell","NOCONN","LTE"'; then
-    # LTE-only (NOCONN) output structure
-    mcc_lte=$(echo "$signal" | grep 'QENG: "servingcell","NOCONN","LTE"' | awk -F, '{print $5}')
-    mnc_lte=$(echo "$signal" | grep 'QENG: "servingcell","NOCONN","LTE"' | awk -F, '{print $6}')
-    cell_lte=$(echo "$signal" | grep 'QENG: "servingcell","NOCONN","LTE"' | awk -F, '{print "b"$7}')
-else
-    # LTE with an active connection output structure
-    mcc_lte=$(echo "$signal" | grep 'QENG: "LTE"' | awk -F, '{print $3}')
-    mnc_lte=$(echo "$signal" | grep 'QENG: "LTE"' | awk -F, '{print $4}')
-    cell_lte=$(echo "$signal" | grep 'QENG: "LTE"' | awk -F, '{print $5}')
-fi
-
-# Extract NR5G-NSA
-rsrq_5g=$(echo "$signal" | grep 'QENG: "NR5G-NSA"' | awk -F, '{print $7}')
-rsrp_5g=$(echo "$signal" | grep 'QENG: "NR5G-NSA"' | awk -F, '{print $5}')
-sinr_5g=$(echo "$signal" | grep 'QENG: "NR5G-NSA"' | awk -F, '{print $6}')
-mcc_5g=$(echo "$signal" | grep 'QENG: "NR5G-NSA"' | awk -F, '{print $2}')
-mnc_5g=$(echo "$signal" | grep 'QENG: "NR5G-NSA"' | awk -F, '{print $3}')
-cell_5g_nsa=$(echo "$signal" | grep 'QENG: "NR5G-NSA"' | awk -F, '{print $8}')
-
-# Extract NR5G-SA
-rsrp_5g_sa=$(echo "$signal" | grep 'QENG: "servingcell".*NR5G-SA' | awk -F, '{print $13}')
-rsrq_5g_sa=$(echo "$signal" | grep 'QENG: "servingcell".*NR5G-SA' | awk -F, '{print $14}')
-sinr_5g_sa=$(echo "$signal" | grep 'QENG: "servingcell".*NR5G-SA' | awk -F, '{print $15}')
-mcc_5g_sa=$(echo "$signal" | grep 'QENG: "servingcell".*NR5G-SA' | awk -F, '{print $5}')
-mnc_5g_sa=$(echo "$signal" | grep 'QENG: "servingcell".*NR5G-SA' | awk -F, '{print $6}')
-cell_5g_sa=$(echo "$signal" | grep 'QENG: "servingcell".*NR5G-SA' | awk -F, '{print $7}')
-
-# Convert LTE, NR5G-NSA & NR5G-SA Cell ID from Hex to Decimal.
-# Guard empty values: busybox printf aborts on "0x" (invalid number) and the
-# LuCI page breaks. Also strip the optional leading 'b' marker if present.
-cell_lte_dec=
-[ -n "$cell_lte" ] && cell_lte_dec=$(printf "%d\n" "0x${cell_lte#b}")
-cell_5g_nsa_dec=
-[ -n "$cell_5g_nsa" ] && cell_5g_nsa_dec=$(printf "%d\n" "0x${cell_5g_nsa#b}")
-cell_5g_sa_dec=
-[ -n "$cell_5g_sa" ] && cell_5g_sa_dec=$(printf "%d\n" "0x${cell_5g_sa#b}")
-
-# Normalize outputs
-[ -z "$network" ] && network="Unknown Network" || network=$(echo "$network" | sed 's/ $//')
-
-[ -z "$rssi_lte" ] && rssi_lte="No Signal" || rssi_lte="$rssi_lte dBm"
-[ -z "$rsrq_lte" ] && rsrq_lte="No Signal" || rsrq_lte="$rsrq_lte dB"
-[ -z "$rsrp_lte" ] && rsrp_lte="No Signal" || rsrp_lte="$rsrp_lte dBm"
-[ -z "$sinr_lte" ] && sinr_lte="No Signal" || sinr_lte="$sinr_lte dB"
-[ -z "$mcc_lte" ] && mcc_lte="No Signal"
-[ -z "$mnc_lte" ] && mnc_lte="No Signal"
-[ -z "$cell_lte" ] && cell_lte="No Signal"
-[ -z "$cell_lte_dec" ] && cell_lte_dec="No Signal"
-
-[ -z "$rsrq_5g" ] && rsrq_5g="No Signal" || rsrq_5g="$rsrq_5g dB"
-[ -z "$rsrp_5g" ] && rsrp_5g="No Signal" || rsrp_5g="$rsrp_5g dBm"
-[ -z "$sinr_5g" ] && sinr_5g="No Signal" || sinr_5g="$sinr_5g dB"
-[ -z "$mcc_5g" ] && mcc_5g="No Signal"
-[ -z "$mnc_5g" ] && mnc_5g="No Signal"
-[ -z "$cell_5g_nsa" ] && cell_5g_nsa="No Signal"
-[ -z "$cell_5g_nsa_dec" ] && cell_5g_nsa_dec="No Signal"
-
-[ -z "$rsrp_5g_sa" ] && rsrp_5g_sa="No Signal" || rsrp_5g_sa="$rsrp_5g_sa dBm"
-[ -z "$rsrq_5g_sa" ] && rsrq_5g_sa="No Signal" || rsrq_5g_sa="$rsrq_5g_sa dB"
-[ -z "$sinr_5g_sa" ] && sinr_5g_sa="No Signal" || sinr_5g_sa="$sinr_5g_sa dB"
-[ -z "$mcc_5g_sa" ] && mcc_5g_sa="No Signal"
-[ -z "$mnc_5g_sa" ] && mnc_5g_sa="No Signal"
-[ -z "$cell_5g_sa" ] && cell_5g_sa="No Signal"
-[ -z "$cell_5g_sa_dec" ] && cell_5g_sa_dec="No Signal"
-
-# Write the data to /tmp/modeminfo
-OUT=/tmp/modeminfo.$$
-trap 'rm -f "$OUT"' EXIT
-echo -e "Modem: ${modem}" > "$OUT"
-echo "IMEI: ${imei}" >> "$OUT"
-echo "ISP: ${isp}" >> "$OUT"
-echo "Revision: ${revision}" >> "$OUT"
-echo "Protocol: ${protocol}" >> "$OUT"
-echo "Temperature: ${temperature} °C" >> "$OUT"
-echo "Network: ${network}" >> "$OUT"
-echo "CSQ: ${csq}" >> "$OUT"
-echo "Signal Strength: ${csqper}" >> "$OUT"
-echo "RSSI: ${rssi_lte}" >> "$OUT"
-echo "LTE RSRQ: ${rsrq_lte}" >> "$OUT"
-echo "LTE RSRP: ${rsrp_lte}" >> "$OUT"
-echo "LTE SINR: ${sinr_lte}" >> "$OUT"
-echo "LTE MCC: ${mcc_lte}" >> "$OUT"
-echo "LTE MNC: ${mnc_lte}" >> "$OUT"
-echo "LTE Cell ID: ${cell_lte}" >> "$OUT"
-echo "LTE Cell ID (Dec): ${cell_lte_dec}" >> "$OUT"
-echo "NR5G-NSA SINR: ${sinr_5g}" >> "$OUT"
-echo "NR5G-NSA RSRQ: ${rsrq_5g}" >> "$OUT"
-echo "NR5G-NSA RSRP: ${rsrp_5g}" >> "$OUT"
-echo "NR5G-NSA MCC: ${mcc_5g}" >> "$OUT"
-echo "NR5G-NSA MNC: ${mnc_5g}" >> "$OUT"
-echo "NR5G-NSA Cell ID: ${cell_5g_nsa}" >> "$OUT"
-echo "NR5G-NSA Cell ID (Dec): ${cell_5g_nsa_dec}" >> "$OUT"
-echo "NR5G-SA RSRP: ${rsrp_5g_sa}" >> "$OUT"
-echo "NR5G-SA RSRQ: ${rsrq_5g_sa}" >> "$OUT"
-echo "NR5G-SA SINR: ${sinr_5g_sa}" >> "$OUT"
-echo "NR5G-SA MCC: ${mcc_5g_sa}" >> "$OUT"
-echo "NR5G-SA MNC: ${mnc_5g_sa}" >> "$OUT"
-echo "NR5G-SA Cell ID: ${cell_5g_sa}" >> "$OUT"
-echo "NR5G-SA Cell ID (Dec): ${cell_5g_sa_dec}" >> "$OUT"
-
-parse_carrier() {
-    line="$1"
-    carrier_type=$(echo "$line" | awk -F'[,:]' '{gsub(/"/, "", $5); print $5}')
-    earfcn=$(echo "$line" | awk -F'[,:]' '{gsub(/ /, "", $3); print $3}')
-    
-    case "$carrier_type" in
-        LTE*)
-            band=$(echo "$line" | awk -F'[,:]' '{print $7}')
-            formatted_type=$(echo "$carrier_type" | sed 's/BAND/Band/')
-            ;;
-        NR5G*)
-            band=$(echo "$line" | awk -F'[,:]' '{print $NF}')
-            formatted_type=$(echo "$carrier_type" | sed 's/BAND/Band/')
-            ;;
-        *)
-            band="UNKNOWN"
-            formatted_type="$carrier_type"
-            ;;
-    esac
-    
-    echo "$formatted_type,$band,$earfcn"
+	TMPBASE="/tmp/.modeminfo.$$"
+	"$AT" -d "$PORT" at 'at+qeng="servingcell";+qcainfo;+csq;+cereg?;+c5greg?;+qspn;+qtemp' \
+		| tr -d '\r' >"$TMPBASE.live" 2>/dev/null
+	"$AT" -d "$PORT" at 'ati;+cgmr;+cgsn;+qccid;+quimslot?;+cgcontrdp' \
+		| tr -d '\r' >"$TMPBASE.static" 2>/dev/null
+	[ -s "$TMPBASE.live" ] || return 1
+	return 0
 }
 
-# PCC
-pcc_line=$(echo "$signal" | grep -m 1 '^+QCAINFO: "PCC"')
-if [ -n "$pcc_line" ]; then
-    IFS=, read type band earfcn <<EOF
-$(parse_carrier "$pcc_line")
-EOF
-    echo "PCC: $type, $band, $earfcn" >> "$OUT"
+if [ -s "$LIVE" ] || [ -s "$STATIC" ]; then
+	SRC_LIVE="$LIVE"
+	SRC_STATIC="$STATIC"
+elif fallback_poll; then
+	SRC_LIVE="$TMPBASE.live"
+	SRC_STATIC="$TMPBASE.static"
+else
+	logger -t modeminfo "no status cache and no usable AT port ($PORT)"
+	exit 0
 fi
 
-# SCC
-i=1
-echo "$signal" | grep '^+QCAINFO: "SCC"' | while IFS= read -r scc_line; do
-    IFS=, read type band earfcn <<EOF
-$(parse_carrier "$scc_line")
-EOF
-    printf "SCC%d: %s, %s, %s\n" $i "$type" "$band" "$earfcn"  >> "$OUT"
-    i=$((i+1))
-done
+# Wire protocol, from the USB descriptors: qmi_wwan_q means the vendor QMI
+# driver (quectel-CM dials), plain qmi_wwan/cdc_mbim/cdc_ether the rest.
+PROTOCOL=unknown
+if [ -r /sys/kernel/debug/usb/devices ]; then
+	USBD="$(cat /sys/kernel/debug/usb/devices 2>/dev/null)"
+	case "$USBD" in
+		*Driver=qmi_wwan_q*) PROTOCOL=quectel-cm ;;
+		*Driver=qmi_wwan*)   PROTOCOL=qmi ;;
+		*Driver=cdc_mbim*)   PROTOCOL=mbim ;;
+		*Driver=cdc_ether*)  PROTOCOL=ecm ;;
+	esac
+fi
 
-# Publish atomically: the rpcd backend reads this file on every poll.
-mv "$OUT" /tmp/modeminfo 2>/dev/null
-trap - EXIT
+# Field numbers below are Quectel's AT manual layout:
+#
+#   +QENG: "servingcell","NOCONN","LTE",<dup>,<mcc>,<mnc>,<cell>,<pci>,
+#          <earfcn>,<band>,<ul_bw>,<dl_bw>,<tac>,<rsrp>,<rsrq>,<rssi>,<sinr>
+#   +QENG: "servingcell","NOCONN","NR5G-SA",<dup>,<mcc>,<mnc>,<cell>,<pci>,
+#          <tac>,<arfcn>,<band>,<dl_bw>,<rsrp>,<rsrq>,<sinr>
+#   +QENG: "LTE","FDD",<mcc>,<mnc>,<cell>,<pci>,<earfcn>,<band>,<ul_bw>,
+#          <dl_bw>,<tac>,<rsrp>,<rsrq>,<rssi>,<sinr>
+#   +QENG: "NR5G-NSA",<mcc>,<mnc>,<pci>,<rsrp>,<sinr>,<rsrq>,<arfcn>,<band>,
+#          <bw>,<scs>
+#   +QCAINFO: "PCC",<earfcn>,<bw_rb>,<band>,<?,<pci>,<rsrp>,<rsrq>,<rssi>
+#   +QCAINFO: "SCC",<freq>,<bw>,<band>,<pci>
+#
+# <dl_bw> in +QENG is an *index* (LTE 0-5, NR 0-14) while QCAINFO carries LTE
+# resource blocks and NR indexes; both are converted to MHz here.
+awk -F, -v protocol="$PROTOCOL" -v live="$SRC_LIVE" -v stat="$SRC_STATIC" '
+function trim(s) { gsub(/^[ \t\r]+|[ \t\r]+$/, "", s); return s }
+function isnum(v) { return v ~ /^-?[0-9]+$/ }
+function band_of(s,   b) {
+	if (match(s, /BAND[ ]+[0-9]+/)) {
+		b = substr(s, RSTART, RLENGTH)
+		sub(/BAND[ ]+/, "", b)
+		return b
+	}
+	return "-"
+}
+function lte_bw(v,   a) {
+	if (!isnum(v)) return "-"
+	if (v >= 0 && v <= 5) {
+		split("1.4 3 5 10 15 20", a, " ")
+		return a[v + 1]
+	}
+	if (v == 6) return "1.4"
+	if (v == 15) return "3"
+	if (v == 25) return "5"
+	if (v == 50) return "10"
+	if (v == 75) return "15"
+	if (v == 100) return "20"
+	return v
+}
+function nr_bw(v,   a) {
+	if (!isnum(v)) return "-"
+	split("5 10 15 20 25 30 40 50 60 70 80 90 100 200 400", a, " ")
+	if (v >= 0 && v <= 14) return a[v + 1]
+	return v
+}
+function hexdec(h,   i, n, d, v) {
+	h = tolower(h)
+	if (h == "") return "-"
+	v = 0
+	n = length(h)
+	for (i = 1; i <= n; i++) {
+		d = index("0123456789abcdef", substr(h, i, 1))
+		if (d == 0) return "-"
+		v = v * 16 + d - 1
+	}
+	return v
+}
+# Quectel prints IPv6 in dotted decimal (16 bytes); make it readable.
+function v6(s,   a, n, i, o) {
+	if (s !~ /^[0-9.]+$/) return s
+	n = split(s, a, ".")
+	if (n == 8) {
+		o = a[1]
+		for (i = 2; i <= 8; i++) o = o ":" a[i]
+		return o
+	}
+	if (n == 16) {
+		o = ""
+		for (i = 1; i <= 16; i += 2)
+			o = o (i > 1 ? ":" : "") sprintf("%x", (a[i] + 0) * 256 + (a[i + 1] + 0))
+		return o
+	}
+	return s
+}
+function score(rsrp,   s) {
+	if (!isnum(rsrp)) return "-"
+	s = (rsrp + 140) * 100 / 96
+	if (s < 0) s = 0
+	if (s > 100) s = 100
+	return int(s)
+}
+{
+	line = $0
+	sub(/\r$/, "", line)
+	if (index(line, "\"") > 0) { gsub(/"/, "", line); $0 = line }
+}
+FILENAME == live {
+	if ($1 ~ /^\+QENG: servingcell/) {
+		if ($2 == "SEARCH" || $2 == "LIMSRV") { state = $2; next }
+		if ($3 == "LTE") {
+			mode = "LTE"; mcc = $5; mnc = $6; cell = $7; pci = $8
+			earfcn = $9; band = $10; bw = lte_bw($12); tac = $13
+			rsrp = $14; rsrq = $15; rssi = $16; sinr = $17
+		} else if ($3 == "NR5G-SA") {
+			mode = "SA"; nmcc = $5; nmnc = $6; ncell = $7; npci = $8
+			ntac = $9; narfcn = $10; nband = $11; nbw = nr_bw($12)
+			nrsrp = $13; nrsrq = $14; nsinr = $15
+		}
+		next
+	}
+	if ($1 == "+QENG: LTE") {
+		mode = "LTE"; mcc = $3; mnc = $4; cell = $5; pci = $6
+		earfcn = $7; band = $8; bw = lte_bw($10); tac = $11
+		rsrp = $12; rsrq = $13; rssi = $14; sinr = $15
+		next
+	}
+	if ($1 == "+QENG: NR5G-NSA") {
+		nsa = 1; nmcc = $2; nmnc = $3; npci = $4; nrsrp = $5
+		nsinr = $6; nrsrq = $7; narfcn = $8; nband = $9; nbw = nr_bw($10)
+		next
+	}
+	if ($1 == "+QCAINFO: PCC") {
+		cb = band_of($4)
+		crat = ($4 ~ /NR5G/) ? "NR" : "LTE"
+		pccbw = (crat == "NR") ? nr_bw($3) : lte_bw($3)
+		cfreq = $2
+		cpci = ($6 != "" ? $6 : $5)
+		crsrp = $7; crsrq = $8
+		next
+	}
+	if ($1 == "+QCAINFO: SCC") {
+		sccn++
+		scc_band[sccn] = band_of($4)
+		scc_rat[sccn] = ($4 ~ /NR5G/) ? "NR" : "LTE"
+		scc_bw[sccn] = ($4 ~ /NR5G/) ? nr_bw($3) : lte_bw($3)
+		scc_freq[sccn] = $2
+		scc_pci[sccn] = $5
+		next
+	}
+	if ($1 ~ /^\+CSQ:/) {
+		split(line, p, ": ")
+		split(p[2], q, ",")
+		csq = trim(q[1]); csqper = trim(q[2])
+		next
+	}
+	if ($1 ~ /^\+CEREG:/) { ltereg = trim($2); next }
+	if ($1 ~ /^\+C5GREG:/) { nrreg = trim($2); next }
+	if ($1 ~ /^\+QSPN:/) {
+		isp = line
+		sub(/^\+QSPN: /, "", isp)
+		split(isp, q, ",")
+		isp = trim(q[1])
+		next
+	}
+	if ($1 ~ /^\+QTEMP:/) {
+		t = trim($2)
+		if (isnum(t) && t + 0 > maxtemp) maxtemp = t + 0
+		next
+	}
+	next
+}
+FILENAME == stat {
+	# Skip the command echo, blanks and the final OK.
+	if (line == "" || line == "OK" || line ~ /^AT/) next
+	if ($1 ~ /^\+CGMI:/) { sub(/^\+CGMI: /, "", line); mi = trim(line); next }
+	if ($1 ~ /^\+CGMM:/) { sub(/^\+CGMM: /, "", line); mm = trim(line); next }
+	if ($1 ~ /^\+CGMR:/) { sub(/^\+CGMR: /, "", line); mr = trim(line); next }
+	if ($1 ~ /^\+CGSN:/) { sub(/^\+CGSN: /, "", line); sn = trim(line); next }
+	if ($1 ~ /^\+QCCID:/) { sub(/^\+QCCID: /, "", line); iccid = trim(line); next }
+	if ($1 ~ /^\+QUIMSLOT:/) { sub(/^\+QUIMSLOT: /, "", line); slot = trim(line); next }
+	if ($1 ~ /^\+CGCONTRDP:/) {
+		if (apn == "") {
+			apn = trim($3)
+			v4 = trim($4)
+			v6addr = ($5 != "") ? v6(trim($5)) : ""
+			split($7, d1, " ")
+			dns = trim(d1[1])
+		}
+		next
+	}
+	# The RG500Q answers AT+CGMI / +CGMM / +CGMR / +CGSN without the "+X:"
+	# prefix, one bare line each, in the order they were asked. Fill whatever
+	# the prefixed replies above did not set, so both shapes work.
+	if (line !~ /^\+/) {
+		bare++
+		if (bare == 1 && mi == "") mi = line
+		else if (bare == 2 && mm == "") mm = line
+		else if (bare == 3 && mr == "") mr = line
+		else if (bare == 4 && sn == "") sn = line
+		next
+	}
+	next
+}
+END {
+	statename["0"] = "not registered"
+	statename["1"] = "registered"
+	statename["2"] = "searching"
+	statename["3"] = "denied"
+	statename["4"] = "unknown"
+	statename["5"] = "roaming"
+	nw = (mode == "SA") ? "5G SA" : (mode == "LTE" && nsa) ? "5G NSA" : (mode == "LTE") ? "LTE" : "no service"
+	reg = (statename[ltereg] != "") ? statename[ltereg] : "unknown"
+	roam = (ltereg == "5") ? "yes" : (ltereg == "1") ? "no" : "-"
+
+	printf "Modem: %s\n", (mm != "" ? mm : "-")
+	printf "Manufacturer: %s\n", (mi != "" ? mi : "-")
+	printf "Firmware: %s\n", (mr != "" ? mr : "-")
+	printf "IMEI: %s\n", (sn != "" ? sn : "-")
+	printf "ICCID: %s\n", (iccid != "" ? iccid : "-")
+	printf "SIM slot: %s\n", (slot != "" ? slot : "-")
+	printf "Protocol: %s\n", protocol
+	printf "Operator: %s\n", (isp != "" ? isp : "-")
+	printf "Network: %s\n", nw
+	printf "Registration: %s\n", reg
+	printf "NR registration: %s\n", nsa ? "n/a (NSA)" : (statename[nrreg] != "" ? statename[nrreg] : "unknown")
+	printf "Roaming: %s\n", roam
+	printf "Temperature: %s\n", (maxtemp > 0 ? maxtemp " °C" : "-")
+	printf "APN: %s\n", (apn != "" ? apn : "-")
+	printf "IPv4: %s\n", (v4 != "" ? v4 : "-")
+	printf "IPv6: %s\n", (v6addr != "" ? v6addr : "-")
+	printf "DNS: %s\n", (dns != "" ? dns : "-")
+	printf "CSQ: %s\n", (csq != "" ? csq : "-")
+	printf "BER: %s\n", (csqper != "" ? csqper : "-")
+	printf "Signal score: %s\n", score(rsrp)
+	if (mode == "LTE") {
+		printf "LTE band: %s\n", (band != "" ? "B" band : "-")
+		printf "LTE bandwidth: %s\n", (bw != "" ? bw " MHz" : "-")
+		printf "LTE EARFCN: %s\n", (earfcn != "" ? earfcn : "-")
+		printf "LTE PCI: %s\n", (pci != "" ? pci : "-")
+		printf "LTE cell ID: %s\n", (cell != "" ? cell : "-")
+		printf "LTE cell ID (dec): %s\n", (cell != "" ? hexdec(cell) : "-")
+		printf "LTE TAC: %s\n", (tac != "" ? tac : "-")
+		printf "MCC / MNC: %s / %s\n", (mcc != "" ? mcc : "-"), (mnc != "" ? mnc : "-")
+		printf "LTE RSRP: %s\n", (rsrp != "" ? rsrp " dBm" : "-")
+		printf "LTE RSRQ: %s\n", (rsrq != "" ? rsrq " dB" : "-")
+		printf "LTE RSSI: %s\n", (rssi != "" ? rssi " dBm" : "-")
+		printf "LTE SINR: %s\n", (sinr != "" ? sinr " dB" : "-")
+	}
+	if (nsa || mode == "SA") {
+		printf "NR band: %s\n", (nband != "" ? "n" nband : "-")
+		printf "NR bandwidth: %s\n", (nbw != "" ? nbw " MHz" : "-")
+		printf "NR ARFCN: %s\n", (narfcn != "" ? narfcn : "-")
+		printf "NR PCI: %s\n", (npci != "" ? npci : "-")
+		printf "NR cell ID: %s\n", (ncell != "" ? ncell : "-")
+		printf "NR cell ID (dec): %s\n", (ncell != "" ? hexdec(ncell) : "-")
+		printf "NR TAC: %s\n", (ntac != "" ? ntac : "-")
+		if (mode == "SA")
+			printf "MCC / MNC: %s / %s\n", (nmcc != "" ? nmcc : "-"), (nmnc != "" ? nmnc : "-")
+		printf "NR RSRP: %s\n", (nrsrp != "" ? nrsrp " dBm" : "-")
+		printf "NR RSRQ: %s\n", (nrsrq != "" ? nrsrq " dB" : "-")
+		printf "NR SINR: %s\n", (nsinr != "" ? nsinr " dB" : "-")
+	}
+	# Carrier rows: rat|band|bandwidth|freq|pci|rsrp|rsrq|sinr
+	if (cb != "") {
+		printf "PCC: %s|%s%s|%s|%s|%s|%s|%s|%s\n", crat,
+			(crat == "NR" ? "n" : "B"), cb, pccbw,
+			(cfreq != "" ? cfreq : "-"), (cpci != "" ? cpci : "-"),
+			(crsrp != "" ? crsrp : "-"), (crsrq != "" ? crsrq : "-"), "-"
+	}
+	for (i = 1; i <= sccn; i++)
+		printf "SCC%d: %s|%s%s|%s|%s|%s|-|-|-\n", i, scc_rat[i],
+			(scc_rat[i] == "NR" ? "n" : "B"), scc_band[i],
+			(scc_bw[i] != "" ? scc_bw[i] : "-"), scc_freq[i], scc_pci[i]
+}
+' "$SRC_LIVE" "$SRC_STATIC"

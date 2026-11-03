@@ -7,15 +7,18 @@
 # `status`; while the cache is younger than the interval the call is free.
 #
 # Methods:
-#   status                 parsed snapshot + meta (cache age, port)
+#   status                 parsed snapshot + meta (cache age, port, source)
 #   ports                  available AT ports and the configured one
 #   set_port {port}        persist the AT port
 #   set_interval {seconds} persist the refresh interval (2-60)
+#   history                RSRP/SINR samples from /tmp/aw1000-status/history
 #   sample                 force a refresh now
 
 . /usr/share/libubox/jshn.sh
 
 CACHE=/tmp/modeminfo
+HIST=/tmp/aw1000-status/history
+SRC_LIVE=/tmp/aw1000-status/live
 LOCK=/var/lock/modeminfo.lock
 PORT_DEFAULT=/dev/ttyUSB3
 
@@ -26,6 +29,7 @@ list_methods() {
 	"ports": { },
 	"set_port": { "port": "string" },
 	"set_interval": { "seconds": "integer" },
+	"history": { },
 	"sample": { }
 }
 EOF
@@ -54,13 +58,35 @@ age() {
 	echo $((now - m))
 }
 
-# One AT poll at a time: two concurrent collectors would interleave replies on
-# the same tty and both parse garbage.
+# The collector prints its snapshot on stdout; keep the last one in $CACHE so a
+# 2 s UI poll does not re-run it. When /tmp/aw1000-status/live exists the
+# collector only reads that file (no AT traffic at all), so the write below is
+# a cheap re-parse; when the fallback path had to poll the modem this cache is
+# what keeps two browser tabs from double-driving the serialiser.
 collect() {
 	(
 		flock -n 9 || exit 0
-		/bin/sh /usr/bin/modeminfo >/dev/null 2>&1
+		/bin/sh /usr/bin/modeminfo >"$CACHE.$$" 2>/dev/null
+		if [ -s "$CACHE.$$" ]; then
+			mv "$CACHE.$$" "$CACHE"
+		else
+			rm -f "$CACHE.$$"
+		fi
 	) 9>>"$LOCK"
+}
+
+# stale: yes when the snapshot should be rebuilt - first call, interval expired,
+# or byte-status-cache wrote a newer sample than the one already parsed.
+stale() {
+	local iv
+	iv=$(interval)
+	[ -s "$CACHE" ] || return 0
+	[ "$(age "$CACHE")" -ge "$iv" ] && return 0
+	# Compare mtimes numerically: busybox `test -nt` is not guaranteed to be
+	# compiled in, while `stat -c %Y` already backs age() above.
+	[ "$(stat -c %Y "$SRC_LIVE" 2>/dev/null || echo 0)" -gt \
+	  "$(stat -c %Y "$CACHE" 2>/dev/null || echo 0)" ] && return 0
+	return 1
 }
 
 # keymap <"Key Name"> -> key_name (lowercase, non-alnum -> underscore)
@@ -70,18 +96,30 @@ keymap() {
 }
 
 do_status() {
-	local iv p a fresh avail
+	local iv p a src fresh avail
 	iv=$(interval)
 	p=$(port)
-	a=$(age "$CACHE")
-	[ "$a" -ge "$iv" ] && collect
-	a=$(age "$CACHE")
-	fresh=0 avail=0
-	[ -s "$CACHE" ] && avail=1
-	[ "$avail" = 1 ] && [ "$a" -lt "$iv" ] && fresh=1
+	stale && collect
+	fresh=0 avail=0 src=cache
+	if [ -s "$CACHE" ]; then
+		avail=1
+		fresh=1
+	fi
+	# Report the age of the data, not of the parse: the shared cache is written
+	# every 10 s, so that is the number the operator cares about.
+	if [ -s "$SRC_LIVE" ]; then
+		a=$(age "$SRC_LIVE")
+		[ "$a" -gt $((iv * 4 + 20)) ] && fresh=0
+	else
+		a=$(age "$CACHE")
+		src=at
+	fi
 
 	json_init
 	json_add_object "meta"
+	# "cache" means the numbers came from byte-status-cache without touching
+	# the AT port; "at" means the collector had to poll the modem itself.
+	json_add_string "source" "$src"
 	json_add_string "port" "$p"
 	json_add_int "interval" "$iv"
 	json_add_int "age" "$a"
@@ -118,6 +156,29 @@ EOF
 	json_dump
 }
 
+# History is one line per poll: "<epoch> <mode> <lte rsrp> <nr rsrp>
+# <lte sinr> <nr sinr>" with "-" for values the modem did not report. The
+# collector never writes it, byte-status-cache does; this only serves it.
+do_history() {
+	local t mode l n ls ns
+	json_init
+	json_add_array "points"
+	if [ -s "$HIST" ]; then
+		while read -r t mode l n ls ns; do
+			case "$t" in '' | *[!0-9]*) continue ;; esac
+			json_add_object ""
+			json_add_int "t" "$t"
+			json_add_string "mode" "${mode:--}"
+			json_add_string "lte_rsrp" "${l:--}"
+			json_add_string "nr_rsrp" "${n:--}"
+			json_add_string "lte_sinr" "${ls:--}"
+			json_add_string "nr_sinr" "${ns:--}"
+			json_close_object
+		done <"$HIST"
+	fi
+	json_close_array
+	json_dump
+}
 do_ports() {
 	local f p
 	p=$(port)
@@ -178,7 +239,8 @@ call)
 	ports) do_ports ;;
 	set_port) do_set_port ;;
 	set_interval) do_set_interval ;;
-	sample) collect; do_status ;;
+	history) do_history ;;
+	sample) rm -f "$CACHE"; collect; do_status ;;
 	esac
 	;;
 *) list_methods ;;

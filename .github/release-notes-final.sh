@@ -1,15 +1,26 @@
 #!/usr/bin/env bash
-# Release body for the BYTE by ACE FINAL build.
+# Release body for one BYTE by ACE build.
 #
-# Deliberately short: the user asked for a summary of what changed, nothing
-# else. No package tables, no feed pins, no known-issues list - those live in
-# the repository for anyone who wants the detail.
+# Everything identifying the build is DERIVED, never typed:
+#   * the version comes from the build's own .config (CONFIG_VERSION_NUMBER and
+#     CONFIG_VERSION_CODE) - the same strings the image and LuCI report;
+#   * the change list is the newest block of README.md's changelog.
+# A release body can therefore only describe the build it is attached to. The
+# previous static text ("FINAL", kernel 6.12.112, 24.10.6 feeds) described a
+# firmware from months earlier and kept being published under new tags.
 #
 # Usage: release-notes-final.sh <target-dir> [out-dir]
+# Env:   FW_CODE, FW_RELEASE, FW_KERNEL  override the derived values
+#        CONFIG_FILE                     path to the built .config
+#        README                          path to the repository README.md
 set -euo pipefail
-
 dir=${1:?usage: release-notes-final.sh <target-dir> [out-dir]}
 out=${2:-}
+
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/.." && pwd)
+readme=${README:-$repo/README.md}
+cfg=${CONFIG_FILE:-$repo/immortalwrt/.config}
 
 img=$(ls "$dir"/*squashfs-sysupgrade.bin 2>/dev/null | head -1 || true)
 if [ -n "$out" ] && [ -d "$out" ]; then
@@ -18,81 +29,85 @@ if [ -n "$out" ] && [ -d "$out" ]; then
 fi
 size=""
 [ -n "${img:-}" ] && size=$(du -h "$img" | cut -f1)
+# An empty placeholder file reports "0" - do not advertise that as a size.
+case "$size" in ''|0|0B|0K) size="" ;; esac
+
+cfg_get() {
+	sed -n "s/^$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" "$cfg" 2>/dev/null | head -1
+}
+
+num=$(cfg_get CONFIG_VERSION_NUMBER)   # 25.12.6.12.94 -> release + kernel
+code=${FW_CODE:-$(cfg_get CONFIG_VERSION_CODE)}
+
+# Fall back to the image name (byte-<num>-qualcommax-...) when .config is gone.
+if [ -z "$num" ] && [ -n "${img:-}" ]; then
+	num=$(basename "$img" | sed -n 's/^[^-]*-\([0-9][0-9.]*\)-qualcommax.*/\1/p')
+fi
+
+release=${FW_RELEASE:-}
+kernel=${FW_KERNEL:-}
+if [ -z "$release" ] && [ -n "$num" ]; then
+	release=$(printf '%s' "$num" | cut -d. -f1-2)
+fi
+if [ -z "$kernel" ] && [ -n "$num" ]; then
+	# Everything after the release pair: the kernel is a 3-part version
+	# (25.12.6.12.94 -> 6.12.94), so f3-4 would drop the patch level.
+	kernel=$(printf '%s' "$num" | cut -d. -f3-)
+fi
+release=${release:-25.12}
+kernel=${kernel:-?}
+code=${code:-?}
+
+# Newest changelog block: the first "###" section under "## Changelog".
+changelog=""
+if [ -f "$readme" ]; then
+	changelog=$(awk '
+		/^## Changelog/ { inlog = 1; next }
+		inlog && /^### / { if (seen) exit; seen = 1; next }
+		inlog && seen && /^## / { exit }
+		inlog && seen { print }
+	' "$readme")
+	# drop leading blank lines
+	changelog=$(printf '%s\n' "$changelog" | sed '/./,$!d')
+fi
+# No README (tarball export): list the commits that produced this build.
+if [ -z "$changelog" ]; then
+	changelog=$(git -C "$repo" log --no-merges --format='- %s' -n 15 2>/dev/null || true)
+fi
 
 n() { printf '%s\n' "$@"; }
 
-n "# BYTE by ACE — FINAL"
+n "# BYTE ${release} VERSION ${code}"
 n ""
-n "Arcadyan AW1000 (\`qualcommax/ipq807x\`) · ImmortalWrt openwrt-25.12 · kernel 6.12.112"
-n ""
-n "This is the final release. Every known defect found during testing is fixed."
+n "Arcadyan AW1000 (\`qualcommax/ipq807x\`) · kernel ${kernel} · build ${GITHUB_RUN_NUMBER:-local}"
 n ""
 n "## What changed in this build"
 n ""
-n "**Cellular / connectivity**"
-n ""
-n "- **Cellular carrier now comes up automatically.** The default preset targets"
-n "  USB slot \`4-1\` (the common case), and the USB auto-scan is now enabled so"
-n "  units whose modem enumerates on a different port — e.g. \`3-1\` — are"
-n "  detected and dialed automatically instead of being skipped. Previously a"
-n "  mis-slot scan disabled the modem and WAN came up with no carrier."
-n "- **Modem info no longer errors.** An empty cell ID made the info script run"
-n "  \`printf \"%d\" \"0x\"\`, which busybox aborts on, spamming the log under"
-n "  \`uhttpd\` and blanking the LuCI page. Conversions are now guarded and the"
-n "  leading \`b\` marker is stripped."
-n "- **MTU fixed at 1420 on the cellular link** (was 1500). A 1500-byte payload"
-n "  cannot cross an LTE/NR bearer, so large transfers and calls stalled while"
-n "  small packets passed. Re-applied on every redial."
-n ""
-n "**Package manager**"
-n ""
-n "- **The stale-signature workaround is gone.** The feed now points at"
-n "  \`raw.githubusercontent.com\` directly (was jsDelivr, which served a stale"
-n "  \`Packages.sig\`). \`opkg update\` verifies cleanly out of the box — no manual"
-n "  \`sed\` needed. The signing key is still installed before the firmware is"
-n "  compiled."
-n "- **AdGuard Home installable.** Its UI needs a newer build than the 24.10.6"
-n "  feeds carry, so the binary is now published alongside the app."
-n ""
-n "**HTTP/3-QUIC**"
-n ""
-n "- **\`curl\`/\`libcurl\` built with HTTP/3 support** (nghttp3 + ngtcp2 on"
-n "  OpenSSL). \`curl --http3\` works, so QUIC-capable endpoints negotiate"
-n "  HTTP/3 and benefit from its lower handshake latency."
-n ""
-n "**Verifiability**"
-n ""
-n "- **Tuning is now checked on the device.** A new boot self-check logs the"
-n "  observed CPU governor, qdisc, MTU, RPS mask and sysctl values against what"
-n "  the image configures, then prints \`PASS n checks\` or \`FAIL n mismatches\`."
-n "  It re-runs on every cellular ifup, so a silently rejected kernel setting is"
-n "  a log line instead of a mystery: \`logread -e byte-selfcheck\`."
-n ""
-n "**Stability / speed**"
-n ""
-n "- **Removed the hourly cache-drop and swap cycle.** A crontab entry ran"
-n "  \`drop_caches\` and \`swapoff -a && swapon -a\` every hour, forcing 433 MB of"
-n "  zram to decompress into RAM and re-compress — a pause every hour under"
-n "  load — while dropping the page cache only made the next requests refetch"
-n "  it. Removed; the kernel reclaims on its own."
-n "- **Phone updated to v0.4.1** — newer upstream call handling and fixes. Built"
-n "  from upstream, pinned to the release tag."
-n "- **zram swap is live** (lzo-rle, 433 MB), preventing an OOM from killing the"
-n "  proxy."
-n "- **CPU governor pinned to performance** so the first packet after idle is not"
-n "  delayed by a frequency ramp."
-n "- **Passwall v1 removed.** It and passwall2 fight over the same nft redirect"
-n "  rules; only passwall2 ships."
+if [ -n "$changelog" ]; then
+	n "$changelog"
+else
+	n "_The changelog could not be read from this checkout; see the repository"
+	n "README for the full engineering log._"
+fi
 n ""
 n "## Install"
 n ""
 n '```sh'
 n "sha256sum -c sha256sums"
-n [ -n "${img:-}" ] && n "sysupgrade -n $(basename "$img")"
+if [ -n "${img:-}" ]; then
+	n "sysupgrade -n $(basename "$img")"
+else
+	n "sysupgrade -n BYTE_by_ACE-...-squashfs-sysupgrade.bin"
+fi
 n '```'
 n ""
-n "> \`-n\` discards \`/etc/config\`. Set a root password and WiFi key after flashing."
+n "> \`-n\` discards \`/etc/config\`. Use it when coming from another firmware;"
+n "> drop it to keep settings on an upgrade from a previous BYTE image."
 n "> Feeds are pre-configured: \`opkg update\` works out of the box."
+n ""
+n "> **Keep a recovery path before flashing** — serial console or the"
+n "> initramfs image under TFTP. \`sysupgrade -n\` does not keep configuration"
+n "> and an interrupted flash needs one of the two to recover."
 n ""
 if [ -n "${size:-}" ]; then
 	n "<sub>Image size: $size</sub>"

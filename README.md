@@ -10,7 +10,7 @@ is built, signed and published from CI, together with a self-hosted opkg repo.
 [![target](https://img.shields.io/badge/target-ipq807x%2Faw1000-5a6472?style=flat-square)](https://openwrt.org/toh/arcadyan/aw1000)
 
 ![Dashboard](docs/screenshots/dashboard.png)
-<sub>Dashboard — modem signal, temperature and NSS-offload widgets. Screenshot from
+<sub>Dashboard — modem signal, temperature and storage widgets. Screenshot from
 [XT-Martinez/aw1000-feed](https://github.com/XT-Martinez/aw1000-feed), whose widgets this image ports.</sub>
 
 ## Quick start
@@ -58,12 +58,18 @@ sysupgrade -n BYTE_by_ACE-<version>-qualcommax-ipq807x-arcadyan_aw1000-squashfs-
 - **Phone (RJ11)** — `fxsd` with the SLIC driver built in: HD audio, caller ID,
   DND, call history.
 - **WiFi** — NSS-accelerated 2.4/5 GHz; both radios up on first boot.
-- **UI** — Footstrap 0.14.19, BYTE logo and icons, a BYTE panel (AdGuard Home ↔
-  PassWall2 DNS wiring, system strip, shortcuts), a JS modem-info view, dashboard
-  widgets and Netstat backed by persistent vnStat history.
-- **Dashboard widgets** — Mobile (status card, signal chart, traffic chart,
-  detail tab), Temperature, and NSS offload. The NSS widget is live:
-  `qca-nss-ecm` ships and stays loaded.
+- **UI** — Footstrap 0.14.19 only (no second theme ships), BYTE logo and icons,
+  a BYTE panel under *Tools* (AdGuard Home ↔ PassWall2 DNS wiring with a live
+  install terminal, shortcuts), a JS modem-info view, a dashboard with KPI cards
+  and charts, and Netstat backed by persistent vnStat2 history.
+- **Dashboard** — KPI cards (Internet, Memory, Mobile, Uptime, **Storage**,
+  CPU usage, Temperature, Load) plus five live charts (system load, WAN traffic,
+  mobile traffic, mobile signal, temperature). The old bottom detail tabs and
+  the layout editor are hidden: the dashboard is read-only, and the capacity
+  card reports overlay used/total with a bar.
+- **Dashboard widgets** — Mobile, Temperature and Storage. NSS offload is not
+  shown: its counter only moves while the NSS clock scales itself, which is off
+  here. NSS/ECM still accelerate traffic (`qca-nss-ecm` ships and stays loaded).
 - **Proxy** — PassWall2 with Xray; first-run rules in place.
 - **Remote** — Tailscale on demand; `tailscaled` starts only once credentials
   exist.
@@ -90,31 +96,95 @@ opkg install tailscale luci-app-tailscale-community
 | CPU / memory | `performance` governor, zram, modem IRQs spread across cores |
 | Conntrack | 32768 max, 7440 established, keepalive 120/15/4 |
 | vnStat | `DatabaseDir=/etc/vnstat` on the overlay, re-asserted every boot |
+| Multicast / IPTV | `br-lan`: `igmp_snooping=1`, `multicast_querier=1`, `hash_max=4096` |
 
 A boot-time self-check (`byte-selfcheck`) logs each of these and reports a
 `MISMATCH` when one did not apply.
 
+#### IPTV and multicast
+
+The physical `wan` port is a member of `br-lan`, so an ISP set-top box and the
+uplink cable sit on the same L2 as `lan1..lan4`. Without snooping the bridge
+floods every multicast stream to every port, WiFi AP ports included: one HD
+channel saturates the 2.4 GHz airtime and the whole interface stalls. Without a
+querier the other half breaks - nobody refreshes group membership, the bridge
+ages the group out and playback freezes minutes into a channel.
+
+Both are fixed in the bridge itself, with no daemon:
+
+- `igmp_snooping=1` sends a group only to the ports that joined it.
+- `multicast_querier=1` makes the bridge send its own IGMP/MLD queries, so
+  group state never times out. No `igmpproxy`, no `udp-broadcast-relay-redux`.
+- `hash_max=4096` because netifd's 512-entry default overflows on a full
+  channel list; the kernel then logs `br-lan: multicast hash table full` and
+  silently falls back to flooding.
+
+`udp-broadcast-relay-redux` is *not* shipped and is gated out of the build: it
+re-broadcasts every UDP packet to every bridged port, which is the behaviour
+that made IPTV unusable on a busy LAN in the first place. It is only the right
+tool for forwarding a single broadcast service across a routed boundary (e.g.
+Wake-on-LAN between subnets), never for IPTV.
+
+Optional, not shipped by default:
+
+- `option multicast_fast_leave '1'` on the set-top box's port trims the
+  leave-then-join gap when zapping, at the cost of no retransmission if a
+  second client is still watching that group.
+- IPTV on a separate VLAN/bridge is better than sharing `br-lan` when the ISP
+  hands out a tagged IPTV VLAN; keep snooping + querier on that bridge too.
+- `igmpproxy` is only needed when multicast has to cross a *routed* hop (the
+  source is an interface, not a bridge port). This image does not ship it; the
+  bridged layout above does not need it.
+
+#### Branding: BYTE, not OpenWrt, not BYTE_by_ACE
+
+The theme header renders a logo plus the **hostname** as its wordmark, so the
+two are set together:
+
+- `hostname` is `BYTE` (it was `BYTE_by_ACE`; a DHCP/DNS-safe single label).
+  `91-byte-identity` rewrites the old value on upgrade, because sysupgrade
+  without `-n` keeps `/etc/config/system`. A hostname the admin set themselves
+  is never touched.
+- The logo is a real override:
+  `files/usr/share/ucode/luci/template/themes/footstrap/partials/brand.ut`
+  replaces the theme's own copy, which hardcodes the **OpenWrt arcs as inline
+  SVG** - no CSS rule can swap that, and `logo.svg` only covers the favicon and
+  the PWA icon. The override draws the same "B" mark as `logo.svg` (stem plus
+  two bowls, counters punched with the even-odd rule, accent underline) in
+  `currentColor`, so it works on light and dark palettes without a second
+  asset.
+- The build fails if the theme stops shipping or including that partial, so an
+  upstream rename cannot silently revert the header to the OpenWrt mark.
+
+Caveat: `opkg upgrade luci-theme-footstrap` reinstalls the theme's own
+`brand.ut` over the override until the next sysupgrade.
+
+`luci-app-byte` (Tools → *BYTE (AdGuard Home + PassWall2)*) is not a general
+settings page; its intro banner says so before any button, because *Install and
+wire* moves dnsmasq off port 53.
+
 ## Firmware version
-
-Status → Overview shows, and every image filename carries, the same string:
-
+Status → Overview shows the short display form; image filenames carry the
+filesystem-safe `CONFIG_VERSION_NUMBER`:
 ```
-BYTE 25.12(6.12.94) 1.2.8
-     │      │        └── patch: commits since FW_BASE (version.env)
-     │      └─────────── kernel: KERNEL_PATCHVER → target/linux/generic/kernel-6.12
-     └────────────────── release series
+Status → Overview:  BYTE 25.12 VERSION 1.2.8
+Image filename:     ...-25.12.6.12.94-...
+                         │    │
+                         │    └── kernel of the build
+                         └─────── release series
 ```
-
 `version.env` holds `FW_MAJOR`/`FW_MINOR`/`FW_BASE`/`FW_PATCH_FALLBACK`; the
 patch is `git rev-list --count FW_BASE..HEAD`, so there is no manual bump. The
 build aborts if the kernel version cannot be resolved rather than shipping
 `25.12(x)`.
 
-The parentheses are display-only. `CONFIG_VERSION_NUMBER` is built as
+The two forms are decoupled on purpose. `CONFIG_VERSION_NUMBER` is built as
 `25.12.6.12.94` because that string also lands inside every image filename, and
 a `(` there breaks `Build/kernel-bin`'s unquoted `rm -f $@` (bash subshell
-token). At first boot `98-byte-version` rewrites `DISTRIB_DESCRIPTION` to the
-`25.12(<kernel>)` form using `/proc/version`, so Status and filenames agree.
+token). At first boot `98-byte-version` writes `/etc/byte-version`
+(`BYTE 25.12 VERSION 1.2.8`) and leaves `DISTRIB_DESCRIPTION` alone, because
+sysupgrade and the build metadata derive from it. The Status panel reads
+`/etc/byte-version` and falls back to parsing `DISTRIB_DESCRIPTION`.
 
 ## Build
 
@@ -161,6 +231,32 @@ nss/                       NSS sources + kernel patches
   NSS driver queues, not from a flow-offload shortcut.
 - **No hardware flow offload.** `flow_offloading_hw` stays `0` — `nss-dp` does
   not implement it, so fw4 would accept a `1` and silently ignore it.
+- **WAN IPv6 is health-checked and demoted when it cannot pass traffic.**
+  `wanv6` (`proto=dhcpv6`, `ifname=@wan`) completes the DHCPv6 exchange on this
+  carrier - global `/64`, delegated `/64`, both ISP resolvers - but no unicast
+  IPv6 survives past the modem: the modem's own gateway
+  (`fe80::ad53:8745:d045:ba03`) answers `ping6`, while the ISP resolver behind
+  it does not, `curl -6` returns nothing, and `/proc/net/snmp6` shows
+  `Ip6OutRequests` climbing with `Ip6InReceives` flat (IPv4 on the same bearer
+  is fine). `AT+QMAP="wwan"` reports no IPv6 on the mux
+  (`"IPV6","0:0:0:0:0:0:0:0"`), so the drop is modem/carrier side, not netifd.
+  `/usr/libexec/byte-v6-check` therefore probes IPv6 with a real TCP handshake
+  after every `wan`/`wanv6` ifup and on boot: on failure it writes
+  `gai.conf`, withdraws the br-lan ULA and sets `dhcp.lan.ra=disabled` /
+  `dhcpv6=disabled` so clients never receive a prefix they cannot use; on
+  success it restores all three. A carrier that does serve IPv6 is left alone.
+- **Whoever touches the QMAP mux: it has no link-local unless one is added.**
+  `qmi_wwan_q` gives `wwan0_1` the base interface's MAC, so the EUI-64
+  link-local the kernel would generate is already owned by `wwan0` and
+  `wwan0_1` ends up with no `fe80::` address at all. Without one there is no
+  source for `ff02::1:2`/`ff02::2`, so `odhcp6c` only ever logs
+  `Failed to send SOLICIT message to ff02::1:2 (Address not available)` and
+  `Failed to send RS (Address not available)`, and `wanv6` never comes up -
+  which makes a carrier that *does* serve IPv6 look like one that does not.
+  `byte-v6-check` now assigns a unique MAC-derived link-local
+  (`1e:5d:db:b0:e8:b9` → `fe80::1e5d:dbb0:e8b9`) before it waits for `wanv6`.
+  Verified on the unit: with the address present DHCPv6 completes and the
+  gateway answers; without it both fail as described.
 
 ## Engineering log
 
@@ -443,29 +539,44 @@ so; it no longer claims to fix WAN TTL, because WAN was never accelerated.
 
 ### LuCI pages
 
-#### modeminfo — SA support
+#### modeminfo — shared cache, SA support
 
-The vendored `luci-app-modeminfo` reads its data from a Quectel modem with one
-AT batch (`at+csq;+qnwinfo;+qcainfo;+qeng="servingcell";+qspn` via
-`sms_tool_q`) and parses both registration modes:
+The vendored `luci-app-modeminfo` does not poll the modem. `/usr/sbin/byte-status-cache`
+already sends one AT batch every 10 s through qmodem's `at-daemon` and saves the
+raw replies; the app parses those files on demand:
+
+| file | contents | writer |
+|------|----------|--------|
+| `/tmp/aw1000-status/live` | `+QENG` serving cell, `+QCAINFO`, `+CSQ`, `+CEREG?`, `+C5GREG?`, `+QSPN`, `+CPMS?`, `+QTEMP` | byte-status-cache |
+| `/tmp/aw1000-status/static` | band locks/preferences, `+CGMI`, `+CGMM`, `+CGMR`, `+CGSN`, `+QCCID`, `+QUIMSLOT?`, `+CGCONTRDP` | byte-status-cache |
+| `/tmp/aw1000-status/history` | `<epoch> <mode> <lte rsrp> <nr rsrp> <lte sinr> <nr sinr>` | byte-status-cache |
+| `/tmp/modeminfo` | the parsed `Key: value` snapshot | rpcd backend |
+
+`/usr/bin/modeminfo` turns the two AT files into one `Key: value` line per
+reading plus `PCC:`/`SCCn:` carrier rows, rpcd keys the scalars into JSON and
+serves `history` as objects, and the JS view only draws. When neither file
+exists (a box without the status service) the collector sends its own batch
+with `sms_tool_q` as a last resort. Registration parsing covers both modes:
 
 - **NR5G-SA**: `+QENG: "servingcell","NOCONN","NR5G-SA",...` — RSRP/RSRQ/SINR,
-  MCC/MNC, cell ID (hex + decimal) all extracted, field offsets 5/6/7/13/14/15
-  match the SA row layout (SA servingcell has no LTE anchor columns, which is
-  why the SA and NSA awk indices differ).
+  MCC/MNC, cell ID (hex + decimal) from fields 5/6/7/13/14/15; SA servingcell
+  has no LTE anchor columns, which is why the SA and NSA offsets differ.
 - **NR5G-NSA**: same fields from the `"NR5G-NSA"` row (fields 2/3/5/6/7/8).
-- The Network line (`LTE|NR5G-NSA|NR5G-SA` greps) and the view both fall back
-  NSA→SA (`m.nr5g_nsa_rsrp || m.nr5g_sa_rsrp`), so a pure-SA camp shows SA
-  metrics, an NSA camp shows NR + LTE, and LTE-only shows LTE.
+- The view shows an LTE row and a 5G NR row only when that RAT actually
+  reported numbers, so a pure-SA camp never shows a row of dashes and an
+  LTE-only camp never shows an empty 5G row.
 
-`parse_carrier()` also types carrier aggregation rows (`+QCAINFO` PCC/SCC) as
-`NR5G*` vs `LTE*`, so SA band aggregation displays correctly. Verified by
-`sh -n` / `node --check` plus a compile of the package; a live check against a
-camped-SA modem needs the hardware session.
+`+QCAINFO` rows are typed `NR5G*` vs `LTE*` and become the CA table, with
+bandwidth converted to MHz (index for `+QENG`, resource blocks for `+QCAINFO`).
+IPv6 in `+CGCONTRDP` is printed as 16 dotted decimals and is regrouped for
+display. Verified with `sh -n` / `node --check`, the rpcd backend against real
+cache dumps using the built `jshn`, and a node render harness for LTE-only,
+NSA and SA snapshots.
 
 #### ttl page
 
-`files/www/luci-static/resources/view/qmodem/ttl.js` overrides the app's page.Only the wording changes: the stock text warns that enabling TTL disables NSS
+`files/www/luci-static/resources/view/qmodem/ttl.js` overrides the app's page.
+Only the wording changes: the stock text warns that enabling TTL disables NSS
 offload, which is no longer what happens. The UCI schema, field names and
 datatypes are identical, so `luci-app-qmodem-ttlfw4` remains the owner of the
 page and of `/etc/config/qmodem_ttl`.
@@ -523,8 +634,7 @@ ImmortalWrt, OpenWrt, [qosmio/nss-packages](https://github.com/qosmio/nss-packag
 [Perz3us/openwrt-aw1000-phone](https://github.com/Perz3us/openwrt-aw1000-phone),
 QModem, [Openwrt-Passwall](https://github.com/Openwrt-Passwall),
 [nikkinikki/OpenWrt-nikki](https://github.com/nikkinikki-org/OpenWrt-nikki),
-[dotywrt/dotycat-package](https://github.com/dotywrt/dotycat-package) (LEDs),
-[NoobLK/luci-app-netstat](https://github.com/Ace1337z/luci-app-netstat),
+[dotywrt/dotycat-package](https://github.com/dotywrt/dotycat-package) (Netstat),
 [SolomonRicky/luci-app-modeminfo](https://github.com/Ace1337z/luci-app-modeminfo).
 
 **Licensing.** The Skyworks ProSLIC DSP patch is proprietary and not
@@ -534,6 +644,214 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-03
+- **Releases are named after the build, not "FINAL".** The publish step had a
+  hardcoded tag (`BYTE_by_ACE-FINAL-...`) and title (`BYTE by ACE — FINAL`), so
+  every build landed under the same name regardless of what it contained. Tag,
+  title and body header are now derived from the built `.config`
+  (`CONFIG_VERSION_CODE` / `CONFIG_VERSION_NUMBER`, written by
+  `apply_version()`), the same strings the image filename and LuCI → Status
+  report:
+  `BYTE_by_ACE-<code>-<branch>-<run>` /
+  `BYTE <release> VERSION <code> — AW1000 (ImmortalWrt <branch>, build <run>)`.
+  The step fails if the version cannot be read, and fails again if the notes
+  header does not match the tag it is about to publish.
+- **Release notes describe the current build.** `release-notes-final.sh` no
+  longer prints a static body (it claimed "FINAL", kernel 6.12.112 and 24.10.6
+  feeds for months). Version, kernel and release come from the built `.config`
+  and the change list is the newest `README.md` changelog block, with a
+  `git log` fallback for tarball exports. A stale body cannot be published,
+  because the header is checked against the tag.
+- **IPTV: multicast now follows the port that joined it.** The `wan` port is a
+  bridge member, so a set-top box shares L2 with `lan1..lan4`; with snooping off
+  every HD channel was flooded to every port *and* to the WiFi APs, and with no
+  querier the group aged out mid-programme. `br-lan` now carries
+  `igmp_snooping=1`, `multicast_querier=1` (the bridge queries for itself, so no
+  daemon) and `hash_max=4096` (netifd's 512-entry default overflows on a full
+  channel list and the kernel falls back to flooding). `93-byte-multicast` is
+  the upgrade path; keys are only written when absent.
+- **`udp-broadcast-relay-redux` is deleted from the preset and gated.** It was
+  never in the image - the entry was a dead `is not set` line - but a daemon
+  that re-broadcasts every UDP packet to every bridged port is exactly what
+  breaks IPTV on a busy LAN. The build now fails if it comes back through a
+  dependency or a preset refresh.
+- **Packet steering: the upgrade path now turns it on.** Images up to 1.2.0
+  shipped `packet_steering '0'`, and sysupgrade without `-n` keeps
+  `/etc/config/network`, so upgraded units kept showing *Packet Steering:
+  Disabled* and `byte-selfcheck` logged `steering.enabled 1 0` on every boot.
+  `92-byte-steering` re-asserts `packet_steering=1` and `steering_flows=32768`
+  once, logs the change and restarts the service; `rps_sock_flow_entries` and
+  the RFS flow table depend on both.
+- **Branding: the header says BYTE and wears the B mark.** The theme prints the
+  hostname as the wordmark, so the hostname became `BYTE` (was `BYTE_by_ACE`);
+  `91-byte-identity` migrates upgraded units and leaves a self-chosen hostname
+  alone. The logo could not be fixed with CSS - the theme hardcodes the OpenWrt
+  arcs as inline SVG - so
+  `files/usr/share/ucode/luci/template/themes/footstrap/partials/brand.ut`
+  overrides the theme partial with the same "B" geometry as `logo.svg`, drawn in
+  `currentColor` plus the accent underline so it reads on both palettes. A gate
+  fails the build if the theme stops shipping or including that partial.
+- **luci-app-byte now states what it is for.** It is the AdGuard Home +
+  PassWall2 DNS setup page, sitting under Tools next to unrelated apps, and its
+  main button moves dnsmasq off port 53: the page opens with an intro banner
+  saying so (and where PassWall2 nodes, TTL and modem settings actually live),
+  and the menu entry is *BYTE (AdGuard Home + PassWall2)*. A gate asserts both
+  strings stay.
+- **luci-app-byte: false "not installed" on a working AdGuard Home.** The rpcd
+  backend decided "installed" from `/usr/bin/AdGuardHome` and `/usr/sbin/
+  AdGuardHome` only. A manual tarball install, a LuCI-app self-update or a
+  relocated `adguardhome.config.config_file` left the binary somewhere else, so
+  the header badge said *Not installed* while the service was answering on
+  port 53. Detection is now four-way - binary (five known paths plus `PATH`),
+  init script, YAML config, package metadata (`opkg`/`apk`) - and the version
+  falls back to the package version when the binary cannot be executed. The
+  YAML path itself is resolved from `uci get adguardhome.config.config_file`
+  first, so `web`/`dns_port` are read from the file the service actually uses.
+- **UI: page headers moved below the cards in luci-app-byte and
+  luci-app-modeminfo.** LuCI pins its toolbar to the top of the viewport; a
+  hero rendered as the first child ended up underneath it and both the title
+  and the status badge/controls were clipped. Order is now cards, hero, footer
+  in both apps.
+- **Removed luci-app-vnstat2 ("Traffic Monitor").** Two frontends over one
+  vnstat database: *Status → Traffic Monitor* (upstream app) and *Tools →
+  VnStats* (the vendored dotycat app, patched for vnstat 2.13). Only the
+  patched one stays; `vnstat2`/`vnstati2` binaries remain because netstat needs
+  them. Drops the app's views and its `zh-cn` translation. The preset entry and
+  its i18n symbol are now `is not set`, with a gate that fails the build if the
+  app creeps back.
+- **Kept `udp-broadcast-relay-redux` out of the image.** It was never shipped -
+  the preset carried only a dead `is not set` line from the original upload -
+  but the entry is now deleted outright and gated. The daemon re-floods every
+  UDP broadcast onto every bridged port, so attaching an IPTV box (continuous
+  IGMP joins, multicast-heavy streams) saturates the LAN bridge and playback
+  stalls. IPTV belongs on a dedicated port/bridge with multicast snooping, not
+  behind a relay daemon.
+- **modeminfo: rewritten to read the shared status cache; CA table, per-RAT
+  signal rows, trends.** The page used to run its own AT batch through
+  `sms_tool_q` on every poll. That was wrong twice over: two processes reading
+  one tty interleave replies and both parse each other's output, and the batch
+  costs six round trips per refresh even though `byte-status-cache` already
+  polls the same modem every 10 s through qmodem's `at-daemon`. The collector
+  (`/usr/bin/modeminfo`) now parses `/tmp/aw1000-status/{live,static}` and only
+  falls back to its own AT poll when those files do not exist at all. The rpcd
+  plugin caches the parsed snapshot in `/tmp/modeminfo`, re-parses when
+  `live` is newer, and serves `history` straight from
+  `/tmp/aw1000-status/history`. Result: the page refreshes as often as the UI
+  likes without touching the serialiser, and several browser tabs are free.
+  The view itself gained a carrier-aggregation table (PCC/SCC with RAT, band,
+  bandwidth, ARFCN, PCI, RSRP), separate LTE and 5G NR signal rows so the two
+  RATs can never be read against the wrong label, RSRP and SINR trend
+  sparklines, and Cell/Data/Modem cards. `+CGSN` was added to the cache's
+  static batch so IMEI shows up, and history depth went from 31 to 180 samples
+  (about 30 minutes). Two parser bugs surfaced while testing against real
+  cache dumps: NR/LTE bandwidth in `+QENG` is an index (0-5 / 0-14) while
+  `+QCAINFO` carries resource blocks, and the RG500Q answers `+CGMI/+CGMM/
+  +CGMR/+CGSN` with bare lines instead of the `+X: ` prefix. Both handled.
+  Verified offline: the rpcd backend against real cache samples with the
+  built `jshn`, plus a node render harness for LTE-only, NSA and SA data.
+- **WAN IPv6: found and fixed the missing mux link-local; data path still dies
+  at the modem.** Chasing "IPv6 does not work" turned up a real bug first:
+  `wanv6` could not even run its DHCPv6 exchange, because `wwan0_1` had no
+  link-local address - `qmi_wwan_q` hands the mux the base interface's MAC, so
+  the EUI-64 address it would generate is already owned by `wwan0`, and the
+  interface stayed without `fe80::`. Every SOLICIT and RS then failed with
+  `Address not available`. `byte-v6-check` now adds a unique MAC-derived
+  link-local before it waits for `wanv6`, after which DHCPv6 completes and the
+  gateway is reachable. Above that, IPv6 still does not pass traffic through
+  this modem: only the modem's own gateway answers, the ISP resolver behind it
+  does not, `Ip6OutRequests` rises with `Ip6InReceives` flat, and
+  `AT+QMAP="wwan"` reports `"IPV6","0:0:0:0:0:0:0:0"`. The existing demotion
+  path (probe, `gai.conf`, ULA withdrawn, LAN RA/DHCPv6 off) is what runs on
+  this carrier. Details in Known limits.
+- **Dashboard: NSS offload card replaced by Storage; bottom tabs and the layout
+  editor hidden.** The NSS counter only refreshes while the NSS clock scales
+  itself and clock scaling is off here, so the card always read 0. The card now
+  reports overlay used/total from `system.info()` (`root`/`tmp` are in KB) with
+  a capacity bar plus a `/tmp` line, and keeps the widget id `nss` so
+  `/etc/config/dashboard` written by an older image still resolves - renaming
+  the id would silently empty the card row on every upgraded unit. The five
+  charts stay. The detail tabs (Internet/Mobile/System/DHCP/Resources) and the
+  Layout tab all live in one `.cbi-map` that the dashboard appends after the
+  charts, so the shipped `custom.css` hides `.Dashboard > .cbi-map`. That file
+  is a copy of luci-mod-dashboard's own stylesheet (it loads exactly that one
+  path) with the BYTE rules appended; re-sync it when the feed moves. Verified
+  in a headless browser against the live unit: the Storage card reads
+  `30.4 MiB / 584.6 MiB`, `overlay · 5% used`, the bar fills 5.2%, and the
+  `.cbi-map` computes `display: none`.
+- **Netstat: replaced with dotycat's app, patched for vnstat 2.x.** The old
+  vendored fork parsed vnstat 1.x text: `DD/MM/YY` dates, `Mon 'YY` months and
+  one database file per interface under the database directory. ImmortalWrt
+  25.12 ships vnstat2 2.13, which prints ISO dates (`2026-07-02`, `2026-07`),
+  keeps every interface in a single `vnstat.db`, and lists interfaces only
+  through `vnstat --iflist`. Unpatched, the page rendered an empty selector and
+  `0 B` - the reported "netstat does not work". The view now prefers
+  `vnstat --json` through `luci.jsonc` (so the selector offers only interfaces
+  that actually have data, not `gre0`/`teql0`/`dummy0`), falls back to
+  `--iflist`, then to the 1.x per-file layout, and accepts both date formats.
+  `Makefile` depends on `+vnstat2 +curl +luci-compat` (upstream's `+vnstat`
+  does not exist in these feeds, so defconfig dropped the whole app) and the
+  destructive upstream `99-vnstat` (`opkg remove vnstat2 && opkg install
+  vnstat` on first boot: needs the network, downgrades the binary, drops the
+  DB) is replaced by `99-byte-vnstat`, which only enables the daemon and adds
+  the uplink. A new `hotplug.d/iface/92-byte-vnstat` adds the WAN device the
+  first time it comes up, because vnstatd runs `--noadd` and the modem dials
+  after the LAN. Verified on the unit: daily labels `02 Jul`/`03 Nov`, monthly
+  `2026-07`/`2026-11`, selector `br-lan`/`wwan0_1`, vnstatd logging
+  `Monitoring (2): wwan0_1 br-lan`.
+- **luci-app-byte: buttons were dead and start/stop reported success blindly.**
+  Two independent bugs. (1) `ui.showModal(title, children, ...classes)` in
+  current LuCI takes CSS classes as the third argument, so passing a buttons
+  array there made `classList.add()` throw and the handler died before doing
+  anything; the buttons now live inside the modal children in a button row.
+  (2) the rpcd `action` method never captured `rc` and always returned
+  `"ok":true`, so a failed start looked like a no-op; it now returns the real
+  exit code and the reason (`AdGuard Home is not installed yet - run "Install
+  and wire" first`). "Install and wire" runs detached (`setsid`, pid file, log
+  redirect) and streams its log into a terminal modal that polls
+  `ubus call byte log`: mid-run shows `running:true` plus the tail, a failing
+  stub returns `exit:3`, the real installer returns `exit:0`. The panel moved
+  from a top-level menu entry to *Tools → BYTE* (it previously only sat at the
+  top because the removed 5G LED Lua controller created the Tools node), and
+  the System-information and Pages cards are gone.
+- **Status panel: BYTE branding and a kernel-free version string.** Hostname
+  now reads `BYTE by ACE`, the model row is the plain `Arcadyan AW1000` (the
+  old code called `getCPUBench`, which does not exist on this build, and
+  printed `undefined`), and the firmware row shows
+  `BYTE 25.12 VERSION 1.2.x` from `/etc/byte-version`. Kernel version keeps its
+  own row, so repeating it in the firmware string was noise.
+- **luci-app-modeminfo: shipped invisible (no menu, ACL denied).** The install
+  recipe copied `./files/etc` and `./files/www` and the two binaries, but never
+  `./files/usr/share`, so `menu.d/luci-app-modeminfo.json` and
+  `acl.d/luci-app-modeminfo.json` stayed in the source tree: there was no menu
+  entry, and even a direct URL could not call `ubus modeminfo` (the ACL did not
+  exist). `Package/*/install` now installs both. Also fixed the doubled unit in
+  the signal card (`-88 dBm dBm`): the sampler already prints the unit, so
+  `metric()` only appends it when the value does not end with it.
+- **Argon theme removed; dotycat 5G LED app removed.** Neither was installed,
+  but Argon kept a dead entry in `/etc/config/luci` (`/luci-static/argon` does
+  not exist, so selecting it left the UI with no stylesheet) - dropped from the
+  shipped config, and `96-byte-dashboard` deletes the key on upgraded units.
+  `luci-app-aw1k-led` (`Tools → 5G LED Config`) duplicated the declarative LED
+  triggers already in `/etc/config/system`, needed a `led-status` daemon, and
+  was the only thing pulling Lua controllers into the image; it is out of the
+  preset, out of the required-package gate (a stale `=y` there would have
+  failed the build), and now has a forbidden gate so a reused tree cannot
+  re-enable it.
+- **qmodem: wrong connection status with IPv4+IPv6 in one CGPADDR field.**
+  The Overview page showed `Connect Status: No` while the WAN was plainly up
+  (`wwan0_1` had an IPv4/IPv6 address and default routes). The Quectel RG500Q
+  answers `AT+CGPADDR=1` with both families inside ONE quoted field:
+  `+CGPADDR: 1,"10.226.134.159,36.2.180.0.65.251.63.38.0.0.0.0.0.0.0.1"`.
+  qmodem's `get_cgpaddr_ipv4()` only matched a whole quoted dotted quad
+  (`"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"`), so it returned nothing; the IPv6
+  branch greps for `:` groups and found none either (Quectel prints IPv6 in
+  dotted decimal). Both empty, so `get_connect_status()` said `No`.
+  `apply_preset()` now rewrites the helper to split the field on commas, drop
+  quotes/CRs and keep the first standalone 4-octet quad that is not
+  `0.0.0.0`. FM350 (separate quoted fields) and the empty-address placeholder
+  still behave - qmodem's own `tests/test_core_cmds.sh` fixtures pass - and
+  the rewrite hard-fails the build if it does not apply. Verified on the unit:
+  `ubus call qmodem get_connect_status '{"config_section":"4_1"}'` now returns
+  `{"connection_status": "Yes"}` and `base_info` shows `Connect Status: Yes`.
 - **Build fix (CI-only): duplicate `luci-app-netstat` dropped its i18n
   package.** The vendored app was de-duplicated against the `feeds/luci` copy
   only, but the app also lives in `feeds/dotycat` — whose copy has no `po/`.

@@ -35,24 +35,6 @@ function card(title, hint, body, wide) {
 	].concat(body));
 }
 
-function fmtUptime(sec) {
-	sec = +sec || 0;
-	var d = Math.floor(sec / 86400),
-	    h = Math.floor(sec % 86400 / 3600),
-	    m = Math.floor(sec % 3600 / 60);
-	if (d > 0)
-		return '%dd %dh %dm'.format(d, h, m);
-	if (h > 0)
-		return '%dh %dm'.format(h, m);
-	return '%dm'.format(m);
-}
-
-function fmtMem(used, total) {
-	if (!total)
-		return '-';
-	return '%d%% (%s of %s MB)'.format(Math.round(used / total * 100), used, total);
-}
-
 function aghTone(s) {
 	if (!s.installed)
 		return [ 'Not installed', 'idle' ];
@@ -70,13 +52,21 @@ function webUrl(s) {
 	return 'http://' + window.location.hostname + ':' + port;
 }
 
+/* The installer writes ANSI colour codes; a <pre> shows them as escape
+ * garbage, so strip them before display. */
+function stripAnsi(s) {
+	return (s || '').replace(/\x1b\[[0-9;]*m/g, '');
+}
+
 return view.extend({
 	load: function() {
 		return callStatus();
 	},
 
+	/* LuCI >= 24.x: showModal(title, children, ...classes). Buttons are part of
+	 * the children (a .button-row), NOT a third argument - passing an array
+	 * there makes classList.add() throw and the click looks dead. */
 	handleSetup: function(ev) {
-		var btn = ev.currentTarget;
 		var self = this;
 
 		return ui.showModal(_('Install and wire AdGuard Home'), [
@@ -87,38 +77,98 @@ return view.extend({
 				E('li', {}, [ _('.lan / .local / .home.arpa keep resolving through dnsmasq') ]),
 				E('li', {}, [ _('SafeSearch/parental filtering is turned off') ])
 			]),
-			E('p', { 'class': 'byte-note' }, [ _('Existing configs are backed up before they are touched. Nothing is proxied for you: PassWall2 nodes are still yours to add.') ])
-		], [
-			[ _('Cancel'), ui.hideModal ],
-			[ _('Install and wire'), function() {
-				ui.hideModal();
-				ui.showModal(_('Working'), [
-					E('p', { 'class': 'byte-note' }, [
-						E('span', { 'class': 'byte-spin' }),
-						_('Installing packages and rewriting DNS configuration. This can take a minute on a slow feed.')
-					])
-				]);
-				return callSetup().then(function(res) {
-					ui.hideModal();
-					ui.showModal(res.ok ? _('AdGuard Home is wired up') : _('Setup reported problems'), [
-						E('pre', { 'class': 'byte-log' }, [ res.message || '' ])
-					], [ [ _('Close'), ui.hideModal ] ]);
-					return self.refresh();
-				}).catch(function(err) {
-					ui.hideModal();
-					ui.addNotification(null, E('p', {}, [ _('Setup failed: ') + err ]), 'danger');
-				});
-			} ]
+			E('p', { 'class': 'byte-note' }, [ _('Existing configs are backed up before they are touched. Nothing is proxied for you: PassWall2 nodes are still yours to add.') ]),
+			E('div', { 'class': 'button-row' }, [
+				E('button', {
+					'class': 'btn cbi-button',
+					'click': ui.hideModal
+				}, [ _('Cancel') ]),
+				E('button', {
+					'class': 'btn cbi-button cbi-button-apply',
+					'click': function() {
+						ui.hideModal();
+						return self.startSetup();
+					}
+				}, [ _('Install and wire') ])
+			])
 		]);
+	},
+
+	/* Terminal view: the backend starts the installer detached and this loop
+	 * tails its log once a second, so long opkg downloads are visible live
+	 * instead of a frozen "Working" spinner. */
+	startSetup: function() {
+		var self = this,
+		    term = E('pre', { 'class': 'byte-log' }, [ _('Starting…') ]),
+		    state = E('p', { 'class': 'byte-note' }, [ _('Requesting installer…') ]),
+		    live = true;
+
+		ui.showModal(_('AdGuard Home setup - live output'), [
+			state,
+			term,
+			E('div', { 'class': 'button-row' }, [
+				E('button', {
+					'class': 'btn cbi-button',
+					'click': function() { live = false; ui.hideModal(); }
+				}, [ _('Close') ])
+			])
+		]);
+
+		function tick() {
+			if (!live)
+				return;
+
+			return callLog(400).then(function(res) {
+				if (!live)
+					return;
+
+				var txt = stripAnsi(res.log);
+				term.textContent = txt || _('Waiting for output…');
+				term.scrollTop = term.scrollHeight;
+
+				if (res.running) {
+					state.textContent = _('Installer running - output streams above.');
+					window.setTimeout(tick, 1000);
+				}
+				else if (res.started) {
+					var ok = (res.exit === 0);
+					state.textContent = ok
+						? _('Finished successfully (exit 0).')
+						: _('Finished with errors (exit %d) - see the tail of the log above.').format(res.exit);
+					self.refresh();
+				}
+				else {
+					state.textContent = _('No setup run found.');
+				}
+			}).catch(function(err) {
+				if (!live)
+					return;
+				term.textContent += '\n' + String(err);
+				window.setTimeout(tick, 1500);
+			});
+		}
+
+		return callSetup().then(function(res) {
+			if (!res || !res.ok) {
+				state.textContent = (res && res.message) || _('Could not start the installer.');
+				return;
+			}
+			state.textContent = _('Installer started (pid %d). Streaming output…').format(res.pid || 0);
+			window.setTimeout(tick, 600);
+		}).catch(function(err) {
+			state.textContent = String(err);
+		});
 	},
 
 	handleAction: function(name, ev) {
 		var self = this;
-		if (ev && ev.currentTarget)
-			ev.currentTarget.disabled = true;
+
 		return callAction(name).then(function(res) {
-			if (!res.ok)
-				ui.addNotification(null, E('p', {}, [ (res.message || _('Action failed')).trim() ]), 'warning');
+			var msg = ((res && res.message) || '').trim();
+			if (res && res.ok)
+				ui.addNotification(null, E('p', {}, [ msg || _('Done.') ]), 'info');
+			else
+				ui.addNotification(null, E('p', {}, [ msg || _('Action failed.') ]), 'warning');
 			return self.refresh();
 		}).catch(function(err) {
 			ui.addNotification(null, E('p', {}, [ String(err) ]), 'danger');
@@ -126,56 +176,51 @@ return view.extend({
 	},
 
 	handleLog: function() {
-		return callLog(120).then(function(res) {
+		return callLog(400).then(function(res) {
 			ui.showModal(_('Last AdGuard Home setup run'), [
-				E('pre', { 'class': 'byte-log' }, [ res.log || _('No setup has run yet.') ])
-			], [ [ _('Close'), ui.hideModal ] ]);
+				E('pre', { 'class': 'byte-log' }, [ stripAnsi(res.log) || _('No setup has run yet.') ]),
+				E('div', { 'class': 'button-row' }, [
+					E('button', { 'class': 'btn cbi-button', 'click': ui.hideModal }, [ _('Close') ])
+				])
+			]);
 		});
 	},
 
-	/* Build the page once from a status snapshot, then let poll() patch the
-	   values in place. Re-rendering the whole view every few seconds would
-	   drop focus and scroll position. */
-	render: function(status) {
-		var self = this;
-
+	buildPage: function(status) {
 		if (!document.querySelector('link[href="' + CSS_URL + '"]'))
 			document.head.appendChild(E('link', { rel: 'stylesheet', href: CSS_URL }));
 
-		this.s = status;
-		this.refs = {};
-
 		var tone = aghTone(status);
-		this.refs.aghBadge = badge(tone[0], tone[1]);
 
 		var aghBody = [
 			E('div', { 'class': 'byte-actions' }, [
 				E('button', {
 					'class': 'btn cbi-button cbi-button-apply',
-					click: ui.createHandlerFn(this, 'handleSetup')
+					'click': ui.createHandlerFn(this, 'handleSetup')
 				}, [ status.agh.installed ? _('Re-run setup') : _('Install and wire') ]),
-				E('button', {
+				status.agh.installed ? E('button', {
 					'class': 'btn cbi-button',
-					click: ui.createHandlerFn(this, 'handleAction', status.agh.running ? 'stop' : 'start')
-				}, [ status.agh.running ? _('Stop') : _('Start') ]),
-				E('button', {
+					'click': ui.createHandlerFn(this, 'handleAction', status.agh.running ? 'stop' : 'start')
+				}, [ status.agh.running ? _('Stop') : _('Start') ]) : '',
+				status.agh.installed ? E('button', {
 					'class': 'btn cbi-button',
-					click: ui.createHandlerFn(this, 'handleAction', 'restart')
-				}, [ _('Restart') ]),
-				E('button', {
+					'click': ui.createHandlerFn(this, 'handleAction', 'restart')
+				}, [ _('Restart') ]) : '',
+				status.agh.installed ? E('button', {
 					'class': 'btn cbi-button',
-					click: ui.createHandlerFn(this, 'handleAction', status.agh.enabled ? 'autostart_off' : 'autostart_on')
-				}, [ status.agh.enabled ? _('Disable autostart') : _('Enable autostart') ]),
+					'click': ui.createHandlerFn(this, 'handleAction', status.agh.enabled ? 'autostart_off' : 'autostart_on')
+				}, [ status.agh.enabled ? _('Disable autostart') : _('Enable autostart') ]) : '',
 				webUrl(status) ? E('a', {
 					'class': 'btn cbi-button cbi-button-action',
 					'href': webUrl(status), 'target': '_blank', 'rel': 'noopener'
 				}, [ _('Open AdGuard Home') ]) : '',
 				status.log_available ? E('button', {
 					'class': 'btn cbi-button',
-					click: ui.createHandlerFn(this, 'handleLog')
+					'click': ui.createHandlerFn(this, 'handleLog')
 				}, [ _('Setup log') ]) : ''
 			]),
 			kv([
+				[ _('State'), tone[0] ],
 				[ _('Version'), status.agh.version || '-' ],
 				[ _('Web interface'), status.agh.web || '-' ],
 				[ _('DNS port'), status.agh.dns_port || '-' ],
@@ -214,53 +259,34 @@ return view.extend({
 			])
 		];
 
-		var sysBody = [
-			kv([
-				[ _('Firmware'), status.system.version || status.system.release || '-' ],
-				[ _('Model'), status.system.model || '-' ],
-				[ _('Kernel'), status.system.kernel || '-' ],
-				[ _('Uptime'), fmtUptime(status.system.uptime) ],
-				[ _('Load'), status.system.load || '-' ],
-				[ _('Memory'), fmtMem(status.system.mem_used, status.system.mem_total) ],
-				[ _('WAN'), status.system.wan_up ? status.system.wan_ip : _('down') ],
-				[ _('opkg feed'), status.system.repo_feeds > 0 ? _('BYTE repository configured') : _('missing') ]
-			])
-		];
-
-		var links = [
-			[ 'admin/status/overview', _('Dashboard') ],
-			[ 'admin/tools/netstat', _('Netstat') ],
-			[ 'admin/modem/qmodem/modem_info', _('Modem') ],
-			[ 'admin/network/firewall', _('Firewall') ]
-		];
-
-		poll.add(function() { return self.refresh(); }, 10);
-
+		/* Hero goes BELOW the cards. LuCI pins its toolbar to the top of the
+		 * viewport, and a hero rendered first sits under it: the title and the
+		 * status badge were being clipped. Same order as luci-app-modeminfo. */
 		return E('div', { 'class': 'byte-page' }, [
-			E('header', { 'class': 'byte-hero' }, [
-				E('div', {}, [
-					E('h2', {}, [ 'BYTE' ]),
-					E('p', { 'class': 'byte-sub' }, [
-						_('Firmware control panel for %s').format(status.system.model || 'AW1000'),
-						' \u00b7 ', E('code', {}, [ status.system.kernel || '' ])
-					])
-				]),
-				E('div', { 'class': 'byte-actions' }, [
-					this.refs.aghBadge
-				])
+			/* This page is not a general BYTE settings page - say so before any
+			 * button, or an admin who lands here from Tools has no idea that
+			 * "Install and wire" touches dnsmasq's port and PassWall2's DNS. */
+			E('section', { 'class': 'byte-intro' }, [
+				E('h3', {}, [ _('AdGuard Home + PassWall2 setup') ]),
+				E('p', {}, [ _('This page wires DNS filtering for the whole LAN: it installs AdGuard Home from this firmware\'s own repository and puts it in front of PassWall2. Clients keep using port 53 on the router, AdGuard filters, PassWall2 resolves and proxies, and dnsmasq moves to port 54 for .lan names.') ]),
+				E('p', { 'class': 'byte-note' }, [ _('It is not a general settings page: PassWall2 nodes live under Services - PassWall2, and TTL, modem, WiFi, firewall and the rest are under Network. Nothing is proxied for you here.') ])
 			]),
 
 			E('div', { 'class': 'byte-grid' }, [
 				card(_('AdGuard Home'), status.agh.installed ? (status.agh.version || '') : _('not installed'), aghBody, true),
-				card(_('DNS chain'), _('who answers what'), chainBody),
-				card(_('System'), '', sysBody),
-				card(_('Pages'), _('shipped with this firmware'), [
-					E('div', { 'class': 'byte-links' }, links.map(function(l) {
-						return E('a', { 'href': L.url(l[0]) }, [
-							E('span', {}, [ l[1] ]),
-							E('span', { 'class': 'byte-arrow' }, [ '\u2192' ])
-						]);
-					}))
+				card(_('DNS chain'), _('who answers what'), chainBody)
+			]),
+
+			E('header', { 'class': 'byte-hero' }, [
+				E('div', {}, [
+					E('h2', {}, [ 'BYTE' ]),
+					E('p', { 'class': 'byte-sub' }, [
+						_('AdGuard Home in front of PassWall2 on %s').format(status.system.model || 'AW1000'),
+						' \u00b7 ', E('code', {}, [ status.system.version || '' ])
+					])
+				]),
+				E('div', { 'class': 'byte-actions' }, [
+					badge(tone[0], tone[1])
 				])
 			]),
 
@@ -273,18 +299,36 @@ return view.extend({
 		]);
 	},
 
+	/* Re-render in place after any state change: button labels (Start/Stop,
+	 * Enable/Disable autostart) and the badge must follow the real state. */
 	refresh: function() {
 		var self = this;
+
 		return callStatus().then(function(s) {
 			self.s = s;
-			var tone = aghTone(s);
-			var b = self.refs.aghBadge;
-			if (b) {
-				b.className = 'byte-badge byte-badge--' + tone[1];
-				b.textContent = tone[0];
+
+			if (self.root && self.root.parentNode) {
+				var next = self.buildPage(s);
+				self.root.parentNode.replaceChild(next, self.root);
+				self.root = next;
 			}
+
 			return s;
 		});
+	},
+
+	render: function(status) {
+		var self = this;
+
+		this.s = status;
+		this.root = this.buildPage(status);
+
+		if (!this.pollerAdded) {
+			this.pollerAdded = true;
+			poll.add(function() { return self.refresh(); }, 10);
+		}
+
+		return this.root;
 	},
 
 	handleSaveApply: null,

@@ -1,0 +1,53 @@
+#!/bin/sh
+# BYTE by ACE - first boot / upgrade: IGMP snooping on the LAN bridge.
+#
+# Why this exists
+# ---------------
+# The LAN bridge carries IPTV (the physical `wan` port is a bridge member, so an
+# ISP set-top box and the uplink cable are on the same L2 as lan1..lan4). With
+# snooping off, every multicast stream is flooded to every bridged port,
+# including the WiFi AP ports: one HD channel is enough to saturate the 2.4 GHz
+# airtime and the whole interface crawls. With snooping on, a group only follows
+# the ports that actually joined it.
+#
+# Snooping alone is not enough: with no IGMP querier on the segment, the bridge
+# ages a group out once its membership timer expires, nobody refreshes it, and
+# playback freezes a few minutes into a channel. Making the bridge its own
+# querier fixes that without adding igmpproxy or a broadcast-relay daemon, and
+# nothing is flooded - which is exactly why udp-broadcast-relay-redux is not
+# shipped (it re-broadcasts every UDP packet to every port and is what made
+# IPTV unusable in the first place).
+#
+# hash_max: netifd's default is 512 MDB entries. A full IPTV bouquet plus a few
+# clients using multicast (mDNS, SSDP) can exhaust it; the kernel then logs
+# "br-lan: multicast hash table full" and silently falls back to flooding.
+# 4096 entries is a few hundred KB at worst and covers a whole channel list.
+#
+# Only missing keys are written. A deliberate user choice (snooping off, custom
+# hash size) is never overwritten, and an image without an explicit br-lan
+# device section is left alone rather than guessed at.
+
+[ -f /etc/config/network ] || exit 0
+
+sect=$(uci -q show network 2>/dev/null |
+	sed -n "s/^network\.\([^.=]*\)\.name='br-lan'$/\1/p" |
+	head -n 1)
+
+if [ -z "$sect" ]; then
+	logger -t byte-multicast \
+		"no br-lan device section in /etc/config/network - multicast tuning skipped"
+	exit 0
+fi
+
+set_default() {
+	[ -n "$(uci -q get "network.$sect.$1")" ] && return 0
+	uci -q set "network.$sect.$1=$2"
+}
+
+set_default igmp_snooping 1
+set_default multicast_querier 1
+set_default hash_max 4096
+
+uci -q commit network
+
+exit 0

@@ -1,0 +1,23 @@
+#!/bin/sh
+# BYTE by ACE - start counting a WAN device the first time it comes up.
+#
+# vnstatd runs with --noadd, so an interface that is not already in the
+# database is never tracked. On this unit the modem dials after the LAN is up,
+# so the uplink device (wwan0_1 today, whatever qmodem names it tomorrow) has
+# to be added on ifup; otherwise the Netstat page only ever shows br-lan.
+[ "$ACTION" = "ifup" ] || exit 0
+[ -n "$DEVICE" ] || exit 0
+[ -x /usr/bin/vnstat ] || exit 0
+
+wan=$(ip -4 route show default 2>/dev/null | awk '{ print $5; exit }')
+[ "$DEVICE" = "$wan" ] || exit 0
+
+vnstat --json 2>/dev/null | grep -q "\"name\":\"$DEVICE\"" && exit 0
+
+uci -q del_list "vnstat.@vnstat[0].interface=$DEVICE" 2>/dev/null
+uci -q add_list "vnstat.@vnstat[0].interface=$DEVICE" 2>/dev/null
+uci -q commit vnstat
+vnstat -i "$DEVICE" --add >/dev/null 2>&1 || exit 0
+/etc/init.d/vnstat restart >/dev/null 2>&1
+logger -t byte-vnstat "started tracking $DEVICE"
+exit 0

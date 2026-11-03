@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-modeminfo
-PKG_VERSION:=1.1
+PKG_VERSION:=1.2
 PKG_RELEASE:=1
 
 PKG_MAINTAINER:=YiZhen Choo <yizhen.c02@gmail.com>
@@ -42,9 +42,18 @@ define Build/Compile
 endef
 
 define Package/$(PKG_NAME)/install
-	$(INSTALL_DIR) $(1)/usr/bin $(1)/usr/libexec/rpcd
+	$(INSTALL_DIR) $(1)/usr/bin $(1)/usr/libexec/rpcd \
+		$(1)/usr/share/luci/menu.d $(1)/usr/share/rpcd/acl.d
 	$(INSTALL_BIN) ./files/usr/bin/modeminfo $(1)/usr/bin/modeminfo
 	$(INSTALL_BIN) ./files/usr/libexec/rpcd/modeminfo $(1)/usr/libexec/rpcd/modeminfo
+	# The menu entry and its ACL are what make the page reachable at all. The
+	# old recipe copied ./files/etc and ./files/www only, so both JSON files
+	# stayed in the source tree and the app shipped invisible: no menu item,
+	# and rpcd answered "Permission denied" because the ACL never existed.
+	$(INSTALL_DATA) ./files/usr/share/luci/menu.d/luci-app-modeminfo.json \
+		$(1)/usr/share/luci/menu.d/luci-app-modeminfo.json
+	$(INSTALL_DATA) ./files/usr/share/rpcd/acl.d/luci-app-modeminfo.json \
+		$(1)/usr/share/rpcd/acl.d/luci-app-modeminfo.json
 	$(CP) ./files/etc $(1)/
 	$(CP) ./files/www $(1)/
 endef

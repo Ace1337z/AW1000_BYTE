@@ -10,6 +10,32 @@
 	gap: 16px;
 }
 
+/* Purpose banner. Deliberately first child and visually a light panel, not a
+   card: it explains what the page is for (AdGuard Home in front of PassWall2)
+   before an admin presses a button that moves dnsmasq off port 53. */
+.byte-intro {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 14px 18px;
+	border-radius: 12px;
+	border: 1px solid var(--border-color-low, #d8dee6);
+	border-inline-start: 3px solid #00b5e2;
+	background: var(--background-color-medium, #f4f7fa);
+}
+.byte-intro h3 {
+	margin: 0;
+	font-size: 14px;
+	font-weight: 600;
+	letter-spacing: .1px;
+}
+.byte-intro p {
+	margin: 0;
+	font-size: 12.5px;
+	line-height: 1.55;
+	color: var(--text-color-medium, #5a6472);
+}
+
 .byte-hero {
 	display: flex;
 	align-items: center;

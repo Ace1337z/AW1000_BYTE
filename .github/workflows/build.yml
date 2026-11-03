@@ -152,11 +152,37 @@ jobs:
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: BYTE_by_ACE-FINAL-${{ env.TARGET_BRANCH }}-${{ github.run_number }}
-          TITLE: BYTE by ACE — FINAL (AW1000, ImmortalWrt ${{ env.TARGET_BRANCH }})
-          GITHUB_RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
+          # Release identity is read out of the .config the image was actually
+          # built from, never typed here. apply_version() rewrites
+          # CONFIG_VERSION_NUMBER/CODE into .config immediately before the
+          # build, so these values match the image filename, /etc/openwrt_release
+          # and LuCI -> Status exactly. The hardcoded "FINAL" tag/title that used
+          # to live here kept publishing a version the build had long passed.
+          CFG=builder/immortalwrt/.config
+          test -f "$CFG" || { echo "::error::no $CFG - cannot name this release"; exit 1; }
+          cfg_get() {
+            sed -n "s/^$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" "$CFG" | head -1
+          }
+          FW_CODE=$(cfg_get CONFIG_VERSION_CODE)
+          FW_NUMBER=$(cfg_get CONFIG_VERSION_NUMBER)
+          case "$FW_CODE" in
+            ''|'?') echo "::error::CONFIG_VERSION_CODE missing from $CFG"; exit 1 ;;
+          esac
+          case "$FW_NUMBER" in
+            *.*.*.*) ;;
+            *) echo "::error::CONFIG_VERSION_NUMBER '$FW_NUMBER' is not <rel>.<kern>"; exit 1 ;;
+          esac
+          # 25.12.6.12.94 -> release 25.12, kernel 6.12.94 (everything after the
+          # release pair; the kernel itself is a 3-part version).
+          FW_RELEASE=$(printf '%s' "$FW_NUMBER" | cut -d. -f1-2)
+          FW_KERNEL=$(printf '%s' "$FW_NUMBER" | cut -d. -f3-)
+          TAG="BYTE_by_ACE-${FW_CODE}-${TARGET_BRANCH}-${GITHUB_RUN_NUMBER}"
+          TITLE="BYTE ${FW_RELEASE} VERSION ${FW_CODE} — AW1000 (ImmortalWrt ${TARGET_BRANCH}, build ${GITHUB_RUN_NUMBER})"
+          echo "release: tag=$TAG"
+          echo "release: title=$TITLE"
+          echo "release: release=$FW_RELEASE kernel=$FW_KERNEL code=$FW_CODE"
           # A previous run may have left a bare tag without a release object,
           # in which case `gh release create` fails. Delete a release-less tag
           # first (a real release and its assets are left untouched).
@@ -168,8 +194,13 @@ jobs:
           fi
 
           # Release body is generated from the artifacts that were actually
-          # built (commit, kernel, feed pins, image size), so it can never
-          # describe a firmware that was not produced.
+          # built: the version/kernel come from this build's .config and the
+          # change list is the newest README changelog block, so a body can
+          # only ever describe the build it is attached to. The previous static
+          # body described a months-old firmware and was republished under
+          # every new tag.
+          FW_CODE="$FW_CODE" FW_RELEASE="$FW_RELEASE" FW_KERNEL="$FW_KERNEL" \
+          CONFIG_FILE="$CFG" README=builder/README.md \
           OUT_DIR=out bash builder/.github/release-notes-final.sh \
             builder/immortalwrt/bin/targets/qualcommax/ipq807x out > /tmp/notes.md
           echo "--- release notes ---"
@@ -178,6 +209,12 @@ jobs:
           # rather than publishing a release that says nothing about itself.
           test "$(wc -l < /tmp/notes.md)" -ge 20 || {
             echo "::error::generated release notes are too short"; exit 1; }
+          # The body must name THIS build. If the notes header and the tag have
+          # drifted apart, publish nothing.
+          want="# BYTE ${FW_RELEASE} VERSION ${FW_CODE}"
+          got=$(head -1 /tmp/notes.md)
+          test "$got" = "$want" || {
+            echo "::error::notes header '$got' != '$want'"; exit 1; }
 
           gh release create "$TAG" out/* \
             -R "$GITHUB_REPOSITORY" \

@@ -1,5 +1,5 @@
 
 config config
-	option prefer 'wwan0_1'
+	option show_status '1'
 	option backend 'normal'
 

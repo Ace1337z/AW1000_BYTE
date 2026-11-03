@@ -28,6 +28,41 @@ has_global_v6() {
 	ip -6 addr show dev "$1" 2>/dev/null | grep -q 'inet6 2[0-9a-f]'
 }
 
+# Give a QMAP mux interface the link-local address the kernel did not.
+#
+# qmi_wwan_q hands every mux interface (wwan0_N) the *base* interface's MAC, so
+# the EUI-64 link-local the kernel would generate for wwan0_1 is identical to
+# the one wwan0 already owns, and wwan0_1 ends up with no fe80:: address at
+# all. Without a link-local there is no neighbour discovery and no source for
+# the all-routers multicast, so odhcp6c can never finish: the log fills with
+# "Failed to send SOLICIT message to ff02::1:2 (Address not available)" and
+# "Failed to send RS (Address not available)", wanv6 never comes up, and a
+# carrier that does provide IPv6 looks exactly like one that does not.
+#
+# The fix is a link-local that is unique on the host: the MAC bytes as-is
+# (1e:5d:db:b0:e8:b9 -> fe80::1e5d:dbb0:e8b9) instead of the U/L-flipped
+# EUI-64. Deterministic per device, different from the base interface, and a
+# no-op on any interface that already has one.
+ensure_linklocal() {
+	local dev="$1" mac hex ll
+
+	[ -d "/sys/class/net/$dev" ] || return 0
+	ip -6 addr show dev "$dev" scope link 2>/dev/null | grep -q 'inet6 fe80' && return 0
+
+	mac=$(cat "/sys/class/net/$dev/address" 2>/dev/null)
+	case "$mac" in
+		[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:*)
+			;;
+		*) return 1 ;;
+	esac
+
+	hex=$(echo "$mac" | tr -d ':')
+	ll="fe80::$(echo "$hex" | cut -c1-4):$(echo "$hex" | cut -c5-8):$(echo "$hex" | cut -c9-12)"
+
+	ip -6 addr add "$ll/64" dev "$dev" scope link 2>/dev/null &&
+		say "added link-local $ll to $dev (mux reuses the base MAC)"
+}
+
 # Does IPv6 actually reach the internet?
 #
 # The probe must not be fooled by the router simply lacking a source address,
@@ -123,6 +158,14 @@ main() {
 	}
 
 	# Let wanv6 come up (or give up) before judging.
+	#
+	# The link-local has to exist first: odhcp6c's SOLICIT/RS go to multicast
+	# addresses and need a source, so without it wanv6 can never come up even
+	# on a carrier that serves IPv6. Fix the mux interfaces up front.
+	ensure_linklocal wwan0_1
+	ensure_linklocal wwan0
+	ensure_linklocal br-lan
+
 	local i=0
 	while [ "$i" -lt 20 ]; do
 		ifstatus wanv6 2>/dev/null | grep -q '"up": true' && break

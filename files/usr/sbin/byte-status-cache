@@ -28,11 +28,11 @@ POLL="$(uci -q get qmodem.@modem-device[0].status_poll 2>/dev/null)"
 PORT="${PORT:-/dev/ttyUSB3}"
 POLL="${POLL:-10}"
 STATIC_EVERY=6
-HISTORY=31
+HISTORY=180
 
 # One line per bearer in +CGCONTRDP, plus the values the widgets print.
 LIVE_AT='AT+QENG="servingcell";+QCAINFO;+CSQ;+CEREG?;+C5GREG?;+QSPN;+CPMS?;+QTEMP'
-STATIC_AT='AT+QNWLOCK="common/4g";+QNWLOCK="common/5g";+QNWPREFCFG="mode_pref";+QNWPREFCFG="lte_band";+QNWPREFCFG="nr5g_band";+QNWPREFCFG="nsa_nr5g_band";+CGMI;+CGMM;+CGMR;+QCCID;+QUIMSLOT?;+CGCONTRDP'
+STATIC_AT='AT+QNWLOCK="common/4g";+QNWLOCK="common/5g";+QNWPREFCFG="mode_pref";+QNWPREFCFG="lte_band";+QNWPREFCFG="nr5g_band";+QNWPREFCFG="nsa_nr5g_band";+CGMI;+CGMM;+CGMR;+CGSN;+QCCID;+QUIMSLOT?;+CGCONTRDP'
 
 mkdir -p "$CACHE" 2>/dev/null
 
@@ -54,7 +54,7 @@ _json() {
 save() {
 	[ -c "$PORT" ] || return 0
 	ubus list at-daemon >/dev/null 2>&1 || return 0
-	at "$2" "${3:-10}" >"$CACHE/$1.tmp" 2>/dev/null
+	at "$2" "${3:-10}" 2>/dev/null | tr -d '\r' >"$CACHE/$1.tmp"
 	[ -s "$CACHE/$1.tmp" ] && mv "$CACHE/$1.tmp" "$CACHE/$1"
 	rm -f "$CACHE/$1.tmp"
 }

@@ -130,7 +130,7 @@ for tag in "$@"; do
 		echo
 		echo "---"
 		echo
-		echo "<sub>Backfilled from this release's own artifacts by \`.github/release-notes.sh\` (retrofit).</sub>"
+		echo "<sub>Backfilled from this release's own artifacts (retrofit).</sub>"
 	} > "$work/notes-$num.md"
 
 	echo "== $tag =="

@@ -1,38 +1,64 @@
 #!/bin/sh
-# Stamp the BYTE by ACE build identity into the release files.
+# Stamp the BYTE by ACE build identity into the release files and publish the
+# short display form the Status panel shows.
 #
 # DISTRIB_REVISION comes from ImmortalWrt's git REVISION, which is identical
-# for every build of this project (r38259-96f566f4a4). That made it impossible
-# to tell which build a router was running - we lost time on exactly that
-# confusion. VERSION_CODE carries our own marker, so append it to the revision
-# once at first boot.
+# for every build of this project. That made it impossible to tell which build
+# a router was running - we lost time on exactly that confusion. VERSION_CODE
+# carries our own marker, so append it to the revision once at first boot.
 #
 # Written here rather than in the build so the value travels with the image
 # even when /etc/config survives a sysupgrade.
-
 CODE="BYTE-STABLE-1"
 
-for f in /etc/openwrt_release; do
-	[ -f "$f" ] || continue
-	grep -q "BYTE-STABLE" "$f" 2>/dev/null && continue
-	sed -i "s/^DISTRIB_REVISION='\(.*\)'$/DISTRIB_REVISION='\1 ($CODE)'/" "$f"
-	# CONFIG_VERSION_NUMBER cannot carry parentheses - they end up inside
-	# image filenames and break Build/kernel-bin's unquoted `rm -f $@`
-	# ("syntax error near unexpected token `('"). So the version string is
-	# built as 25.12.6.12.94 and the release description is rewritten at
-	# first boot into the display form 25.12(6.12.94), using the running
-	# kernel's own version from /proc/version.
-	kver=$(awk '{print $3; exit}' /proc/version 2>/dev/null)
-	[ -n "$kver" ] && sed -i "s|^DISTRIB_DESCRIPTION='25\.12\.[0-9.]*'|DISTRIB_DESCRIPTION='25.12($kver)'|" "$f"
-	sed -i "s/^DISTRIB_DESCRIPTION='\(.*\)'$/DISTRIB_DESCRIPTION='\1 ($CODE)'/" "$f"
-done
+# stamp_record <file> <sed-expr>... - append the build marker once.
+stamp_record() {
+	local f="$1" e
+	shift
+	[ -f "$f" ] || return 0
+	grep -q "BYTE-STABLE" "$f" 2>/dev/null && return 0
+	for e in "$@"; do
+		sed -i "$e" "$f"
+	done
+}
+
+stamp_record /etc/openwrt_release \
+	"s/^DISTRIB_REVISION='\(.*\)'$/DISTRIB_REVISION='\1 ($CODE)'/"
 
 # os-release is where `uname`-style tooling and LuCI read the version.
-for f in /usr/lib/os-release; do
-	[ -f "$f" ] || continue
-	grep -q "BYTE-STABLE" "$f" 2>/dev/null && continue
-	sed -i "s/^VERSION=\"\(.*\)\"$/VERSION=\"\1 ($CODE)\"/" "$f"
-	sed -i "s/^PRETTY_NAME=\"\(.*\)\"$/PRETTY_NAME=\"\1 ($CODE)\"/" "$f"
-done
+stamp_record /usr/lib/os-release \
+	's/^VERSION="\(.*\)"$/VERSION="\1 ('"$CODE"')"/' \
+	's/^PRETTY_NAME="\(.*\)"$/PRETTY_NAME="\1 ('"$CODE"')"/'
+
+# ---------------------------------------------------------------------------
+# Display identity, no kernel version.
+#
+# base-files writes DISTRIB_DESCRIPTION='%D %V %C', i.e.
+#
+#     BYTE 25.12.6.12.94 1.2.27
+#
+# Status -> Overview already prints the kernel in its own row, so repeating it
+# here is noise. Publish the short form instead:
+#
+#     BYTE 25.12 VERSION 1.2.27
+#
+# Kept in a file rather than rewriting DISTRIB_DESCRIPTION because the long
+# form is what sysupgrade/build metadata and `%V` image names are derived from.
+# The Status panel (view/status/include/10_system.js) reads this file and
+# falls back to parsing DISTRIB_DESCRIPTION when it is missing.
+desc=$(sed -n "s/^DISTRIB_DESCRIPTION='\(.*\)'$/\1/p" /etc/openwrt_release 2>/dev/null | head -1)
+dist=$(printf '%s\n' "$desc" | awk '{ print $1 }')
+num=$(printf '%s\n' "$desc" | awk '{ print $2 }')
+ver=$(printf '%s\n' "$desc" | awk '{ print $3 }')
+
+case "$num" in '' | *[!0-9.]*) num="" ;; esac
+case "$ver" in '' | *[!0-9.]*) ver="" ;; esac
+
+# 25.12.6.12.94 -> 25.12: release series, not the kernel patch level.
+series=$(printf '%s' "$num" | cut -d. -f1-2)
+
+if [ -n "$series" ] && [ -n "$ver" ]; then
+	printf '%s %s VERSION %s\n' "${dist:-BYTE}" "$series" "$ver" >/etc/byte-version
+fi
 
 exit 0

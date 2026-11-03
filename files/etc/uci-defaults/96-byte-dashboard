@@ -15,4 +15,12 @@ fi
 if [ -x /etc/init.d/luci-mod-dashboard ]; then
 	/etc/init.d/luci-mod-dashboard enable 2>/dev/null
 fi
+# Argon is not shipped (size). Its theme entry survives in /etc/config/luci on
+# units upgraded from an older image, where it shows up in System ->
+# Administration as a selectable theme whose /luci-static/argon does not exist:
+# picking it leaves the UI with no stylesheet. Drop the stale entry.
+if uci -q get luci.themes.Argon >/dev/null 2>&1; then
+	uci -q delete luci.themes.Argon
+	uci -q commit luci
+fi
 exit 0

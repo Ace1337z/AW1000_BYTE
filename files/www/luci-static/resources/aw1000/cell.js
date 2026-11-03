@@ -82,11 +82,14 @@ return baseclass.extend({
 	num: num,
 
 	// "+NAME: a,"b",c" lines of an AT reply, as { name: [ [ a, b, c ], ... ] }.
+	// The modem answers with CRLF (and byte-status-cache used to keep the CRs),
+	// and "." does not match "\r", so strip them or every line is dropped and
+	// the Mobile card falls back to "No service" while the link is up.
 	parse(text) {
 		const out = {};
 
 		(text || '').split('\n').forEach(line => {
-			const m = line.match(/^\s*\+?([A-Z][A-Z0-9]*): ?(.*)$/);
+			const m = line.replace(/\r/g, '').match(/^\s*\+?([A-Z][A-Z0-9]*): ?(.*)$/);
 
 			if (m)
 				(out[m[1]] = out[m[1]] || []).push(m[2].split(',').map(f => f.replace(/"/g, '').trim()));

@@ -1,0 +1,26 @@
+#!/bin/sh
+# BYTE by ACE - first boot: make the netstat page usable without a shell.
+#
+# Upstream (dotywrt/dotycat-package) ships 99-vnstat, which runs
+#   opkg remove vnstat2 && opkg install vnstat
+# on first boot. That needs network access, downgrades vnstat 2.13 to 1.x and
+# deletes the existing database - all risk, no upside. This image ships vnstat2,
+# so only the non-destructive steps are kept.
+chmod 644 /www/luci-static/resources/netstat/chart.js 2>/dev/null
+# vnstat 2.x keeps every interface in one database under DatabaseDir.
+mkdir -p /etc/vnstat
+# Track the uplink as well as the LAN: the WAN device is the only interface
+# whose counters matter on a 5G router, and vnstatd runs with --noadd so an
+# interface that is missing from /etc/config/vnstat never shows up.
+uci -q get vnstat.@vnstat[0] >/dev/null 2>&1 || uci -q set vnstat.vnstat=vnstat
+wan=$(ip -4 route show default 2>/dev/null | awk '{ print $5; exit }')
+[ -n "$wan" ] || wan=wwan0_1
+uci -q del_list "vnstat.@vnstat[0].interface=$wan" 2>/dev/null
+uci -q add_list "vnstat.@vnstat[0].interface=$wan" 2>/dev/null
+uci -q commit vnstat
+vnstat -i "$wan" --add >/dev/null 2>&1
+if [ -x /etc/init.d/vnstat ]; then
+	/etc/init.d/vnstat enable 2>/dev/null
+	/etc/init.d/vnstat restart 2>/dev/null
+fi
+exit 0

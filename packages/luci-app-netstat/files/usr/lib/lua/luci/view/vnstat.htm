@@ -15,10 +15,27 @@ local function to_bytes(value, unit)
     return tonumber(value) * (multipliers[unit] or 1)
 end
 
+-- BYTE: vnstat 2.x support.
+--
+-- This view (from dotywrt/dotycat-package) parses the text output of vnstat
+-- 1.x: dates as "DD/MM/YY", months as "Mon 'YY", and one database file per
+-- interface under the database directory. ImmortalWrt 25.12 ships vnstat2
+-- (2.13), which prints ISO dates ("YYYY-MM-DD", "YYYY-MM"), keeps every
+-- interface inside a single vnstat.db, and only lists interfaces through
+-- `vnstat --iflist`. Unpatched, the page renders with an empty interface list
+-- and zero values, which is exactly the "netstat does not work" symptom.
+-- Both formats are accepted below, so a vnstat 1.x build still works.
+local month_names = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
+
 local function format_date(date_str)
-    local month_names = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"}
-    local m, d, y = date_str:match("(%d%d)/(%d%d)/(%d%d)")
+    -- vnstat 2.x: 2026-07-02
+    local y, m, d = date_str:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)$")
+    if y then
+        return string.format("%s %s", d, month_names[tonumber(m)] or "?")
+    end
+    -- vnstat 1.x: 02/07/26
+    m, d, y = date_str:match("(%d%d)/(%d%d)/(%d%d)")
     if m and d and y then
         return string.format("%02d %s %02d", tonumber(d), month_names[tonumber(m)], tonumber(y))
     end
@@ -27,13 +44,40 @@ end
 
 local function get_interfaces()
     local ifaces = {}
-    local p = io.popen("ls /etc/vnstat/ 2>/dev/null | grep -v '.conf$' | grep -v '.old$'")
-    if p then
-        for iface in p:lines() do
-            iface = iface:match("^%s*(.-)%s*$")
-            if iface ~= "" then table.insert(ifaces, iface) end
+    -- Preferred: ask the database itself. `vnstat --json` lists exactly the
+    -- interfaces that have data, so the selector does not offer lifeless
+    -- kernel devices (gre0, teql0, dummy0, ...) that only produce "No data".
+    local have_jsonc, jsonc = pcall(require, "luci.jsonc")
+    if have_jsonc and jsonc then
+        local data = jsonc.parse(sys.exec("vnstat --json 2>/dev/null") or "")
+        if data and data.interfaces then
+            for _, i in ipairs(data.interfaces) do
+                if i.name and i.name ~= "" then table.insert(ifaces, i.name) end
+            end
         end
-        p:close()
+    end
+    -- Fallback 1: vnstat 2.x without jsonc.
+    if #ifaces == 0 then
+        local p = io.popen("vnstat --iflist 2>/dev/null")
+        if p then
+            local out = p:read("*a") or ""
+            p:close()
+            out = out:gsub("^%s*Available interfaces:%s*", "")
+            for iface in out:gmatch("%S+") do
+                if iface ~= "" then table.insert(ifaces, iface) end
+            end
+        end
+    end
+    -- Fallback 2: vnstat 1.x, which keeps one file per interface.
+    if #ifaces == 0 then
+        local q = io.popen("ls /etc/vnstat/ 2>/dev/null | grep -v '.conf$' | grep -v '.old$' | grep -v '^vnstat.db$'")
+        if q then
+            for iface in q:lines() do
+                iface = iface:match("^%s*(.-)%s*$")
+                if iface ~= "" then table.insert(ifaces, iface) end
+            end
+            q:close()
+        end
     end
     table.sort(ifaces)
     return ifaces
@@ -42,13 +86,24 @@ end
 local function get_daily_stats(iface)
     local stats = {}
     local output = sys.exec("vnstat -i " .. iface .. " --days 2>/dev/null") or ""
+    -- Row: "<date>  <rx value> <rx unit> | <tx value> <tx unit> | ..."
     for date, rx_val, rx_unit, tx_val, tx_unit in
-        output:gmatch("(%d%d/%d%d/%d%d)%s+([%d%.]+)%s+([KMGT]iB)%s+|%s+([%d%.]+)%s+([KMGT]iB)") do
+        output:gmatch("(%d%d%d%d%-%d%d%-%d%d)%s+([%d%.]+)%s+([KMGT]iB)%s+|%s+([%d%.]+)%s+([KMGT]iB)") do
         table.insert(stats, {
             date  = format_date(date),
             rx    = to_bytes(rx_val, rx_unit),
             tx    = to_bytes(tx_val, tx_unit)
         })
+    end
+    if #stats == 0 then
+        for date, rx_val, rx_unit, tx_val, tx_unit in
+            output:gmatch("(%d%d/%d%d/%d%d)%s+([%d%.]+)%s+([KMGT]iB)%s+|%s+([%d%.]+)%s+([KMGT]iB)") do
+            table.insert(stats, {
+                date  = format_date(date),
+                rx    = to_bytes(rx_val, rx_unit),
+                tx    = to_bytes(tx_val, tx_unit)
+            })
+        end
     end
     return stats
 end
@@ -56,29 +111,47 @@ end
 local function get_monthly_stats(iface)
     local stats = {}
     local output = sys.exec("vnstat -i " .. iface .. " --months 2>/dev/null") or ""
+    -- vnstat 2.x row: "2026-07  <rx> <unit> | <tx> <unit> | ..."
     for month, rx_val, rx_unit, tx_val, tx_unit in
-        output:gmatch("(%a+%s+'%d%d)%s+([%d%.]+)%s+([KMGT]iB)%s+|%s+([%d%.]+)%s+([KMGT]iB)") do
+        output:gmatch("(%d%d%d%d%-%d%d)%s+([%d%.]+)%s+([KMGT]iB)%s+|%s+([%d%.]+)%s+([KMGT]iB)") do
         table.insert(stats, {
             month = month,
             rx    = to_bytes(rx_val, rx_unit),
             tx    = to_bytes(tx_val, tx_unit)
         })
     end
+    if #stats == 0 then
+        -- vnstat 1.x row: "Jul '26  ..."
+        for month, rx_val, rx_unit, tx_val, tx_unit in
+            output:gmatch("(%a+%s+'%d%d)%s+([%d%.]+)%s+([KMGT]iB)%s+|%s+([%d%.]+)%s+([KMGT]iB)") do
+            table.insert(stats, {
+                month = month,
+                rx    = to_bytes(rx_val, rx_unit),
+                tx    = to_bytes(tx_val, tx_unit)
+            })
+        end
+    end
     return stats
 end
 
 local ifaces        = get_interfaces()
-local current_iface = http.formvalue("iface") or "wwan0_1"
+local current_iface = http.formvalue("iface")
 local view_mode     = http.formvalue("mode") or "daily"
 local stats, title  = {}, ""
+
+-- No hardcoded default: pick the first interface the database actually has,
+-- otherwise a fresh install shows "No data available for wwan0_1".
+if not current_iface or current_iface == "" then
+    current_iface = ifaces[1] or ""
+end
 
 if current_iface ~= "" then
     if view_mode == "daily" then
         stats = get_daily_stats(current_iface)
-        title = "<%:Daily%>"
+        title = "Daily"
     else
         stats = get_monthly_stats(current_iface)
-        title = "<%:Monthly%>"
+        title = "Monthly"
     end
 end
 %>
@@ -183,7 +256,7 @@ end
                 ],
                 datasets: [
                     {
-                        label: '<%:Download (RX)%>',
+                        label: 'Download (RX)',
                         backgroundColor: rxData.map(v => getGradient(ctx, v, maxValue)),
                         data: rxData,
                         datalabels: {
@@ -194,7 +267,7 @@ end
                         }
                     },
                     {
-                        label: '<%:Upload (TX)%>',
+                        label: 'Upload (TX)',
                         backgroundColor: 'orange',
                         data: txData,
                         datalabels: {

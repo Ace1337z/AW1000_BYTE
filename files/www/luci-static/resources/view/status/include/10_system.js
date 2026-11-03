@@ -45,6 +45,27 @@ var callTempInfo = rpc.declare({
 	method: 'getTempInfo'
 });
 
+/* Brand string shown as "Hostname". The real hostname stays BYTE_by_ACE (a
+ * space is not a legal DHCP/DNS name), so the panel shows the readable form
+ * while dnsmasq, SSH prompts and leases keep the underscore version. */
+var BRAND = 'BYTE by ACE';
+
+/* "BYTE 25.12.6.12.94 1.2.27" -> "BYTE 25.12 VERSION 1.2.27".
+ * The kernel is already its own row, so repeating it inside the firmware
+ * string only makes the panel harder to read. Fallback for images that do not
+ * stamp /etc/byte-version yet. */
+function firmwareLabel(desc, bytever) {
+	if (bytever)
+		return bytever;
+
+	var m = /^(\S+)\s+([0-9]+(?:\.[0-9]+)+)\s+(\S+)/.exec(desc || '');
+	if (!m)
+		return desc || null;
+
+	var series = m[2].split('.').slice(0, 2).join('.');
+	return '%s %s VERSION %s'.format(m[1], series, m[3]);
+}
+
 return baseclass.extend({
 	title: _('System'),
 
@@ -58,6 +79,7 @@ return baseclass.extend({
 			L.resolveDefault(callTempInfo(), {}),
 			L.resolveDefault(callLuciVersion(), { revision: _('unknown version'), branch: 'LuCI' }),
 			L.resolveDefault(callGetUnixtime(), 0),
+			L.resolveDefault(fs.read('/etc/byte-version', 128), null),
 			uci.load('system')
 		]);
 	},
@@ -70,12 +92,12 @@ return baseclass.extend({
 		    cpuusage    = data[4],
 		    tempinfo    = data[5],
 		    luciversion = data[6],
-		    unixtime    = data[7];
+		    unixtime    = data[7],
+		    bytever     = (data[8] && data[8].code === 0) ? (data[8].data || '').trim() : '';
 
 		luciversion = luciversion.branch + ' ' + luciversion.revision;
 
 		var datestr = null;
-
 		if (unixtime) {
 			var date = new Date(unixtime * 1000),
 				zn = uci.get('system', '@system[0]', 'zonename')?.replaceAll(' ', '_') || 'UTC',
@@ -91,15 +113,16 @@ return baseclass.extend({
 		}
 
 		var fields = [
-			_('Hostname'),         boardinfo.hostname,
-			_('Model'),            boardinfo.model + cpubench.cpubench,
+			_('Hostname'),         BRAND,
+			_('Model'),            boardinfo.model + (cpubench.cpubench || ''),
 			_('Architecture'),     cpuinfo.cpuinfo || boardinfo.system,
 			_('Target Platform'),  (L.isObject(boardinfo.release) ? boardinfo.release.target : ''),
 			/* BYTE: show only the firmware identity. Upstream appends
 			 * " / luci-<version>", which puts two versions in one row and
 			 * buries the string this image actually ships. The LuCI
 			 * version is still visible in System -> Software (luci-base). */
-			_('Firmware Version'), (L.isObject(boardinfo.release) ? boardinfo.release.description : ''),
+			_('Firmware Version'), firmwareLabel(
+				L.isObject(boardinfo.release) ? boardinfo.release.description : '', bytever),
 			_('Kernel Version'),   boardinfo.kernel,
 			_('Local Time'),       datestr,
 			_('Uptime'),           systeminfo.uptime ? '%t'.format(systeminfo.uptime) : null,

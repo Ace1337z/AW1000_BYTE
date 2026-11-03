@@ -1,90 +1,90 @@
 'use strict';
 'require baseclass';
-'require fs';
+'require rpc';
 'require view.dashboard.lib.charts as charts';
 
-// The connections ECM has offloaded to the NSS firmware, as
-// /usr/sbin/byte-status-cache records them every poll. The firmware's own load
-// figure is not among them: it is only refreshed while the NSS clock scales
-// itself, which is off here.
-const FILE = '/tmp/aw1000-status/nss';
+// Storage card. It replaces the NSS offload card: that figure is only refreshed
+// while the NSS clock scales itself, and clock scaling is off on this board, so
+// the number was always stale.
+//
+// The widget keeps the "nss" id on purpose. /etc/config/dashboard written by an
+// older image lists "nss" under "cards", and the layout resolver drops ids the
+// device does not know - renaming the id would silently empty the card row on
+// every upgraded unit.
+const callSystemInfo = rpc.declare({
+	object: 'system',
+	method: 'info',
+	expect: { }
+});
 
-function num(v) {
-	return (v != null && /^\d+$/.test(v)) ? +v : null;
+// system.info() reports root/tmp in kilobytes.
+function scaled(kb) {
+	const units = [ _('KiB'), _('MiB'), _('GiB') ];
+	let v = Math.max(0, kb || 0), i = 0;
+
+	while (v >= 1024 && i < units.length - 1) {
+		v /= 1024;
+		i++;
+	}
+
+	return '%.1f %s'.format(v, units[i]);
 }
 
-// A round top for the chart: 1, 2 or 5 times a power of ten.
-function top(v) {
-	const p = Math.pow(10, Math.floor(Math.log10(Math.max(v, 10))));
+function usedPercent(used, total) {
+	return (total > 0) ? Math.min(100, Math.max(0, used / total * 100)) : 0;
+}
 
-	return [ 1, 2, 5, 10 ].map(m => m * p).find(m => m >= v);
+function bar(used, total) {
+	const p = usedPercent(used, total);
+	const kind = (p >= 90) ? 'dashboard-storage-high' : ((p >= 75) ? 'dashboard-storage-warn' : '');
+
+	return E('div', {
+		'class': 'dashboard-storage-bar ' + kind,
+		'role': 'progressbar',
+		'aria-valuemin': '0',
+		'aria-valuemax': '100',
+		'aria-valuenow': String(Math.round(p))
+	}, [ E('i', { 'style': 'width:%.1f%%'.format(p) }) ]);
 }
 
 return baseclass.extend({
 	widgets: [
-		{ id: 'nss', slot: 'cards', title: _('NSS offload'), order: 25 },
-		{ id: 'nss', slot: 'charts', title: _('NSS offload'), order: 22 }
+		{ id: 'nss', slot: 'cards', title: _('Storage'), order: 40 }
 	],
 
 	available() {
-		return L.resolveDefault(fs.stat(FILE), null).then(st => st != null);
+		return true;
 	},
 
 	load() {
-		return L.resolveDefault(fs.read(FILE), '');
+		return L.resolveDefault(callSystemInfo(), {});
 	},
 
-	points(text) {
-		return text.split('\n').map(line => line.split(' ')).filter(f => f.length == 3).map(f => ({
-			t: +f[0] * 1000, v4: num(f[1]), v6: num(f[2])
-		}));
-	},
+	render(info) {
+		info = info || {};
 
-	renderCard(last) {
-		const total = last ? (last.v4 || 0) + (last.v6 || 0) : null;
-
-		return charts.kpi({
-			icon: 'nss',
-			title: _('NSS offload'),
-			value: [ (total != null) ? N_(total, '%d flow', '%d flows').format(total) : '-' ],
-			sub: last ? [ _('IPv4 %d').format(last.v4 || 0), _('IPv6 %d').format(last.v6 || 0) ] : []
-		});
-	},
-
-	renderChart(points) {
-		const last = points[points.length - 1];
-		const span = points.length > 1 ? Math.max(60, (last.t - points[0].t) / 1000) : 300;
-		const max = top(Math.max(0, ...points.map(p => (p.v4 || 0) + (p.v6 || 0))));
-		const count = v => (v != null) ? String(v) : '-';
-
-		return charts.card({
-			title: _('NSS offload'),
-			desc: _('connections forwarded by the NSS firmware'),
-			body: points.length ? [
-				charts.lines({
-					span: span,
-					max: max,
-					ticks: [ 0, 0.25, 0.5, 0.75, 1 ].map(f => ({ value: f * max, label: String(Math.round(f * max)) })),
-					ariaLabel: _('NSS offload'),
-					series: [
-						{ values: points.map(p => ({ t: p.t, v: p.v4 })), area: true },
-						{ values: points.map(p => ({ t: p.t, v: p.v6 })) }
-					]
-				}),
-				charts.legend([
-					{ className: 'dashboard-series-1', label: _('IPv4'), value: count(last.v4) },
-					{ className: 'dashboard-series-2', label: _('IPv6'), value: count(last.v6) }
-				])
-			] : charts.empty(_('Collecting data...'))
-		});
-	},
-
-	render(text) {
-		const points = this.points(text);
+		const root = info.root || {};
+		const tmp = info.tmp || {};
+		const rUsed = root.used || 0, rTotal = root.total || 0;
+		const tUsed = tmp.used || 0, tTotal = tmp.total || 0;
 
 		return {
-			cards: [ { id: 'nss', node: () => this.renderCard(points[points.length - 1]) } ],
-			charts: [ { id: 'nss', node: () => this.renderChart(points) } ]
+			cards: [ {
+				id: 'nss',
+				node: () => E('div', { 'class': 'cbi-section dashboard-kpi dashboard-storage' }, [
+					charts.icon('storage', 'dashboard-kpi-icon'),
+					E('div', { 'class': 'dashboard-kpi-text' }, [
+						E('small', {}, [ _('Storage') ]),
+						E('strong', { 'class': 'dashboard-kpi-value' },
+							[ '%s / %s'.format(scaled(rUsed), scaled(rTotal)) ]),
+						bar(rUsed, rTotal),
+						E('small', { 'class': 'dashboard-kpi-sub' },
+							[ _('overlay · %d%% used').format(Math.round(usedPercent(rUsed, rTotal))) ]),
+						E('small', { 'class': 'dashboard-kpi-sub dashboard-kpi-line' },
+							[ _('/tmp %s / %s').format(scaled(tUsed), scaled(tTotal)) ])
+					])
+				])
+			} ]
 		};
 	}
 });

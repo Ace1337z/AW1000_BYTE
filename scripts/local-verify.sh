@@ -198,11 +198,19 @@ gate_config() {
 }
 
 # LuCI JS gate: node parses every view we ship before the image is assembled.
+# The vendored apps under packages/ are copied into the tree by the build
+# script, so their views are checked from the source directory as well -
+# a syntax error there only shows up as a blank page after flashing.
 gate_js() {
     local bad=0 f
     while IFS= read -r f; do
         node --check "$f" || bad=1
-    done < <(find "$repo_root/files" "$tree/package/luci-app-byte" -name '*.js' -type f 2>/dev/null)
+    done < <(find "$repo_root/files" \
+                  "$repo_root/packages/luci-app-byte" \
+                  "$repo_root/packages/luci-app-modeminfo" \
+                  "$repo_root/packages/luci-app-netstat" \
+                  "$tree/package/luci-app-byte" \
+                  -name '*.js' -type f 2>/dev/null)
     return $bad
 }
 

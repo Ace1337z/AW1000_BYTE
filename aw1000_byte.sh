@@ -192,7 +192,8 @@ update_feeds() {
     # Pinned by full 40-char SHA: an abbreviated one makes src-git fail with
     # "couldn't find remote ref".
     echo 'src-git fxs https://github.com/Perz3us/openwrt-aw1000-phone.git^a764a2d3934a1aeeeab74f30160994e6a1c5ffe3' >> feeds.conf.default
-    # dotycat packages: luci-app-aw1k-led (AW1000 LED controller), etc.
+    # dotycat packages: luci-app-dstore, luci-app-nssinfo, ... (aw1k-led is
+    # removed below, see apply_preset).
     grep -q '^src-git dotycat ' feeds.conf.default 2>/dev/null || \
         echo 'src-git dotycat https://github.com/dotywrt/dotycat-package.git;dotycat' >> feeds.conf.default
     # Nikki: mihomo-based transparent proxy (luci-app-nikki, mihomo-meta,
@@ -387,17 +388,15 @@ apply_preset() {
     # alpha package directory so exactly one provider remains.
     rm -rf package/feeds/nikki/mihomo-alpha feeds/nikki/mihomo-alpha
     echo -e "${BOLD_GREEN}mihomo-alpha VARIANT REMOVED (Kconfig cycle)${RESET}"
-    # luci-app-netstat is vendored from packages/luci-app-netstat. If an
-    # upstream feed ever ships the same name, two package directories with one
-    # PKG_NAME collide and the scanner keeps ONE silently (CONFIG_OVERRIDE_PKGS
-    # shows the winner). The dotycat feed copy has no po/, so when it wins the
-    # i18n subpackage symbol vanishes and every preset i18n selection drops -
-    # reproduced locally: both dirs present => luci-i18n-netstat-zh-cn missing
-    # from .config. Remove BOTH feed locations (the vendored copy lives in
-    # package/ and has po/).
+    # luci-app-netstat is vendored at packages/luci-app-netstat (from
+    # dotywrt/dotycat-package, branch dotycat) with vnstat2 parsing fixes. If
+    # an upstream feed ships the same PKG_NAME, two package directories collide
+    # and the scanner keeps ONE silently (CONFIG_OVERRIDE_PKGS shows the
+    # winner), so drop both feed copies: the vendored directory must be the
+    # only one, otherwise the vnstat 2.x patches can disappear without a word.
     rm -rf package/feeds/luci/luci-app-netstat feeds/luci/applications/luci-app-netstat \
            package/feeds/dotycat/luci-app-netstat
-    echo -e "${BOLD_GREEN}luci-app-netstat FEED COPY REMOVED (vendored package wins)${RESET}"
+    echo -e "${BOLD_GREEN}luci-app-netstat FEED COPIES REMOVED (vendored package wins)${RESET}"
     # luci-app-ramfree is vendored for the same reason: the luci feed is pinned
     # to 350fc919 (the first pin with view/dashboard/lib) and ImmortalWrt added
     # the app after that pin, so a pinned build would silently drop it and the
@@ -528,6 +527,56 @@ apply_preset() {
             exit 1
         fi
         echo -e "${BOLD_GREEN}qmi_wwan_q: Build/Prepare applies patches/ (NSS hook stripped)${RESET}"
+    fi
+    # qmodem reports the wrong connection state on this modem. The Quectel
+    # RG500Q answers AT+CGPADDR=1 with IPv4 and dotted-decimal IPv6 inside ONE
+    # quoted field:
+    #   +CGPADDR: 1,"10.226.134.159,36.2.180.0.65.251.63.38.0.0.0.0.0.0.0.1"
+    # while the stock get_cgpaddr_ipv4() only matches a whole quoted dotted
+    # quad ('"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"'), so it returned nothing; the
+    # IPv6 branch greps for ':' groups and finds none either. Both empty ->
+    # get_connect_status() says "No" while the WAN is up, which is why the
+    # Overview page showed "Connect Status: No" next to live IPv4/IPv6 default
+    # routes. Rewrite the helper to split on commas and keep the first
+    # standalone 4-octet quad. FM350 (separate quoted fields) and the 0.0.0.0
+    # placeholder still behave: qmodem's own tests assert both.
+    local qgs="$PWD/feeds/qmodem/application/qmodem/files/usr/share/qmodem/generic.sh"
+    if [ -f "$qgs" ]; then
+        if ! grep -q 'dotted-decimal IPv6 in ONE quoted field' "$qgs"; then
+            local newfn
+            newfn="$(mktemp)"
+            cat >"$newfn" <<'CGPNEW'
+get_cgpaddr_ipv4()
+{
+	# Quectel RG500Q returns IPv4 and dotted-decimal IPv6 in ONE quoted field:
+	#   +CGPADDR: 1,"10.226.134.159,36.2.180.0.65.251.63.38.0.0.0.0.0.0.0.1"
+	# (FM350 uses separate quoted fields). The stock helper only matched a
+	# whole quoted dotted quad, so it returned nothing and the connection
+	# status stayed "No" while the WAN was up. Split on commas, drop quotes and
+	# CRs, keep the first standalone 4-octet quad that is not 0.0.0.0.
+	echo "$1" | tr ',' '\n' | tr -d '"' | tr -d '\r' \
+		| sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+		| grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' | grep -v '^0\.0\.0\.0$' \
+		| head -n 1
+}
+CGPNEW
+            awk -v new="$newfn" '
+                /^get_cgpaddr_ipv4\(\)$/ {
+                    while ((getline line < new) > 0)
+                        print line
+                    skip = 1
+                    next
+                }
+                skip && /^}$/ { skip = 0; next }
+                !skip { print }
+            ' "$qgs" >"$qgs.tmp" && mv "$qgs.tmp" "$qgs"
+            rm -f "$newfn"
+        fi
+        if ! grep -q 'dotted-decimal IPv6 in ONE quoted field' "$qgs"; then
+            echo -e "${BOLD_RED}qmodem: get_cgpaddr_ipv4 rewrite did not apply${RESET}"
+            exit 1
+        fi
+        echo -e "${BOLD_GREEN}qmodem: get_cgpaddr_ipv4 handles IPv4+IPv6 in one field${RESET}"
     fi
 }
 
@@ -747,7 +796,7 @@ ci_check_packages() {
              kmod-aw1000-fxs fxsd luci-app-fxs \
              kmod-qca-nss-drv kmod-qca-nss-ecm nss-firmware \
              kmod-qmi_wwan_q luci-app-modeminfo \
-             luci-app-aw1k-led luci-app-byte luci-app-ramfree \
+             luci-app-byte luci-app-ramfree \
              xray-core \
              luci-app-filemanager \
              luci-app-qmodem-sms luci-app-qmodem-ttlfw4 sms-forwarder sms-tool_q ubus-at-daemon \
@@ -799,6 +848,17 @@ ci_check_packages() {
     # same dialer, so the second one loaded wins and the pages disagree.
     grep -q "^CONFIG_PACKAGE_luci-app-qmodem-next=y$" .config && \
         forbidden="$forbidden luci-app-qmodem-next(coexists with luci-app-qmodem)"
+    # luci-app-aw1k-led was dropped: its led-status daemon duplicates the
+    # declarative LED triggers in /etc/config/system, and it was the only thing
+    # that pulled Lua controllers into the image. A stale =y in a reused tree
+    # would bring the old Lua menu tree (and its "Tools -> 5G LED Config" page,
+    # which no longer has a controller) back.
+    grep -q "^CONFIG_PACKAGE_luci-app-aw1k-led=y$" .config && \
+        forbidden="$forbidden luci-app-aw1k-led(duplicates /etc/config/system LED triggers)"
+    # Only Footstrap ships. A leftover Argon entry in /etc/config/luci leaves a
+    # dead menu entry pointing at /luci-static/argon, which 404s.
+    grep -qi 'argon' "$repo_root/files/etc/config/luci" 2>/dev/null && \
+        forbidden="$forbidden luci-config-argon-theme(theme asset not shipped)"
     # ECM is ALWAYS ON and must stay that way: bridge / LAN<->WiFi / local
     # flows are accelerated by it. Modem egress is excluded in the ECM source
     # (patch 0027) so the TTL rewrite always wins on the WAN path. A build
@@ -1041,6 +1101,118 @@ ci_check_packages() {
     for p in luci-app-netstat luci-app-ramfree luci-app-byte luci-app-modeminfo; do
         [ -f "$repo_root/packages/$p/Makefile" ] || missing="$missing vendored($p)"
     done
+    # luci-app-netstat is the dotycat app with vnstat2 support patched in. If the
+    # patch or the dependency fix is lost, the page renders with an empty
+    # interface list and 0 B on vnstat 2.13 (that was the reported bug).
+    if [ -f "$repo_root/packages/luci-app-netstat/Makefile" ]; then
+        grep -q '^LUCI_DEPENDS:=.*vnstat2' "$repo_root/packages/luci-app-netstat/Makefile" || \
+            missing="$missing netstat-dep-vnstat2"
+        grep -q 'vnstat --iflist' \
+            "$repo_root/packages/luci-app-netstat/files/usr/lib/lua/luci/view/vnstat.htm" || \
+            missing="$missing netstat-vnstat2-parser"
+    fi
+    # Upstream's 99-vnstat runs `opkg remove vnstat2 && opkg install vnstat` on
+    # first boot: needs the network, downgrades the binary and drops the DB.
+    # Only executable lines count - the vendored script documents that command
+    # in a comment and must not trip this.
+    grep -rEn '^[[:space:]]*[^#[:space:]].*opkg remove vnstat2' \
+        "$repo_root/packages/luci-app-netstat/" 2>/dev/null && \
+        forbidden="$forbidden netstat-removes-vnstat2(defeats shipped vnstat2)"
+    # luci-app-vnstat2 ("Traffic Monitor" under Status) duplicates the vendored
+    # netstat app ("VnStats" under Tools): two menus, two parsers, one database.
+    # The vnstat2/vnstati2 binaries stay - netstat needs them - but the extra
+    # LuCI frontend must not ship. Keeps ~120 KB of view/po out of the image.
+    grep -q '^CONFIG_PACKAGE_luci-app-vnstat2=y$' .config && \
+        forbidden="$forbidden luci-app-vnstat2(duplicate of netstat frontend)"
+    grep -q '^CONFIG_PACKAGE_luci-i18n-vnstat2-[a-z_-]*=y$' .config && \
+        forbidden="$forbidden luci-i18n-vnstat2(translations for a dropped app)"
+    # udp-broadcast-relay-redux is not in this build, and must stay out. It
+    # floods every UDP broadcast to every bridged port, so the moment a user
+    # attaches an IPTV box (IGMP joins, multicast-heavy) the LAN bridge turns
+    # into a broadcast amplifier and IPTV playback stalls. IPTV belongs on its
+    # own bridge/port with multicast snooping, not on a relay daemon. The old
+    # preset carried a dead "is not set" line for it; that line is gone and this
+    # gate keeps it from coming back through a dependency or a preset refresh.
+    grep -q '^CONFIG_PACKAGE_udp-broadcast-relay-redux=y$' .config && \
+        forbidden="$forbidden udp-broadcast-relay-redux(floods LAN, stalls IPTV)"
+    grep -rn 'udp-broadcast-relay-redux' "$repo_root/preset" >/dev/null 2>&1 && \
+        forbidden="$forbidden udp-broadcast-relay-redux-preset-line(stale entry)"
+    # IPTV: multicast must stay on the port that joined it. The three br-lan
+    # keys are what keep an HD stream off the WiFi airtime and stop the group
+    # state from timing out; the upgrade path is the uci-defaults script (an
+    # existing /etc/config/network is preserved by sysupgrade).
+    local netcfg="$repo_root/files/etc/config/network"
+    for k in igmp_snooping multicast_querier hash_max; do
+        grep -q "^[[:space:]]*option $k '" "$netcfg" 2>/dev/null || \
+            missing="$missing iptv-bridge-$k"
+    done
+    local mcast="$repo_root/files/etc/uci-defaults/93-byte-multicast"
+    [ -x "$mcast" ] || missing="$missing iptv-multicast-uci-defaults"
+    for k in igmp_snooping multicast_querier hash_max; do
+        grep -q "set_default $k " "$mcast" 2>/dev/null || \
+            missing="$missing iptv-multicast-$k"
+    done
+    # Branding: the box is "BYTE" everywhere an admin looks. The theme header
+    # prints the hostname as its wordmark, so the hostname *is* the header text.
+    # The logo cannot be done with CSS (the theme hardcodes the OpenWrt arcs as
+    # inline SVG in its brand partial), so we override that partial - and assert
+    # the theme still ships and includes it, or the override would sit unused
+    # and the OpenWrt mark would come back with no build error.
+    grep -q "^[[:space:]]*option hostname 'BYTE'$" "$repo_root/files/etc/config/system" 2>/dev/null || \
+        missing="$missing branding-hostname"
+    local brand="$repo_root/files/usr/share/ucode/luci/template/themes/footstrap/partials/brand.ut"
+    [ -f "$brand" ] || missing="$missing branding-brand-template"
+    grep -q 'fs-wordmark' "$brand" 2>/dev/null || missing="$missing branding-brand-markup"
+    grep -q '00b5e2' "$brand" 2>/dev/null || missing="$missing branding-brand-mark"
+    local theme=feeds/luci/themes/luci-theme-footstrap/ucode/template/themes/footstrap
+    [ -f "$theme/partials/brand.ut" ] || \
+        missing="$missing branding-theme-partial(check $theme)"
+    grep -q 'partials/brand' "$theme/header.ut" 2>/dev/null || \
+        missing="$missing branding-theme-include"
+    [ -x "$repo_root/files/etc/uci-defaults/91-byte-identity" ] || \
+        missing="$missing branding-rename-script"
+    # luci-app-byte is the AdGuard Home + PassWall2 setup page, not a general
+    # BYTE settings page. It sits under Tools next to unrelated apps and its
+    # primary button moves dnsmasq off port 53, so the page has to say what it
+    # does and the menu entry has to name it.
+    grep -q 'AdGuard Home + PassWall2 setup' \
+        "$repo_root/packages/luci-app-byte/htdocs/luci-static/resources/view/byte/overview.js" || \
+        missing="$missing byte-purpose-notice"
+    grep -q 'AdGuard Home + PassWall2' \
+        "$repo_root/packages/luci-app-byte/root/usr/share/luci/menu.d/luci-app-byte.json" || \
+        missing="$missing byte-menu-purpose"
+    # Packet steering: images up to 1.2.0 shipped 0, and sysupgrade keeps the
+    # old /etc/config/network, so the upgrade script is the only thing that
+    # turns it back on for an already-flashed unit.
+    local steer="$repo_root/files/etc/uci-defaults/92-byte-steering"
+    [ -x "$steer" ] || missing="$missing steering-uci-defaults"
+    grep -q "packet_steering='1'" "$steer" 2>/dev/null || missing="$missing steering-value"
+    grep -q "steering_flows='32768'" "$steer" 2>/dev/null || \
+        missing="$missing steering-flows"
+    # luci-app-modeminfo's install recipe used to copy ./files/etc and
+    # ./files/www only, so menu.d/acl.d stayed in the source tree: the app
+    # shipped with no menu item and rpcd answered "Permission denied". The page
+    # is only reachable when both JSON files are installed, so assert them.
+    for j in usr/share/luci/menu.d/luci-app-modeminfo.json \
+             usr/share/rpcd/acl.d/luci-app-modeminfo.json; do
+        [ -f "$repo_root/packages/luci-app-modeminfo/files/$j" ] || \
+            missing="$missing modeminfo-json($j)"
+        grep -q "$j" "$repo_root/packages/luci-app-modeminfo/Makefile" 2>/dev/null || \
+            missing="$missing modeminfo-install($j)"
+    done
+    # Dashboard: the NSS offload card was replaced by a Storage card. The id
+    # stays "nss" so /etc/config/dashboard from an upgraded unit still resolves;
+    # the capacity bar and the tab-hiding rule live in the shipped custom.css.
+    local dash="$repo_root/files/www/luci-static/resources/view/dashboard"
+    grep -q "id: 'nss', slot: 'cards'" "$dash/include/48_nss.js" 2>/dev/null || \
+        missing="$missing dashboard-storage-card"
+    grep -q 'callSystemInfo' "$dash/include/48_nss.js" 2>/dev/null || \
+        missing="$missing dashboard-storage-data"
+    [ -f "$dash/icons/storage.svg" ] || missing="$missing dashboard-storage-icon"
+    grep -q 'dashboard-storage-bar' "$dash/css/custom.css" 2>/dev/null || \
+        missing="$missing dashboard-storage-css"
+    grep -q '^\.Dashboard > \.cbi-map' "$dash/css/custom.css" 2>/dev/null || \
+        missing="$missing dashboard-tabs-hidden"
     # ...and that no feed copy of the vendored netstat app survived anywhere
     # it would be scanned: a leftover duplicate PKG_NAME makes the scanner
     # keep the feed copy (which lacks po/) and the i18n symbol disappears
@@ -1161,6 +1333,39 @@ ci_check_packages() {
     awk '/^on:/,/^permissions:/' "$repo_root/.github/workflows/build.yml" 2>/dev/null | \
         grep -q '^ *- version\.env$' || \
         missing="$missing version(workflow-path)"
+    # Release naming. The GitHub release used to be tagged and titled
+    # "BYTE_by_ACE-FINAL-..." from a hardcoded string, so every build published
+    # under the same "FINAL" name and a body describing an older firmware.
+    # Identity now comes from the .config the image was built from, and the
+    # body is the current README changelog block. Fail if any of that is
+    # replaced with a literal again.
+    if grep -qE 'TAG: *BYTE_by_ACE-FINAL|TITLE: *BYTE by ACE . FINAL' \
+        "$repo_root/.github/workflows/build.yml" 2>/dev/null; then
+        forbidden="$forbidden release(static-FINAL-tag-or-title)"
+    fi
+    grep -q 'FW_CODE=$(cfg_get CONFIG_VERSION_CODE)' \
+        "$repo_root/.github/workflows/build.yml" 2>/dev/null || \
+        missing="$missing release(derive-version-from-config)"
+    grep -q 'TAG="BYTE_by_ACE-${FW_CODE}-${TARGET_BRANCH}-${GITHUB_RUN_NUMBER}"' \
+        "$repo_root/.github/workflows/build.yml" 2>/dev/null || \
+        missing="$missing release(tag-carries-version)"
+    grep -q 'TITLE="BYTE ${FW_RELEASE} VERSION ${FW_CODE}' \
+        "$repo_root/.github/workflows/build.yml" 2>/dev/null || \
+        missing="$missing release(title-carries-version)"
+    grep -q 'FW_CODE="$FW_CODE" FW_RELEASE="$FW_RELEASE" FW_KERNEL="$FW_KERNEL"' \
+        "$repo_root/.github/workflows/build.yml" 2>/dev/null || \
+        missing="$missing release(notes-env)"
+    grep -q 'want="# BYTE ${FW_RELEASE} VERSION ${FW_CODE}"' \
+        "$repo_root/.github/workflows/build.yml" 2>/dev/null || \
+        missing="$missing release(notes-header-check)"
+    # The notes script must not fall back to a typed header either: its title
+    # line has to be built from the version it was handed.
+    grep -q 'n "# BYTE ${release} VERSION ${code}"' \
+        "$repo_root/.github/release-notes-final.sh" 2>/dev/null || \
+        missing="$missing release-notes(derived-header)"
+    if grep -qE '^n "# BYTE by ACE' "$repo_root/.github/release-notes-final.sh" 2>/dev/null; then
+        forbidden="$forbidden release-notes(static-header)"
+    fi
     # The dashboard include/*.js widgets need view/dashboard/lib/* from the luci
     # feed and land as a silent no-op on an older pin, so pin and payload are
     # both asserted. The pin lives in feeds.conf.default (written with sed from
