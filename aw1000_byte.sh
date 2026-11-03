@@ -1545,6 +1545,40 @@ ci_check_packages() {
         grep -q "^${k} = " "$repo_root/files/etc/sysctl.conf" 2>/dev/null || \
             missing="$missing sysctl($k)"
     done
+    # Lossy-uplink latency: fail fast instead of blackholing for minutes. The
+    # self-check asserts these values, so both sides are pinned here.
+    for k in net.ipv4.tcp_no_metrics_save net.ipv4.tcp_syn_retries \
+             net.ipv4.tcp_synack_retries net.ipv4.tcp_retries2; do
+        grep -q "^${k} = " "$repo_root/files/etc/sysctl.conf" 2>/dev/null || \
+            missing="$missing sysctl($k)"
+    done
+    # Per-CPU packet distribution. These are the only levers that work on this
+    # box: the modem xhci IRQ cannot be spread (the kernel collapses
+    # effective_affinity), and qmi_wwan's mux netdevs have one tx queue, so XPS
+    # is a no-op that must be detected, not assumed. A regression here is
+    # invisible in the build - throughput just drops to one core's share.
+    local baff="$repo_root/files/etc/init.d/byte-affinity"
+    [ -x "$baff" ] || missing="$missing affinity-init"
+    grep -q '^RPS_MASK=0f$' "$baff" 2>/dev/null || missing="$missing affinity-rps-mask"
+    grep -q '^RPS_FLOW=32768$' "$baff" 2>/dev/null || missing="$missing affinity-rfs-flows"
+    grep -q '^START=96$' "$baff" 2>/dev/null || missing="$missing affinity-order"
+    grep -q 'napi_defer_hard_irqs' "$baff" 2>/dev/null || missing="$missing affinity-napi-defer"
+    grep -q '^GRO_FLUSH_NS=20000$' "$baff" 2>/dev/null || missing="$missing affinity-gro-flush"
+    # Idempotent writes: rewriting rps_cpus with an unchanged mask still
+    # allocates a new steering map and schedules call_rcu on every reload.
+    grep -q '^set_sysfs() {' "$baff" 2>/dev/null || missing="$missing affinity-idempotent-write"
+    # BBR pacing needs sch_fq on the wwan netdev, which is registered after
+    # dial - default_qdisc=fq alone does not reliably cover it.
+    grep -q 'qdisc replace dev' "$baff" 2>/dev/null || missing="$missing affinity-fq-qdisc"
+    # A 15s self-reload was pure churn; hotplug + the netifd raw trigger cover
+    # redial, so the timer is a 60s safety net.
+    if grep -q 'sleep 15$' "$baff" 2>/dev/null; then
+        forbidden="$forbidden affinity-15s-reload(use 60s; hotplug covers redial)"
+    fi
+    # XPS must be probed per device and cached, never hardcoded as supported:
+    # a single-tx-queue netdev rejects the mask and the write is the only
+    # signal available.
+    grep -q 'byte-affinity.xps.' "$baff" 2>/dev/null || missing="$missing affinity-xps-probe"
     grep -q "option governor0 'performance'" "$repo_root/files/etc/config/cpufreq" 2>/dev/null || \
         missing="$missing cpufreq(performance)"
     # The hourly drop_caches/swapoff crontab was removed on purpose (it stalls

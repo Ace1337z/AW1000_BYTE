@@ -105,8 +105,9 @@ opkg install luci-app-passwall   # PassWall v1 (Lua); disable passwall2 first
 | Congestion control | `bbr` with `fq` (`kmod-tcp-bbr`), `tcp_slow_start_after_idle=0` |
 | Socket buffers | `tcp_rmem`/`tcp_wmem` capped at 4 MB, `tcp_moderate_rcvbuf=1`, `tcp_notsent_lowat=131072` |
 | TCP Fast Open | `tcp_fastopen=3` (client + server), blackhole timeout 60 s |
-| NAPI / backlog | `netdev_budget=2400`, `netdev_max_backlog=16384`, `dev_weight=64` |
-| Packet steering | `packet_steering=1`, `steering_flows=32768`, RPS/RFS on `wwan*`, XPS probed once |
+| NAPI / backlog | `netdev_budget=2400`, `netdev_max_backlog=16384`, `dev_weight=64`, `napi_defer_hard_irqs=2` + `gro_flush_timeout=20000` ns on `wwan*` |
+| Packet steering | `packet_steering=1`, `steering_flows=32768`, RPS/RFS `0f` on `wwan*`, `fq` on the modem netdev, XPS probed per device |
+| Fail-fast | `tcp_no_metrics_save=1`, `tcp_syn_retries=3`, `tcp_synack_retries=3`, `tcp_retries2=8` |
 | CPU / memory | `performance` governor, zram, modem IRQs spread across cores |
 | Conntrack | 32768 max, 7440 established, keepalive 120/15/4 |
 | vnStat | `DatabaseDir=/etc/vnstat` on the overlay, re-asserted every boot |
@@ -621,6 +622,51 @@ the feed init, `apply_packet_steering` must be present, `byte-steering` must be
 executable with `START=24`, the `S24` symlink must exist, and the image network
 config must still carry both options.
 
+### Four cores: what RPS/RFS can move, and what XPS cannot
+The AW1000 has one bottleneck that no sysctl removes: the USB modem's data
+interrupt is a single xhci line. On the unit, all `xhci-hcd:usb3` interrupts
+land on one CPU, and writing an all-cores mask to that IRQ does not help - the
+kernel collapses `effective_affinity` back to one CPU, so the interrupt count
+stays on that core regardless. Everything below works *around* that, not on it.
+- **RPS** moves packet *processing* off that core: every `queues/rx-*/rps_cpus`
+  on `wwan*`/`rmnet*` gets mask `0f` (all four cores, derived from the CPU
+  count by `byte-selfcheck`, not asserted as a literal).
+- **RFS** keeps a flow on the CPU already handling it: per-queue
+  `rps_flow_cnt=32768` and `net.core.rps_sock_flow_entries=32768`, which is the
+  same number `steering_flows` carries - a lower global value silently clamps
+  the per-queue tables that `packet_steering` writes.
+- **NAPI deferral** cuts how often that one IRQ fires at all:
+  `napi_defer_hard_irqs=2` with `gro_flush_timeout=20000` (nanoseconds, i.e.
+  20 us) on the modem netdev. These are the values
+  `netdev_sw_irq_coalesce_default_on()` uses upstream; usbnet never calls it, so
+  they are 0 by default here. 20 us is below any measurable RTT - this is an
+  interrupt-count win that costs no latency.
+- **XPS cannot be spread.** `qmi_wwan`/`qmi_wwan_q` mux netdevs expose a single
+  tx queue, and the kernel rejects a multi-CPU `xps_cpus` mask in that case.
+  `byte-affinity` therefore counts the tx queues per device, attempts the write
+  only when there are two or more, and caches the verdict in
+  `/var/run/byte-affinity.xps.<dev>`; the boot log line reports
+  `xps=wwan0=unsupported wwan0_1=unsupported` instead of pretending otherwise.
+  Retrying a write the kernel will never accept just burns forks every minute.
+- **fq on the modem netdev.** BBR computes a rate but only `sch_fq` paces it.
+  `default_qdisc=fq` covers devices present at boot; the wwan mux interface is
+  registered after qmodem dials, so `byte-affinity` checks the live qdisc and
+  runs `tc qdisc replace dev wwan0 root fq` when it is not already `fq`.
+- **The reload no longer churns.** Every sysfs write goes through `set_sysfs`,
+  which compares first - numerically for hex masks, because the kernel prints
+  `f`, not `0f`, and a string compare would rewrite every time. Rewriting
+  `rps_cpus` with an identical value still allocates a new steering map and
+  schedules `call_rcu`, so the old 15 s reload was keeping the RCU path busy for
+  the life of the boot. The timer is now 60 s (hotplug + the netifd raw trigger
+  already cover redial) and steady state does zero writes, zero `tc` forks and
+  logs nothing.
+No SQM is involved: latency under load stays the job of `fq` + BBR, and the
+added TCP keys only change *time to notice* a dead path
+(`tcp_no_metrics_save=1`, `tcp_syn_retries=3`, `tcp_synack_retries=3`,
+`tcp_retries2=8`) - none of them touches throughput.
+Gates: `RPS_MASK=0f`, `RPS_FLOW=32768`, `START=96`, the NAPI/GRO constants, the
+`set_sysfs` helper, the `tc qdisc replace` path and the per-device XPS probe
+must all be present; a `sleep 15` reload is a build failure.
 ### QModem voice on the phone port: why the feed pin is `main`, not a tag
 SIP needs three packages that only exist in QModem 3.4: `qmodem-voip` (modem
 audio), `qmodem-sipd` (SIP transport) and `luci-app-qmodem-voip`. The 3.4 line
@@ -965,6 +1011,17 @@ watcher holds the pidfile. The watcher's first `trap` did not `exit`, so
 - **ECM 12.5 on 6.12.94 with bonding off**: compiled locally (ipk produced);
   hardware test still pending.
 - **ECM state device** availability at boot is assumed from source, not seen.
+- **CPU distribution is build-verified only.** On the unit: `logread | grep
+  byte-affinity` must show exactly one `applied=N rps=0f rfs=32768
+  napi=2/20000 xps=...` line at boot and nothing afterwards while idle (a
+  repeated line means an idempotent write regressed);
+  `/sys/class/net/wwan0_1/queues/rx-0/rps_cpus` reads `f`, `rps_flow_cnt`
+  `32768`, `napi_defer_hard_irqs` `2`, `gro_flush_timeout` `20000`, and
+  `tc qdisc show dev wwan0_1` says `fq`. Then compare `/proc/interrupts |
+  grep xhci` and `/proc/softirqs` before and after a 100 MB download: the IRQ
+  count should grow slower than the packet count and NET_RX should spread over
+  four CPUs instead of one. `byte-selfcheck` logs the `napi.*` and
+  `no_metrics_save`/`syn_retries`/`retries2` lines on the next ifup.
 - **Recovery path unconfirmed** on the target unit (no serial session yet), so
   no image has been flashed from this branch.
 - **SIP ringing and audio not yet verified on hardware.** Build-level evidence
@@ -992,6 +1049,29 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-04
+- **All four cores, no SQM: RPS/RFS kept, NAPI deferral added, XPS told the
+  truth.** The modem's xhci interrupt cannot leave one core (the kernel
+  collapses `effective_affinity`), so the work moved instead of the IRQ:
+  `wwan*`/`rmnet*` RX queues carry RPS mask `0f` and `rps_flow_cnt=32768` on
+  every core, and the modem netdev now gets `napi_defer_hard_irqs=2` with
+  `gro_flush_timeout=20000` ns so the single hard IRQ stops firing per packet
+  (upstream's own `netdev_sw_irq_coalesce_default_on()` values; usbnet never
+  asks for them, which is why they were 0). XPS is now probed per device instead
+  of assumed: qmi_wwan mux interfaces have one tx queue and the kernel rejects a
+  multi-CPU mask, so the verdict is cached and logged
+  (`xps=wwan0=unsupported`) rather than rewritten forever. `fq` is asserted on
+  the modem netdev - `default_qdisc` only covers devices present at boot, and
+  the wwan mux appears after dial - so BBR actually paces. Every sysfs write is
+  now idempotent and numeric (`f` vs `0f`), because rewriting an unchanged
+  `rps_cpus` still allocates a steering map and schedules `call_rcu`: steady
+  state is zero writes, zero `tc` forks, no log spam. The self-reload timer
+  drops from 15 s to 60 s; hotplug and the netifd raw trigger already cover
+  redial. Latency without SQM stays with `fq` + BBR, plus four fail-fast keys
+  that only change time-to-notice on a lossy bearer:
+  `tcp_no_metrics_save=1`, `tcp_syn_retries=3`, `tcp_synack_retries=3`,
+  `tcp_retries2=8`. `byte-selfcheck` now reports the NAPI/GRO values and the
+  four TCP keys. **Size:** sysupgrade `35,318,569` → `35,318,569` bytes (padding
+  absorbs it), rootfs squashfs `30,052,777` → `30,054,417` bytes (+1,640).
 - **IPv6 autodetect, real health check, self-restoring fallback.** The old
   `byte-v6` service was a one-shot probe whose `service_triggers()` never
   registered (no `USE_PROCD`), so a failed probe stuck until reboot and a

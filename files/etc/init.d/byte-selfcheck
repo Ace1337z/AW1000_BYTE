@@ -77,6 +77,10 @@ check_sysctl() {
 	report notsent_lowat 131072 "$(cat /proc/sys/net/ipv4/tcp_notsent_lowat 2>/dev/null)"
 	report conntrack_max 32768 "$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)"
 	report keepalive_time 120 "$(cat /proc/sys/net/ipv4/tcp_keepalive_time 2>/dev/null)"
+	report no_metrics_save 1 "$(cat /proc/sys/net/ipv4/tcp_no_metrics_save 2>/dev/null)"
+	report syn_retries 3 "$(cat /proc/sys/net/ipv4/tcp_syn_retries 2>/dev/null)"
+	report synack_retries 3 "$(cat /proc/sys/net/ipv4/tcp_synack_retries 2>/dev/null)"
+	report retries2 8 "$(cat /proc/sys/net/ipv4/tcp_retries2 2>/dev/null)"
 	report rmem_max 4194304 "$(cat /proc/sys/net/core/rmem_max 2>/dev/null)"
 	# BBR only exists if CONFIG_TCP_CONG_BBR was compiled in; fq likewise.
 	[ "$(cat /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null | grep -cw bbr)" -eq 1 ] \
@@ -121,6 +125,14 @@ check_iface() {
 				"$(cat /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null)" \
 				"$(cat "$q" 2>/dev/null)"
 		done
+		# Software IRQ coalescing on the modem netdev. Without it every packet
+		# takes a hard IRQ on the one core the xhci interrupt cannot leave;
+		# 20000 ns is the upstream default netdev_sw_irq_coalesce_default_on()
+		# uses, so this is latency-neutral and only cuts interrupt count.
+		report "napi.$dev.defer" 2 \
+			"$(cat /sys/class/net/"$dev"/napi_defer_hard_irqs 2>/dev/null)"
+		report "napi.$dev.gro_flush_ns" 20000 \
+			"$(cat /sys/class/net/"$dev"/gro_flush_timeout 2>/dev/null)"
 	done
 }
 
