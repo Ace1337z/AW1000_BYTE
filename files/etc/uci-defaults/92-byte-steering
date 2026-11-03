@@ -12,8 +12,13 @@
 # These two values are firmware tuning, not user preference: the performance
 # tuning in sysctl.conf (rps_sock_flow_entries=32768) and byte-affinity only
 # make sense with steering on, and steering_flows must match or RFS is clamped.
-# They are therefore set outright here, once - this script then deletes itself,
-# so a later manual change is not fought on every boot.
+# They are therefore set outright here.
+#
+# This script is only the first-boot path: it deletes itself, and the whiteout
+# that leaves in the overlay hides the next image's copy on an upgrade. The
+# durable guarantee is /etc/init.d/byte-steering (START=24, before netifd's
+# packet_steering at 25), which ships its own S24 rc.d symlink and re-asserts
+# these values on every boot.
 
 [ -f /etc/config/network ] || exit 0
 

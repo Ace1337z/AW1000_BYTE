@@ -1,0 +1,79 @@
+#!/bin/sh /etc/rc.common
+# BYTE by ACE - make the AT path and the firewall entry ready for QModem voice.
+#
+# What QModem voice (qmodem-voip + qmodem-sipd) needs that is NOT a package
+# default on an upgraded unit:
+#
+# 1. `qmodem.<section>.use_ubus=1`. fxsd and qmodem_voip both drive the modem
+#    through ubus-at-daemon; when the option is 0 (or written as 0 by an older
+#    qmodem version) the AT port is opened directly by whoever gets there
+#    first, and qmodem_voip reports "AT transport failed" while the RJ11 line
+#    looks fine. LuCI's default is 1, so only units that carry an explicit 0
+#    or an old section layout are repaired here. An explicit 0 is left alone
+#    (it is a user choice) but logged, because SIP will not work with it.
+#
+# 2. The fw4 include that opens the inbound SIP/RTP ports. qmodem-sipd
+#    registers it from /etc/uci-defaults/90-qmodem-sip-firewall, and those
+#    scripts delete themselves after their first run. On sysupgrade the
+#    deletion is a whiteout in the preserved overlay, so the copy shipped in
+#    the next squashfs stays hidden: an upgraded unit would lose the include
+#    and inbound SIP would be dropped by fw4 with no obvious cause. Same
+#    reasoning as byte-steering - a service that ships its own rc.d symlink.
+#
+# 3. /etc/config/qmodem_sip holds the SIP password; upstream chmods it 600 in
+#    its uci-defaults, which again do not re-run after an upgrade.
+#
+# START=19 is before qmodem_init (80), qmodem-settings (91), ubus-at-daemon
+# (98) and qmodem_voip_sipd (99), so the option is final before any of them
+# read it.
+#
+# SIP stays disabled (qmodem_sip.inbound.enabled / fxs.main.sip = 0) unless the
+# user turns it on in LuCI: an enabled SIP server with an empty password would
+# be a new LAN listener on every unit.
+START=19
+
+warn() { logger -t byte-voip "$*"; }
+
+repair_at_path() {
+	local sect value changed=0 sip_on
+	[ -f /etc/config/qmodem ] || return 0
+	sip_on=$(uci -q get qmodem_sip.inbound.enabled)
+	[ "$sip_on" = 1 ] || sip_on=$(uci -q get fxs.main.sip)
+	for sect in $(uci -q show qmodem 2>/dev/null | \
+			sed -n 's/^qmodem\.\([^.=]*\)=modem$/\1/p'); do
+		value=$(uci -q get "qmodem.$sect.use_ubus")
+		if [ -z "$value" ]; then
+			uci -q set "qmodem.$sect.use_ubus='1'" && changed=1
+		elif [ "$value" = 0 ] && [ "$sip_on" = 1 ]; then
+			warn "qmodem.$sect.use_ubus=0: QModem voice needs the AT port"
+			warn "through at-daemon, set Use Ubus in Modem > Dial for $sect"
+		fi
+	done
+	[ "$changed" = 1 ] || return 0
+	uci -q commit qmodem || return 0
+	warn "qmodem use_ubus set to 1 (voice/AT path)"
+}
+
+repair_firewall_include() {
+	local name=qmodem_voip_sipd
+	[ -x /etc/init.d/qmodem_voip_sipd ] || return 0
+	[ -f /etc/qmodem_voip/firewall.include ] || return 0
+	[ -n "$(uci -q get "firewall.$name")" ] && return 0
+	uci -q batch >/dev/null 2>&1 <<-EOF
+	add firewall include
+	set firewall.@include[-1].path='/etc/qmodem_voip/firewall.include'
+	set firewall.@include[-1].type='script'
+	set firewall.@include[-1].reload='1'
+	set firewall.@include[-1].enabled='1'
+	rename firewall.@include[-1]='$name'
+	commit firewall
+	EOF
+	[ -n "$(uci -q get "firewall.$name")" ] || return 0
+	warn "fw4 include $name registered (SIP/RTP ports)"
+}
+
+start() {
+	repair_at_path
+	repair_firewall_include
+	[ ! -f /etc/config/qmodem_sip ] || chmod 600 /etc/config/qmodem_sip
+}

@@ -65,7 +65,8 @@ want() { # <ipk path>
 		# requires >=0.107.73-r3, and ImmortalWrt 24.10.6 only has 0.107.57,
 		# so the 24.10.6 copy can never satisfy it. Our tree builds 0.107.79.
 		adguardhome|luci-app-adguardhome|\
-		qmodem|tom_modem|sms-tool_q|ubus-at-daemon|sms-forwarder|libqmodem-sms|\
+		qmodem|tom_modem|sms-tool_q|ubus-at-daemon|sms-forwarder-next|libqmodem-sms|\
+		qmodem-settings|qmodem-smsd|qmodem-voip|qmodem-sipd|\
 		luci-app-qmodem*|luci-app-modeminfo|luci-app-aw1k-led|\
 		luci-app-fxs|fxsd|kmod-aw1000-fxs|luci-app-ramfree|luci-app-cpufreq|\
 		luci-app-tailscale-community|luci-app-filemanager|tailscale|\

@@ -139,15 +139,25 @@ main_menu() {
 update_feeds() {
     echo -e "${BOLD_YELLOW}ADDING EXTERNAL FEEDS (QMODEM, PASSWALL2, NSS, FXS)${RESET}"
     # qmodem: modem management (replaces 3ginfo/modemband/sms-tool-js).
-    # Pinned to v3.3.0 (1913bfb27) - latest stable release.
-    # The 3.x line no longer defines the old "qmodem_runtime" netifd protocol
-    # (verified: no occurrence anywhere in the v3.3.0 tree), so the WAN
-    # interface is still written as a plain proto=dhcp - the reason 2.8.9 was
-    # pinned in the first place. Cross-major jumps skip 3.0-3.2: the upstream
-    # migration note says to back up UCI and to verify at-daemon, SMS backend
-    # and the dial after upgrading.
+    # Pinned to main @ b4effcda (2026-11-02), upstream version 3.4.0_rc3.
+    # Why not the v3.4.0_rc3.1 tag: AW1000 voice support (qmodem-voip audio
+    # profile for the Quectel RG500Q-EA over /var/run/fxsd/pcm.sock) came in
+    # FUjr/QModem#290, which is only in main - the tag's modem_supports.json
+    # has no RG500Q-EA entry at all, so qmodem_voip refuses to start on this
+    # board. There is no plain v3.4.0 tag yet; main is the only pin that
+    # carries both qmodem-sipd and the AW1000 profile.
+    # at-daemon is versioned by ../../version.mk (QMODEM_VERSION), so this pin
+    # is also what satisfies the >= 3.4.0 requirement of QModem voice/fxsd.
+    # The WAN interface stays a plain proto=dhcp on wwan0_1 (files/etc/config/
+    # network). 3.4.0 ships a qmodem_runtime netifd protocol again, but nothing
+    # in BYTE uses it: one owner of the WAN interface, and quectel-CM already
+    # brings the data session up.
+    # 3.4.0 also moved the dial/driver menu options from luci-app-qmodem to the
+    # qmodem package (PACKAGE_luci-app-qmodem_* -> PACKAGE_qmodem_*), and
+    # luci-app-qmodem-sms now pulls the event-driven qmodem-smsd stack
+    # (qmodem-smsd, qmodem-settings, libqmodem-sms, sms-forwarder-next).
     sed -i '\#^src-git qmodem #d' feeds.conf.default 2>/dev/null
-    echo 'src-git qmodem https://github.com/FUjr/QModem.git^1913bfb272de39adb7b1ef79b91706368fd89399' >> feeds.conf.default
+    echo 'src-git qmodem https://github.com/FUjr/QModem.git^b4effcdaa7f73b26b27f01a8cca3c31f8e98be26' >> feeds.conf.default
     # passwall2 luci app, pinned to 26.4.10 (4b4b84dc1) - the version proven
     # working on the DOTYWRT AW1000. Newer passwall2 hardcodes
     # xray_min_version="26.7.11" AND injects version.min into every generated
@@ -384,6 +394,77 @@ apply_preset() {
         exit 1
     fi
     echo -e "${BOLD_GREEN}qca-nss-ecm: bonding front end disabled${RESET}"
+    # qca-nss-ecm's init forces packet steering OFF at boot and on every
+    # network reload:
+    #
+    #   disable_packet_steering() {
+    #     uci -q set network.globals.packet_steering=0 && uci commit ...
+    #     uci -q del network.globals.steering_flows    && uci commit ...
+    #     /usr/libexec/network/packet-steering.uc -l 0 0
+    #   }
+    #
+    # It runs from start_service() (START=26, right after netifd's
+    # packet_steering at START=25) and from reload_service(), and `network` is a
+    # reload trigger. The result on 1.2.30 was a unit whose image config said
+    # packet_steering '1' / steering_flows '32768' but whose *overlay* said 0,
+    # with no steering_flows at all: the switch in LuCI showed Disabled, the
+    # RFS flow table was empty, and byte-selfcheck logged a MISMATCH every boot.
+    # The one-shot uci-defaults could not help - ECM ran after it and the script
+    # had already deleted itself.
+    #
+    # This box has no reason to park steering: QSDK does it because NSS takes
+    # the data path, but ECM excludes the modem netdevs here (patch 0027) and
+    # the LAN/WiFi path still benefits from per-queue CPU assignment. Replace
+    # the writer with a reader: re-apply whatever UCI says (default 1, so a
+    # config without the key still steers). No uci set, no commit, no delete -
+    # the value now has exactly one owner, /etc/config/network.
+    local ecm_init="$PWD/feeds/nss/qca-nss-ecm/files/qca-nss-ecm.init"
+    if [ ! -f "$ecm_init" ]; then
+        echo -e "${BOLD_RED}qca-nss-ecm init not found: $ecm_init${RESET}"
+        exit 1
+    fi
+    python3 - "$ecm_init" <<'PY' || { echo -e "${BOLD_RED}qca-nss-ecm: cannot stop it from disabling packet steering${RESET}"; exit 1; }
+import re
+import sys
+
+path = sys.argv[1]
+src = open(path).read()
+
+if "apply_packet_steering() {" in src and "disable_packet_steering" not in src:
+    sys.exit(0)  # already patched: apply_preset() may run on a reused tree
+
+new = '''apply_packet_steering() {
+  local steering flows opts
+  steering="$(uci -q get network.@globals[0].packet_steering)"
+  flows="$(uci -q get network.@globals[0].steering_flows)"
+  [ -n "$steering" ] || steering=1
+  opts=
+  [ "${flows:-0}" -gt 0 ] 2>/dev/null && opts="-l $flows"
+  if [ -e "/usr/libexec/platform/packet-steering.sh" ]; then
+    /usr/libexec/platform/packet-steering.sh "$steering"
+  else
+    /usr/libexec/network/packet-steering.uc $opts "$steering"
+  fi
+}'''
+
+pat = re.compile(r'^disable_packet_steering\(\) \{.*?^\}', re.S | re.M)
+src, n = pat.subn(new, src)
+if n != 1:
+    sys.exit("expected 1 disable_packet_steering() block, found %d" % n)
+src = src.replace("  disable_packet_steering\n", "  apply_packet_steering\n")
+if "disable_packet_steering" in src:
+    sys.exit("disable_packet_steering survived the rewrite")
+open(path, "w").write(src)
+PY
+    if grep -q 'disable_packet_steering\|packet_steering=0' "$ecm_init"; then
+        echo -e "${BOLD_RED}qca-nss-ecm still disables packet steering${RESET}"
+        exit 1
+    fi
+    grep -q '^apply_packet_steering() {' "$ecm_init" || {
+        echo -e "${BOLD_RED}qca-nss-ecm init lost apply_packet_steering()${RESET}"
+        exit 1
+    }
+    echo -e "${BOLD_GREEN}qca-nss-ecm: packet steering preserved (re-applied from UCI)${RESET}"
 
     # Kconfig variant cycle: upstream packages/net/weechat defines TWO packages
     # in ONE Makefile (weechat-minimal with DEFAULT_VARIANT, and weechat-full
@@ -574,8 +655,26 @@ apply_preset() {
     # routes. Rewrite the helper to split on commas and keep the first
     # standalone 4-octet quad. FM350 (separate quoted fields) and the 0.0.0.0
     # placeholder still behave: qmodem's own tests assert both.
+    #
+    # 3.4.0 upstreamed the fix: its get_cgpaddr_ipv4() already does
+    # `tr -d '"' | tr ',' '\n'`. Patching it again is a no-op in behaviour but
+    # rewrites a function we no longer need to own, so detect the upstream fix
+    # and leave that file alone. Only when the body still matches the whole
+    # quoted-quad form do we replace it - and then the marker is asserted, so a
+    # future upstream rewrite cannot silently drop the fix.
     local qgs="$PWD/feeds/qmodem/application/qmodem/files/usr/share/qmodem/generic.sh"
-    if [ -f "$qgs" ]; then
+    if [ ! -f "$qgs" ]; then
+        # No generic.sh at all: nothing to check, same as before.
+        qgs=""
+    else
+        local cgpbody
+        cgpbody="$(sed -n '/^get_cgpaddr_ipv4()$/,/^}$/p' "$qgs")"
+        if [ -n "$cgpbody" ] && printf '%s\n' "$cgpbody" | grep -q "tr ','"; then
+            echo -e "${BOLD_GREEN}qmodem: upstream get_cgpaddr_ipv4 already splits the field${RESET}"
+            qgs=""
+        fi
+    fi
+    if [ -n "$qgs" ]; then
         if ! grep -q 'dotted-decimal IPv6 in ONE quoted field' "$qgs"; then
             local newfn
             newfn="$(mktemp)"
@@ -833,7 +932,9 @@ ci_check_packages() {
              luci-app-byte luci-app-ramfree \
              xray-core \
              luci-app-filemanager \
-             luci-app-qmodem-sms luci-app-qmodem-ttlfw4 sms-forwarder sms-tool_q ubus-at-daemon \
+             luci-app-qmodem-sms luci-app-qmodem-ttlfw4 sms-forwarder-next sms-tool_q ubus-at-daemon \
+             qmodem-voip qmodem-sipd qmodem-smsd luci-app-qmodem-voip \
+             kmod-sound-core alsa-lib libpjsip libpjsip-ua adb px5g-mbedtls libsoxr \
              kmod-ifb kmod-sched-cake kmod-sched-core kmod-ipt-ipset \
              kmod-macvlan kmod-nf-ipt kmod-nft-socket kmod-nf-nathelper \
              kmod-nf-nathelper-extra ipset tc-tiny iptables-nft \
@@ -1290,13 +1391,77 @@ ci_check_packages() {
         "$repo_root/packages/luci-app-byte/root/usr/share/luci/menu.d/luci-app-byte.json" || \
         missing="$missing byte-menu-purpose"
     # Packet steering: images up to 1.2.0 shipped 0, and sysupgrade keeps the
-    # old /etc/config/network, so the upgrade script is the only thing that
-    # turns it back on for an already-flashed unit.
+    # old /etc/config/network, so a fresh unit needs the uci-defaults script and
+    # an upgraded unit needs a writer that is not in /etc. Both are asserted.
     local steer="$repo_root/files/etc/uci-defaults/92-byte-steering"
     [ -x "$steer" ] || missing="$missing steering-uci-defaults"
     grep -q "packet_steering='1'" "$steer" 2>/dev/null || missing="$missing steering-value"
     grep -q "steering_flows='32768'" "$steer" 2>/dev/null || \
         missing="$missing steering-flows"
+    # The boot service is the one that survives an upgrade: /etc/rc.local is in
+    # keep.d and the uci-defaults script deletes itself, so only a file that
+    # ships in the new squashfs with its own rc.d symlink runs every boot.
+    local bsteer="$repo_root/files/etc/init.d/byte-steering"
+    [ -x "$bsteer" ] || missing="$missing byte-steering-init"
+    grep -q "^START=24$" "$bsteer" 2>/dev/null || \
+        missing="$missing byte-steering-order(must precede packet_steering=25)"
+    grep -q "^STEERING=1$" "$bsteer" 2>/dev/null || missing="$missing byte-steering-value"
+    grep -q "^FLOWS=32768$" "$bsteer" 2>/dev/null || missing="$missing byte-steering-flows"
+    [ -L "$repo_root/files/etc/rc.d/S24byte-steering" ] || \
+        missing="$missing byte-steering-symlink(not enabled at boot)"
+    # The image config has to agree with the service, otherwise a build without
+    # the service would ship whatever the config happens to say.
+    grep -qE "^[[:space:]]*option packet_steering '1'$" "$repo_root/files/etc/config/network" 2>/dev/null || \
+        missing="$missing network-packet_steering"
+    grep -qE "^[[:space:]]*option steering_flows '32768'$" "$repo_root/files/etc/config/network" 2>/dev/null || \
+        missing="$missing network-steering_flows"
+    # qca-nss-ecm used to force steering off at START=26 and on every network
+    # reload (`uci set ...=0`, `uci del ...steering_flows`, `packet-steering.uc
+    # 0`). apply_preset() rewrites that block into a reader; a feed bump that
+    # brings the writer back is invisible in the build and only shows up as a
+    # Disabled switch on the device.
+    local ecm_init="feeds/nss/qca-nss-ecm/files/qca-nss-ecm.init"
+    [ -f "$ecm_init" ] || missing="$missing ecm-init(not-in-feed)"
+    grep -q '^apply_packet_steering() {' "$ecm_init" 2>/dev/null || \
+        missing="$missing ecm-steering-reader(apply_packet_steering missing)"
+    if grep -q 'disable_packet_steering\|packet_steering=0' "$ecm_init" 2>/dev/null; then
+        forbidden="$forbidden ecm-disables-steering"
+    fi
+    # QModem voice / SIP on the AW1000 RJ11 port (fxsd <-> qmodem-voip <->
+    # qmodem-sipd). Two things break silently on a feed bump:
+    #  * AW1000 audio support lives in QModem main (PR #290), not in a release
+    #    tag: v3.4.0_rc3.1's modem_supports.json has no RG500Q-EA profile at
+    #    all, so qmodem_voip starts and then refuses every call.
+    #  * at-daemon is versioned by feeds/qmodem/version.mk, and QModem voice
+    #    needs 3.4.0 or newer.
+    local qmv="feeds/qmodem/version.mk"
+    grep -qE '^QMODEM_VERSION:=3\.([4-9]|[1-9][0-9])\.' "$qmv" 2>/dev/null || \
+        missing="$missing qmodem-version(voice needs at-daemon >= 3.4.0)"
+    local qmsup="feeds/qmodem/application/voipd/files/usr/share/qmodem/modem_supports.json"
+    [ -f "$qmsup" ] || missing="$missing qmodem-voice-profiles(missing)"
+    grep -q 'RG500Q-EA' "$qmsup" 2>/dev/null || \
+        missing="$missing qmodem-aw1000-voice(RG500Q-EA profile absent: only QModem main has it)"
+    grep -q 'pcm_socket' "$qmsup" 2>/dev/null || \
+        missing="$missing qmodem-pcm-socket(AW1000 audio path)"
+    [ -x "$repo_root/files/etc/init.d/byte-voip" ] || missing="$missing byte-voip-init"
+    grep -q "^START=19$" "$repo_root/files/etc/init.d/byte-voip" 2>/dev/null || \
+        missing="$missing byte-voip-order(must precede qmodem_init=80)"
+    [ -L "$repo_root/files/etc/rc.d/S19byte-voip" ] || \
+        missing="$missing byte-voip-symlink(not enabled at boot)"
+    # qmodem 3.4.0 moved the dial/driver menu options from luci-app-qmodem to
+    # the qmodem package. A leftover PACKAGE_luci-app-qmodem_* line in the
+    # preset is dropped by defconfig without a warning, which would silently
+    # fall back to upstream defaults (generic QMI driver, normal quectel-cm).
+    if grep -q '^CONFIG_PACKAGE_luci-app-qmodem_' "$repo_root/preset" 2>/dev/null; then
+        forbidden="$forbidden preset-luci-app-qmodem-option(3.4.0 moved these to PACKAGE_qmodem_*)"
+    fi
+    # sms-forwarder and sms-forwarder-next declare PKG_CONFLICTS on each other,
+    # and luci-app-qmodem-sms now depends on -next. Shipping both aborts image
+    # assembly with a conflict; shipping only the old one silently loses the
+    # SMS UI's backend.
+    if grep -q '^CONFIG_PACKAGE_sms-forwarder=y$' .config; then
+        forbidden="$forbidden sms-forwarder(conflicts with sms-forwarder-next)"
+    fi
     # luci-app-modeminfo's install recipe used to copy ./files/etc and
     # ./files/www only, so menu.d/acl.d stayed in the source tree: the app
     # shipped with no menu item and rpcd answered "Permission denied". The page

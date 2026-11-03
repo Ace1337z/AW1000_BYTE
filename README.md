@@ -45,7 +45,8 @@ sysupgrade -n BYTE_by_ACE-<version>-qualcommax-ipq807x-arcadyan_aw1000-squashfs-
 
 ## Features
 
-- **Cellular** — QModem 3.3.0 over Quectel vendor QMI: band and cell lock, SMS
+- **Cellular** — QModem 3.4.0_rc3 (main `b4effcda`) over Quectel vendor QMI:
+  band and cell lock, SMS
   (send, receive, forward to Telegram/webhook), signal and carrier-aggregation
   metrics, live dashboard.
 - **TTL / Hop Limit** — one switch in *Network → Modem → TTL Configuration*;
@@ -57,6 +58,14 @@ sysupgrade -n BYTE_by_ACE-<version>-qualcommax-ipq807x-arcadyan_aw1000-squashfs-
   the mangle chain too.
 - **Phone (RJ11)** — `fxsd` with the SLIC driver built in: HD audio, caller ID,
   DND, call history.
+- **SIP calling (experimental, opt-in)** — QModem voice: `qmodem-voip` owns the
+  modem audio, `qmodem-sipd` provides the SIP side, `luci-app-qmodem-voip` the
+  page. An incoming call rings the RJ11 phone and the SIP apps at the same
+  time, and whichever answers first gets it; SIP audio is 8 kHz PCMA/PCMU.
+  The packages ship in the image but the service is **configured off**
+  (`qmodem_sip.inbound.enabled=0`, `fxs.main.sip=0`): turn it on in *QModem →
+  VoIP* and *Services → Phone (RJ11) → Settings*. An open SIP listener with an
+  empty password must not exist on every unit by default.
 - **WiFi** — NSS-accelerated 2.4/5 GHz; both radios up on first boot.
 - **UI** — Footstrap 0.14.19 only (no second theme ships), BYTE logo and icons,
   a BYTE panel under *Tools* (AdGuard Home ↔ PassWall2 DNS wiring with a live
@@ -258,6 +267,17 @@ nss/                       NSS sources + kernel patches
   (`1e:5d:db:b0:e8:b9` → `fe80::1e5d:dbb0:e8b9`) before it waits for `wanv6`.
   Verified on the unit: with the address present DHCPv6 completes and the
   gateway answers; without it both fail as described.
+- **SIP calling is experimental and upstream calls it that.** The voice stack
+  is QModem `main`, not a release: upstream's own `version-migration.zh-cn.md`
+  marks `v3.4.0_rc3` "not recommended as production firmware". Only the
+  Quectel **RG500Q-EA with firmware `RG500QEAAAR13A01M4G` and USB ID
+  `2c7c:0800`** is in the voice profile table - the daemon matches model,
+  firmware *and* USB ID, so a replacement modem or a firmware flash drops
+  voice with a log line, not silently. One call slot, no PBX, no call waiting
+  through SIP, no group/paging, SIP audio fixed at 8 kHz PCMA/PCMU (HD audio
+  stays a RJ11-only feature), and the SIP password is generated once in LuCI
+  and shown once. If it misbehaves, turn off `fxs.main.sip` and the RJ11 phone
+  keeps working on its own.
 
 ## Engineering log
 
@@ -538,8 +558,136 @@ must print the symbol. The `packages` gate runs exactly that.
 `byte_ttl` chain is live. `nss-offload off` remains as a panic button and says
 so; it no longer claims to fix WAN TTL, because WAN was never accelerated.
 
-### LuCI pages
+### Packet steering has one owner: netifd, not ECM
+`packet_steering '1'` + `steering_flows '32768'` were correct in the image from
+1.2.1, and `92-byte-steering` fixed units upgraded from <=1.2.0, yet a freshly
+flashed 1.2.30 still reported *Packet Steering: Disabled*. The writer was
+`qca-nss-ecm`. Its init defined
+```sh
+disable_packet_steering() {
+  uci -q set network.globals.packet_steering=0 && uci commit ...
+  uci -q del network.globals.steering_flows    && uci commit ...
+  /usr/libexec/network/packet-steering.uc -l 0 0
+}
+```
+and called it from `start_service()` (START=26, one second after netifd's
+`packet_steering` at 25) and from `reload_service()` (`network` is a reload
+trigger). QSDK parks steering when NSS owns the data path; on this box ECM
+excludes `wwan*`/`rmnet*` (patch 0027) and the LAN/WiFi path still benefits
+from per-queue CPU assignment, so parking it only cost throughput.
+The fix is not "turn it on harder". `92-byte-steering` was already one-shot
+and deletes itself, and a whiteout in the preserved overlay hides the next
+image's copy, so it cannot repair an upgrade either. Two durable changes:
+1. `apply_preset()` rewrites the ECM function to `apply_packet_steering()`,
+   which *reads* `network.@globals[0].packet_steering` (default 1) and
+   `steering_flows`, then runs `packet-steering.uc` exactly like netifd does.
+   No `uci set`, no `commit`, no `del` - one writer, `/etc/config/network`.
+2. `/etc/init.d/byte-steering` (START=24) ships
+   `files/etc/rc.d/S24byte-steering` in the squashfs, so it runs on every boot
+   even though `/etc/rc.local` is in `keep.d` and is the *old* copy after an
+   upgrade. It repairs `0`/unset back to `1`, leaves a deliberate `2`
+   ("Enabled (all CPUs)") alone, re-asserts `steering_flows=32768`, and commits
+   only when something changed.
+`packet_steering=1` (not 2) keeps one queue/NAPI thread per CPU, which matches
+NSS/ath11k's per-queue model; 2 puts every queue on all four CPUs and only pays
+off when a single queue carries most of the load. `steering_flows=32768` is the
+same size as `net.core.rps_sock_flow_entries`, so RFS is not clamped.
+`steering_flows` is re-asserted on every boot because `byte-affinity` sizes its
+RFS table for that value; a `packet_steering` of `0` is treated as the ECM
+regression, not as a preference.
+Gates: `disable_packet_steering` and `packet_steering=0` must be absent from
+the feed init, `apply_packet_steering` must be present, `byte-steering` must be
+executable with `START=24`, the `S24` symlink must exist, and the image network
+config must still carry both options.
 
+### QModem voice on the phone port: why the feed pin is `main`, not a tag
+SIP needs three packages that only exist in QModem 3.4: `qmodem-voip` (modem
+audio), `qmodem-sipd` (SIP transport) and `luci-app-qmodem-voip`. The 3.4 line
+has no plain `v3.4.0` tag; the newest tag is `v3.4.0_rc3.1` and its
+`application/voipd/files/usr/share/qmodem/modem_supports.json` lists exactly
+one modem (RM520N-GL). AW1000 voice is `FUjr/QModem#290` on `main`: it adds
+```json
+{"model": "RG500Q-EA", "firmware": "RG500QEAAAR13A01M4G", "usb_id": "2c7c:0800",
+ "adb_unlock": false,
+ "audio": {"method": "pcm_socket", "socket_path": "/var/run/fxsd/pcm.sock", ...}}
+```
+so `qmodem_voip` attaches to `fxsd`'s PCM socket instead of driving the modem's
+serial PCM port itself, and `fxsd` (0.7.0, driver 0.3.0 - both already in the
+image) hands it the line. On the tag pin there is no matching profile, so the
+daemon starts and then rejects every call: a package bump that looks harmless
+silently kills the feature. Gates therefore assert `QMODEM_VERSION >= 3.4.0`,
+that the profile file contains `RG500Q-EA` and `pcm_socket`, and that the
+`byte-voip` service and its `S19` symlink exist.
+
+Three build-level consequences that are easy to miss:
+
+1. `ubus-at-daemon` takes its version from `feeds/qmodem/version.mk`
+   (`PKG_VERSION:=$(QMODEM_VERSION)`), so "at-daemon 3.4.0 or newer" is a pin
+   property, not a package choice. `3.4.0_rc3` is what `main` reports; it sorts
+   after `3.4.0` in the version comparison, but it *is* a pre-release - upstream
+   lists it as "not recommended as production firmware". That is the trade-off
+   accepted for the feature; the fallback is turning SIP off, which leaves the
+   RJ11 path untouched.
+2. `qmodem-voip` needs `alsa-lib`, and `alsa-lib` depends on `kmod-sound-core`.
+   The AW1000 kernel ships `CONFIG_SOUND=n`, so selecting the package flips the
+   kernel symbol and rebuilds `soundcore.ko` (~10 KB). It cannot be installed on
+   demand: a kmod built later would have to match this exact kernel.
+3. 3.4.0 builds `libqvoice_media_gate.so` for the *modem's* 32-bit ARM CPU with
+   `clang --target=arm-linux-gnueabihf -march=armv7-a -fuse-ld=lld` and pushes
+   it over adb. RG500Q-EA has `adb_unlock: false` and never uses it, but the
+   build step still runs, so host `clang` + `lld` must exist (CI installs both).
+   Do not replace it with `$(TARGET_CC)`: that produces aarch64 and the file is
+   meant for the modem side.
+
+Two other changes the 3.4.0 bump forced:
+
+- The dial/driver menu options moved from `luci-app-qmodem` to `qmodem`:
+  `PACKAGE_luci-app-qmodem_INCLUDE_vendor-qmi-wwan` is now
+  `PACKAGE_qmodem_INCLUDE_vendor-qmi-wwan` (same for the TOM quectel-CM
+  choice). defconfig drops an unknown symbol without a warning, so a stale
+  preset line would silently fall back to the *generic* QMI driver - the exact
+  setup that races `qmi_wwan_q` for `/dev/cdc-wdm0` (see the preset comment).
+  A gate forbids any `CONFIG_PACKAGE_luci-app-qmodem_*` line now.
+- `luci-app-qmodem-sms` depends on `sms-forwarder-next`, which declares
+  `PKG_CONFLICTS:=sms-forwarder` and vice versa. The preset shipped
+  `sms-forwarder`; with both selected the image does not assemble. The old
+  package is gone from the preset and a gate keeps it out. `qmodem-smsd`
+  (event-driven SMS service, new in 3.4.0) plus `qmodem-settings`,
+  `libqmodem-sms` and `libsqlite3` come in with it.
+
+`/etc/init.d/byte-voip` (START=19, before `qmodem_init` at 80) repairs the two
+things that are *not* package defaults on an upgraded unit:
+
+- `qmodem.<section>.use_ubus=1`. `fxsd` and `qmodem_voip` both drive the modem
+  through `ubus-at-daemon`; with the option at `0` the AT port goes to whoever
+  opens it first and voice logs `AT transport failed` while the RJ11 line looks
+  healthy. Unset sections are set to `1` (LuCI's default), an explicit `0` is
+  left alone but logged when SIP is on.
+- the fw4 include `firewall.qmodem_voip_sipd`. `qmodem-sipd` registers it from
+  `/etc/uci-defaults/90-qmodem-sip-firewall`, and uci-defaults delete
+  themselves; after a sysupgrade that deletion is a whiteout over the new
+  image's copy, so the include never comes back and inbound SIP/RTP is dropped
+  by fw4 with nothing in the log. Same failure mode as `92-byte-steering`, same
+  fix: ship the repair in the squashfs with its own rc.d symlink.
+
+SIP is configured off (`qmodem_sip.inbound.enabled=0`, `fxs.main.sip=0`) even
+though the packages ship. Turning it on is two clicks; shipping an enabled SIP
+listener with an empty password is not something a firmware should decide.
+
+What the built image was checked to contain (local build, `unsquashfs -l` on
+`root.squashfs`): `etc/init.d/byte-voip` + `etc/rc.d/S19byte-voip`,
+`etc/init.d/byte-steering` + `S24`, `etc/init.d/qmodem_voip`,
+`etc/init.d/qmodem_voip_sipd` + `S99`, `usr/sbin/qmodem_voip_sipd`,
+`usr/share/qmodem_voip/module/libqvoice_media_gate.so` (32-bit ARM EABI5),
+`lib/modules/6.12.94/soundcore.ko`, `usr/share/qmodem/modem_supports.json` with
+the `RG500Q-EA`/`pcm_socket` profile, and `/etc/config/qmodem_sip` with both
+directions `enabled '0'`. `/etc/config/network` still carries
+`packet_steering '1'` / `steering_flows '32768'`, `/etc/config/fxs` `sip '0'`,
+and the image's `qca-nss-ecm.init` is the patched reader (no
+`disable_packet_steering`, `apply_packet_steering` called from both start and
+reload).
+
+### LuCI pages
 #### modeminfo — shared cache, SA support
 
 The vendored `luci-app-modeminfo` does not poll the modem. `/usr/sbin/byte-status-cache`
@@ -705,6 +853,12 @@ Two fixes to the vendored copy, both silent failures otherwise:
 - **ECM state device** availability at boot is assumed from source, not seen.
 - **Recovery path unconfirmed** on the target unit (no serial session yet), so
   no image has been flashed from this branch.
+- **SIP ringing and audio not yet verified on hardware.** Build-level evidence
+  only: `ubus call qmodem_voip status`, `ubus call qmodem.sip status`,
+  `logread | grep -E 'fxsd|qmodem_voip'`, and a real inbound call answered on
+  the RJ11 phone and on a Linphone/Zoiper client (PCMA), plus a call answered
+  on SIP while the RJ11 phone still rings. Needs a SIM with VoLTE registered
+  (`AT+QCFG="ims"` → `1,1`) and `AT+QCFG="call_control"` at `0,0`.
 
 ## Credits
 
@@ -724,6 +878,51 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-03
+- **SIP calling on the AW1000 phone port, and QModem moved to 3.4.0_rc3.**
+  The qmodem feed pin moves from the `v3.3.0` tag to `b4effcda` on `main`,
+  because AW1000 voice support (`FUjr/QModem#290`, RG500Q-EA over
+  `/var/run/fxsd/pcm.sock`) only exists there: the `v3.4.0_rc3.1` tag's
+  `modem_supports.json` has no RG500Q-EA entry, so `qmodem_voip` would start and
+  refuse every call. That pin is also what brings `ubus-at-daemon` to
+  `3.4.0_rc3`, the >= 3.4.0 that QModem voice and fxsd's SIP mode require (the
+  version comes from `feeds/qmodem/version.mk`). The image now ships
+  `qmodem-voip`, `qmodem-sipd`, `luci-app-qmodem-voip`, the `qmodem-smsd` stack
+  that `luci-app-qmodem-sms` depends on since 3.4.0, plus `alsa-lib`,
+  `kmod-sound-core`, pjproject and `adb`. `sms-forwarder` is dropped and
+  `sms-forwarder-next` takes its place: the two declare `PKG_CONFLICTS` on each
+  other, so the image would not assemble with both. Service state stays off by
+  default; `/etc/init.d/byte-voip` (START=19) only prepares what an upgraded
+  unit cannot repair by itself (see *Engineering log → QModem voice*).
+  **Cost, measured on this build:** sysupgrade image `33,362,729` →
+  `35,328,809` bytes (+1.87 MiB), rootfs squashfs `30,058,085` bytes. The
+  additions, uncompressed: `libstdcpp6` 2.06 MB (`adb`), `alsa-lib` 1.31 MB,
+  `libmbedtls21` 720 KB, pjproject 1.82 MB total (libpj 260 KB, libpjlib-util
+  180 KB, libpjmedia 450 KB, libpjnath 220 KB, libpjsip 410 KB,
+  libpjsip-simple 120 KB, libpjsip-ua 140 KB), `kmod-sound-core` 500 KB,
+  `libsoxr` 130 KB, qmodem voice/sms daemons ~360 KB. Removed: `qmodem-seal`
+  30 KB, `sms-forwarder` 50 KB, `libsodium` 280 KB. pjproject's dependency
+  chain is why the whole set is required: `qmodem-sipd` links
+  `libpjsip-ua` → `libpjsip-simple` + `libpjmedia` → `libpjnath`, and
+  `qmodem-voip` links `-lasound` even on the RG500Q (which uses the fxsd PCM
+  socket, not ALSA). Dropping `alsa-lib`/`adb` would mean patching the
+  upstream packages - a fork, not a build option.
+- **Packet steering stays on: `qca-nss-ecm` no longer owns the switch.** On the
+  flashed 1.2.30 unit `network.@globals[0].packet_steering` read `0` and
+  `steering_flows` was absent, while the image's `/etc/config/network` said
+  `1`/`32768`. ECM's init runs at START=26 (and on every `network` reload) and
+  called `disable_packet_steering()` - `uci set ...=0`, `uci del
+  ...steering_flows`, then `packet-steering.uc -l 0 0`. The one-shot
+  `92-byte-steering` had already deleted itself, so nothing put the values
+  back. `apply_preset()` now rewrites that ECM block into a reader that
+  re-applies whatever UCI says (default 1) and never writes UCI, and the build
+  fails if `disable_packet_steering` or `packet_steering=0` returns. A new
+  `/etc/init.d/byte-steering` (START=24, before netifd's `packet_steering` at
+  25) ships its own `S24` rc.d symlink, because `/etc` is preserved on
+  sysupgrade and neither the uci-defaults script nor `/etc/rc.local` can repair
+  an upgraded unit. Gates assert the ECM rewrite, the service's order and
+  values, the symlink, and the image's `packet_steering '1'` /
+  `steering_flows '32768'`. Details in *Engineering log -> Packet steering has
+  one owner*.
 - **PassWall v1 is published on demand, never installed.** `luci-app-passwall`
   (v1, Lua, `4.66-8`) is vendored at `packages/luci-app-passwall` and built by
   `build-ondemand-packages.sh`, so the ipk ships in the opkg repo while the
@@ -793,7 +992,9 @@ Review both before republishing an image built here.
   Disabled* and `byte-selfcheck` logged `steering.enabled 1 0` on every boot.
   `92-byte-steering` re-asserts `packet_steering=1` and `steering_flows=32768`
   once, logs the change and restarts the service; `rps_sock_flow_entries` and
-  the RFS flow table depend on both.
+  the RFS flow table depend on both. Necessary but not sufficient: ECM
+  re-disabled it after the script had run, see the newest entry and
+  *Engineering log -> Packet steering has one owner*.
 - **Branding: the header says BYTE and wears the B mark.** The theme prints the
   hostname as the wordmark, so the hostname became `BYTE` (was `BYTE_by_ACE`);
   `91-byte-identity` migrates upgraded units and leaves a self-chosen hostname
@@ -965,6 +1166,13 @@ Review both before republishing an image built here.
   the rewrite hard-fails the build if it does not apply. Verified on the unit:
   `ubus call qmodem get_connect_status '{"config_section":"4_1"}'` now returns
   `{"connection_status": "Yes"}` and `base_info` shows `Connect Status: Yes`.
+  **3.4.0 upstreamed the fix**, so the patch is now conditional: the rewrite
+  only runs when the function body does not already contain `tr ','`
+  (upstream: `tr -d '"' | tr ',' '\n'`). On the pinned feed the patch is
+  skipped and the build logs `upstream get_cgpaddr_ipv4 already splits the
+  field`; the marker assert only applies to the version BYTE wrote, so a later
+  upstream refactor cannot quietly reintroduce the bug without failing the
+  build against a body that still looks stock.
 - **Build fix (CI-only): duplicate `luci-app-netstat` dropped its i18n
   package.** The vendored app was de-duplicated against the `feeds/luci` copy
   only, but the app also lives in `feeds/dotycat` — whose copy has no `po/`.
