@@ -325,6 +325,32 @@ apply_preset() {
         exit 1
     }
 
+    # qmodem TTL (luci-app-qmodem-ttlfw4). Upstream's implementation is NOT
+    # BYTE's: it matches only `iifname br-lan`, so router-originated packets
+    # leave with the host TTL; it defines its own `chain postrouting`, and fw4
+    # already owns that hook, so the firewall reload can fail and the rewrite
+    # silently stops; it stops qca-nss-ecm; and it ships enable=0.
+    #
+    # files/ already overrides what runs at boot, but the *package* kept the
+    # upstream script, so `opkg upgrade luci-app-qmodem-ttlfw4` put it back and
+    # the unit silently lost NSS and the router-originated rewrite. Patch the
+    # feed package as well, so the ipk this build publishes and the image carry
+    # the same code.
+    local qttl="$PWD/feeds/qmodem/luci/luci-app-qmodem-ttlfw4" qpair
+    if [ ! -d "$qttl" ]; then
+        echo -e "${BOLD_RED}qmodem TTL PACKAGE NOT FOUND: $qttl${RESET}"
+        exit 1
+    fi
+    for qpair in \
+        "etc/init.d/qmodem_ttl:root/etc/init.d/qmodem_ttl" \
+        "etc/config/qmodem_ttl:root/etc/config/qmodem_ttl" \
+        "www/luci-static/resources/view/qmodem/ttl.js:htdocs/luci-static/resources/view/qmodem/ttl.js"; do
+        cp -f "files/${qpair%%:*}" "$qttl/${qpair##*:}" || {
+            echo -e "${BOLD_RED}qmodem TTL: cannot patch $qttl/${qpair##*:}${RESET}"
+            exit 1
+        }
+    done
+    echo -e "${BOLD_GREEN}qmodem TTL PACKAGED AS BYTE (oifname wwan*, NSS kept)${RESET}"
     # qca-nss-ecm is enabled in the image (see preset). Its bonding front end
     # must be compiled out: ecm_bond_notifier.c registers 'struct bond_cb' /
     # bond_register_cb(), which are QSDK kernel additions that do not exist in
@@ -1007,6 +1033,27 @@ ci_check_packages() {
     # ships the wrong advice.
     [ -f "$repo_root/files/www/luci-static/resources/view/qmodem/ttl.js" ] || \
         missing="$missing ttl-luci-override"
+    # ...and the *package* must carry the same code, or an `opkg upgrade
+    # luci-app-qmodem-ttlfw4` puts upstream's script back: br-lan-only match,
+    # its own postrouting chain, qca-nss-ecm stopped, enable=0. apply_preset
+    # copies the three files into the feed package; assert they really landed
+    # and that the packaged script still has no ECM stop.
+    local qttl="feeds/qmodem/luci/luci-app-qmodem-ttlfw4" qpair
+    for qpair in "etc/init.d/qmodem_ttl:root/etc/init.d/qmodem_ttl" \
+                 "etc/config/qmodem_ttl:root/etc/config/qmodem_ttl" \
+                 "www/luci-static/resources/view/qmodem/ttl.js:htdocs/luci-static/resources/view/qmodem/ttl.js"; do
+        cmp -s "$repo_root/files/${qpair%%:*}" "$qttl/${qpair##*:}" || \
+            missing="$missing qmodem-ttl-package(${qpair##*:} not BYTE's)"
+    done
+    grep -q 'byte_ttl' "$qttl/root/etc/init.d/qmodem_ttl" 2>/dev/null || \
+        missing="$missing qmodem-ttl-package(no byte_ttl chain)"
+    if grep -q 'qca-nss-ecm stop' "$qttl/root/etc/init.d/qmodem_ttl" 2>/dev/null; then
+        forbidden="$forbidden qmodem-ttl-package(stops-ecm)"
+    fi
+    if grep -q '99-reset-ttl-from-br-lan' "$qttl/root/etc/init.d/qmodem_ttl" 2>/dev/null &&
+        ! grep -q 'NFT_LEGACY' "$qttl/root/etc/init.d/qmodem_ttl" 2>/dev/null; then
+        forbidden="$forbidden qmodem-ttl-package(writes-upstream-include)"
+    fi
     # Offload policy lives in the same service: fw4's flowtable is forced to
     # flow_offloading=0 in every state (TTL on and off, NSS installed or not),
     # because it skips the mangle chain after the first packet. A regression to

@@ -581,6 +581,28 @@ offload, which is no longer what happens. The UCI schema, field names and
 datatypes are identical, so `luci-app-qmodem-ttlfw4` remains the owner of the
 page and of `/etc/config/qmodem_ttl`.
 
+#### qmodem's TTL is not BYTE's TTL — the package is patched, not just overlaid
+
+Upstream `luci-app-qmodem-ttlfw4` ships an implementation that is wrong for this
+firmware in three separate ways:
+
+| | upstream (feed) | BYTE (`files/`) |
+|---|---|---|
+| match | `iifname "br-lan"` | `oifname "wwan*" / "rmnet*"` |
+| router-originated traffic | not rewritten (host TTL leaks) | rewritten |
+| chain | `chain postrouting` — the name/hook fw4 already generates, so a reload can fail and TTL silently stops | own `chain byte_ttl` |
+| NSS/ECM | `qca-nss-ecm stop`, SFE modules unloaded | never stopped; modem egress is excluded inside ECM (patch `0027`) |
+| default | `enable '0'` | `enable '1'` |
+
+`files/` is copied over the package rootfs at image assembly, so the running
+system already had the BYTE version. The *package* did not: an
+`opkg upgrade luci-app-qmodem-ttlfw4` (or a reinstall from the self-hosted repo)
+restored upstream's script, and the unit silently lost NSS offload and the
+router-originated rewrite. `apply_preset` now copies the three files into
+`feeds/qmodem/luci/luci-app-qmodem-ttlfw4/{root,htdocs}/`, so the published ipk
+and the image carry the same code, and a gate fails the build if the packaged
+copy differs from `files/` or stops ECM again.
+
 ### Local build verification (CI is the release path, not the debugger)
 
 A GitHub run costs about three hours and stops at the first failing package, so
@@ -644,6 +666,17 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-03
+- **qmodem's TTL is replaced at the package level, not only in the image.**
+  Upstream `luci-app-qmodem-ttlfw4` matched `iifname br-lan` (router-originated
+  packets kept the host TTL), wrote its own `chain postrouting` (fw4 generates
+  that name itself, so a reload can fail and the rewrite silently stops), ran
+  `qca-nss-ecm stop`, and shipped `enable '0'`. `files/` already replaced what
+  runs at boot, but the package still carried the upstream copy - so an
+  `opkg upgrade luci-app-qmodem-ttlfw4` reinstalled it and the unit lost NSS
+  and the router-originated rewrite without saying anything. `apply_preset`
+  now patches the three package files (init script, `/etc/config/qmodem_ttl`,
+  `ttl.js`) so the published ipk and the image match, and a gate fails if the
+  packaged script diverges or stops ECM again.
 - **Releases are named after the build, not "FINAL".** The publish step had a
   hardcoded tag (`BYTE_by_ACE-FINAL-...`) and title (`BYTE by ACE — FINAL`), so
   every build landed under the same name regardless of what it contained. Tag,
