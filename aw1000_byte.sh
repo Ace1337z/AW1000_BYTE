@@ -586,10 +586,26 @@ PY
     # to https and a redirect chain is one more way for the fetch to fail.
     local ndm="$PWD/feeds/qmodem/application/ndisc6/Makefile"
     if [ -f "$ndm" ]; then
-        sed -i -e 's|^PKG_VERSION:=.*|PKG_VERSION:=1.0.8|' \
-            -e 's|^PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=https://www.remlab.net/files/ndisc6|' \
-            -e 's|^PKG_MD5SUM:=.*|PKG_MD5SUM:=335a810a0180d36a1e2a5a81c425e2d6|' \
-            -e '/^TARGET_CFLAGS += -std=c99$/d' "$ndm"
+        # The feed copy moved from PKG_MD5SUM to PKG_HASH when OpenWrt renamed
+        # the variable tree-wide. A sed that only rewrites PKG_MD5SUM then
+        # matches nothing, the assertion below fails, and the build dies with
+        # "ndisc6: could not pin 1.0.8" before compiling anything (run
+        # 41704830850). Rewrite by key instead, and emit exactly one PKG_HASH
+        # line right after the URL so it is defined before package.mk is pulled
+        # in. The SHA256 is the tarball remlab serves for 1.0.8.
+        ndisc6_hash=1f2fb2dc1172770aa5a09d39738a44d8b753cc5e2e25e306ca78682f9fea0b4f
+        awk -v h="$ndisc6_hash" '
+            /^PKG_VERSION:=/ { print "PKG_VERSION:=1.0.8"; next }
+            /^PKG_SOURCE_URL:=/ {
+                print "PKG_SOURCE_URL:=https://www.remlab.net/files/ndisc6"
+                print "PKG_HASH:=" h
+                next
+            }
+            /^PKG_MD5SUM:=/ { next }
+            /^PKG_HASH:=/ { next }
+            /^TARGET_CFLAGS \+= -std=c99$/ { next }
+            { print }
+        ' "$ndm" >"$ndm.tmp" && mv "$ndm.tmp" "$ndm"
         # The feed's two patches are 1.0.2-only and cannot apply to 1.0.8:
         #   100-favor_bsd  adds #define __FAVOR_BSD next to _BSD_SOURCE in
         #     src/trace-{tcp,udp}.c; 1.0.8 rewrote those files (C11 alignas) and
@@ -600,20 +616,20 @@ PY
         # Neither is needed: 1.0.8 builds clean against aarch64 musl (checked
         # with a musl-cross toolchain), so drop the whole directory.
         rm -rf "$(dirname "$ndm")/patches"
-        # `TARGET_CFLAGS += -std=c99` also has to go: 1.0.8 uses `alignas` code
-        # (src/trace-udp.c, src/trace-tcp.c) which is C11, and building it as
-        # c99 fails with "expected expression before 'struct'". The toolchain
-        # default (gnu17) builds it.
+        # `TARGET_CFLAGS += -std=c99` is removed by the awk above because
+        # 1.0.8 uses `alignas` code (src/trace-udp.c, src/trace-tcp.c) which is
+        # C11; the toolchain default (gnu17) builds it.
         if grep -q '^TARGET_CFLAGS += -std=c99$' "$ndm"; then
             echo -e "${BOLD_RED}ndisc6: c99 flag still present${RESET}"
             exit 1
         fi
         if ! grep -q '^PKG_VERSION:=1\.0\.8$' "$ndm" || \
-                ! grep -q '^PKG_MD5SUM:=335a810a0180d36a1e2a5a81c425e2d6$' "$ndm"; then
+                ! grep -q "^PKG_HASH:=${ndisc6_hash}$" "$ndm" || \
+                ! grep -q '^PKG_SOURCE_URL:=https://www\.remlab\.net/files/ndisc6$' "$ndm"; then
             echo -e "${BOLD_RED}ndisc6: could not pin 1.0.8${RESET}"
             exit 1
         fi
-        echo -e "${BOLD_GREEN}ndisc6: 1.0.2 -> 1.0.8 (1.0.2 answered 410)${RESET}"
+        echo -e "${BOLD_GREEN}ndisc6: 1.0.2 -> 1.0.8, PKG_HASH pinned (1.0.2 answered 410)${RESET}"
     fi
     # A patch directory is only applied if Build/Prepare actually calls
     # $(Build/Patch). qmi_wwan_q overrides Build/Prepare (copy src/ flat into
@@ -1047,8 +1063,13 @@ ci_check_packages() {
     if [ -f "$ndm" ]; then
         grep -q '^PKG_VERSION:=1\.0\.8$' "$ndm" || \
             missing="$missing ndisc6-1.0.8(1.0.2 is 410 upstream)"
-        grep -q '^PKG_MD5SUM:=335a810a0180d36a1e2a5a81c425e2d6$' "$ndm" || \
-            missing="$missing ndisc6-md5(pinned)"
+        # PKG_MD5SUM was renamed PKG_HASH upstream; the feed copy may carry
+        # either spelling, apply_preset() normalises it to a SHA256 PKG_HASH.
+        grep -qE '^PKG_HASH:=1f2fb2dc1172770aa5a09d39738a44d8b753cc5e2e25e306ca78682f9fea0b4f$|^PKG_MD5SUM:=335a810a0180d36a1e2a5a81c425e2d6$' "$ndm" || \
+            missing="$missing ndisc6-hash(pinned)"
+        if grep -q '^PKG_MD5SUM:=' "$ndm"; then
+            forbidden="$forbidden ndisc6-md5-key(PKG_MD5SUM renamed PKG_HASH upstream)"
+        fi
         grep -q '^PKG_SOURCE_URL:=https://www\.remlab\.net/files/ndisc6$' "$ndm" || \
             missing="$missing ndisc6-url(https, no redirect)"
         # 1.0.2-era patches cannot apply to 1.0.8 and the c99 flag breaks its

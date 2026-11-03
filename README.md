@@ -430,11 +430,18 @@ No more mirrors to try - giving up.
 ```
 (run `41400987301`, after ~3 h of compiling).
 `apply_preset()` now rewrites the feed `Makefile` in place to `PKG_VERSION:=1.0.8`
-(the release Debian itself tracks), `PKG_MD5SUM:=335a810a0180d36a1e2a5a81c425e2d6`,
-and `PKG_SOURCE_URL:=https://www.remlab.net/files/ndisc6` — https on purpose,
-because the http URL is a `301` and every extra redirect is another way for a
-CI fetch to fail. Bumping in place is cheaper than vendoring the tarball: the
-package is autotools with a shipped `configure`.
+(the release Debian itself tracks), `PKG_SOURCE_URL:=https://www.remlab.net/files/ndisc6`
+— https on purpose, because the http URL is a `301` and every extra redirect is
+another way for a CI fetch to fail — and a pinned `PKG_HASH`
+(SHA256 `1f2fb2dc1172770aa5a09d39738a44d8b753cc5e2e25e306ca78682f9fea0b4f`).
+The hash key itself moved: OpenWrt renamed `PKG_MD5SUM` to `PKG_HASH` tree-wide
+and the qmodem feed copy followed. A sed that rewrites `PKG_MD5SUM:=` then
+matches nothing, which is exactly how run `41704830850` died with
+`ndisc6: could not pin 1.0.8` before compiling anything. The rewrite is
+key-based now (`awk`, one `PKG_HASH` line right after `PKG_SOURCE_URL`, any
+`PKG_MD5SUM` line dropped so package.mk does not see two hashes), so it works
+with either spelling. Bumping in place is cheaper than vendoring the tarball:
+the package is autotools with a shipped `configure`.
 The version bump alone was not enough (run `41438049720`, ~3 h again), because
 the feed copy also carries two 1.0.2-only patches and a `-std=c99` flag:
 - `100-favor_bsd.patch` inserts `#define __FAVOR_BSD 1` next to `_BSD_SOURCE`
@@ -455,8 +462,10 @@ line alongside the version bump. Verified locally by cross-building
 musl, and `make install --prefix=/usr` puts them at `/usr/bin/ndisc6`,
 `/usr/bin/rdisc6`, `/usr/sbin/rdnssd` — the paths the feed's install rules
 expect.
-CI asserts the version, the hash, the https URL, that `patches/` is gone and
-that the c99 line is gone, since a feed bump would drag all three back.
+CI asserts the version, the `PKG_HASH` (or the legacy `PKG_MD5SUM` spelling,
+which is then forbidden so the tree cannot end up with both), the https URL,
+that `patches/` is gone and that the c99 line is gone, since a feed bump would
+drag all three back.
 ### qmi_wwan_q and the missing `rmnet_nss_callbacks`
 The vendor modem driver `quectel_QMI_WWAN` (qmodem feed, `qmi_wwan_q` 1.5)
 defines `CONFIG_QCA_NSS_DRV` unconditionally when the target pinctrl is
@@ -1049,6 +1058,17 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-04
+- **Build fix: ndisc6 is pinned by `PKG_HASH` now.** OpenWrt renamed
+  `PKG_MD5SUM` to `PKG_HASH` and the qmodem feed copy followed, so the
+  `sed`-based pin in `apply_preset()` matched no line and run `41704830850`
+  stopped at `ndisc6: could not pin 1.0.8` - before compiling anything. The
+  rewrite is key-based (`awk`): version 1.0.8, https URL, exactly one SHA256
+  `PKG_HASH` right after the URL, any `PKG_MD5SUM` line dropped (two hashes is
+  an error in package.mk), c99 flag dropped, `patches/` removed. The CI gate
+  accepts either spelling but forbids the MD5 key, so a tree carrying both
+  cannot pass. Verified locally by compiling the package and the full image
+  (`ndisc6 - 1.0.8-r1` in the manifest). **Size:** rootfs squashfs `30,054,417`
+  → `30,054,513` bytes (+96); sysupgrade unchanged at `35,318,569`.
 - **All four cores, no SQM: RPS/RFS kept, NAPI deferral added, XPS told the
   truth.** The modem's xhci interrupt cannot leave one core (the kernel
   collapses `effective_affinity`), so the work moved instead of the IRQ:
