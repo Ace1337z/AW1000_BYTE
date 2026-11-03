@@ -66,6 +66,10 @@ sysupgrade -n BYTE_by_ACE-<version>-qualcommax-ipq807x-arcadyan_aw1000-squashfs-
   (`qmodem_sip.inbound.enabled=0`, `fxs.main.sip=0`): turn it on in *QModem →
   VoIP* and *Services → Phone (RJ11) → Settings*. An open SIP listener with an
   empty password must not exist on every unit by default.
+- **IPv6 that cannot hang the LAN** — WAN IPv6 is autodetected (qmodem deletes
+  `wanv6` on every redial), probed with real traffic, and demoted to IPv4 only
+  while it is broken; it restores itself when the carrier starts working. LAN
+  RA/DHCPv6 settings come back exactly as the owner had them.
 - **WiFi** — NSS-accelerated 2.4/5 GHz; both radios up on first boot.
 - **UI** — Footstrap 0.14.19 only (no second theme ships), BYTE logo and icons,
   a BYTE panel under *Tools* (AdGuard Home ↔ PassWall2 DNS wiring with a live
@@ -241,20 +245,37 @@ nss/                       NSS sources + kernel patches
   NSS driver queues, not from a flow-offload shortcut.
 - **No hardware flow offload.** `flow_offloading_hw` stays `0` — `nss-dp` does
   not implement it, so fw4 would accept a `1` and silently ignore it.
-- **WAN IPv6 is health-checked and demoted when it cannot pass traffic.**
-  `wanv6` (`proto=dhcpv6`, `ifname=@wan`) completes the DHCPv6 exchange on this
-  carrier - global `/64`, delegated `/64`, both ISP resolvers - but no unicast
-  IPv6 survives past the modem: the modem's own gateway
-  (`fe80::ad53:8745:d045:ba03`) answers `ping6`, while the ISP resolver behind
-  it does not, `curl -6` returns nothing, and `/proc/net/snmp6` shows
-  `Ip6OutRequests` climbing with `Ip6InReceives` flat (IPv4 on the same bearer
-  is fine). `AT+QMAP="wwan"` reports no IPv6 on the mux
-  (`"IPV6","0:0:0:0:0:0:0:0"`), so the drop is modem/carrier side, not netifd.
-  `/usr/libexec/byte-v6-check` therefore probes IPv6 with a real TCP handshake
-  after every `wan`/`wanv6` ifup and on boot: on failure it writes
-  `gai.conf`, withdraws the br-lan ULA and sets `dhcp.lan.ra=disabled` /
-  `dhcpv6=disabled` so clients never receive a prefix they cannot use; on
-  success it restores all three. A carrier that does serve IPv6 is left alone.
+- **WAN IPv6 is autodetected, measured, and demoted only while it is broken.**
+  `/usr/libexec/byte-v6-check` recreates `wanv6` (`proto=dhcpv6`,
+  `device=@wan`) whenever qmodem has deleted it on a redial, then retries
+  `ifup wanv6` until it settles. Connectivity is measured with real traffic,
+  never "an address exists": ICMPv6 echo to two anycast resolvers
+  (`2001:4860:4860::8888`, `2606:4700:4700::1111`) plus an HTTP GET over IPv6
+  (`uclient-fetch -6`) for networks that filter ICMPv6. Every probe uses a
+  numeric address, so a broken DNS server cannot look like a broken uplink. On
+  PD-only carriers (delegated prefix, no global address on the WAN netdev) the
+  ICMPv6 probe is source-bound to the LAN address that came from the delegated
+  prefix - the only way to tell "the prefix is routed" from "there is no source
+  address". Two consecutive agreeing rounds are required before anything
+  changes.
+  On this carrier (`wanv6` completes the DHCPv6 exchange - global `/64`,
+  delegated `/64`, both ISP resolvers - but nothing past the modem answers: the
+  modem's own gateway `fe80::ad53:8745:d045:ba03` replies while the ISP
+  resolver behind it does not, `Ip6OutRequests` climbs with `Ip6InReceives`
+  flat, and `AT+QMAP="wwan"` reports no IPv6 on the mux
+  (`"IPV6","0:0:0:0:0:0:0:0"`)) the verdict is demotion:
+  `dhcp.lan.ra`/`dhcpv6` are set to `disabled` so clients stop receiving a
+  prefix they cannot use, `gai.conf` prefers IPv4 for any glibc binary added
+  later, and `unreachable default metric 1` replaces the black hole with an
+  immediate ICMPv6 unreachable. Metric 1 is deliberate: netifd installs its
+  own `::/0` at metric 11 and would otherwise re-open the hole on the next
+  renew. While demoted the check re-probes every 30 s (300 s when healthy) and
+  every interface event kicks it, so as soon as the carrier passes IPv6 the
+  original `dhcp.lan.ra`/`dhcpv6` values come back from `/etc/byte/v6.state`
+  and traffic returns to IPv6 without a reboot. The br-lan ULA is deliberately
+  left alone - it keeps LAN-local IPv6 (router access, PassWall) working, and
+  the fail-fast route is what removes the hang, not the missing ULA. A unit
+  whose owner set `ra=disabled` gets exactly that value back after a restore.
 - **Whoever touches the QMAP mux: it has no link-local unless one is added.**
   `qmi_wwan_q` gives `wwan0_1` the base interface's MAC, so the EUI-64
   link-local the kernel would generate is already owned by `wwan0` and
@@ -687,6 +708,14 @@ and the image's `qca-nss-ecm.init` is the patched reader (no
 `disable_packet_steering`, `apply_packet_steering` called from both start and
 reload).
 
+The IPv6 overlay was checked the same way in the 1.2.32 build:
+`usr/libexec/byte-v6-check` (md5 matches the repo copy), `etc/init.d/byte-v6`
+with `USE_PROCD=1` / `START=98` / `--watch`, `etc/rc.d/S98byte-v6` →
+`../init.d/byte-v6`, `etc/hotplug.d/iface/30-byte-v6` executable, and no
+`95-byte-v6` left anywhere in the image. `odhcpd` is the 2026.06.29 build whose
+`config.c` treats `ra_lifetime=0` as "unset", which is why demotion uses
+`ra=disabled` plus the unreachable default instead of a lifetime-0 RA.
+
 ### LuCI pages
 #### modeminfo — shared cache, SA support
 
@@ -842,8 +871,93 @@ Two fixes to the vendored copy, both silent failures otherwise:
   the dependency keeps them out of the image and still defaults `Xray` on for
   the on-demand build.
 
-### Open items
+### IPv6: autodetect, measure, demote, restore
 
+The first IPv6 implementation shipped a one-shot probe and could not do what
+the feature promised. Four separate defects, all silent:
+
+1. `/etc/init.d/byte-v6` had no `USE_PROCD`, so its `service_triggers()` never
+   ran. `procd_add_reload_trigger "network"` was dead code and the only probe
+   was the one fired ~63 s after boot. A carrier that started serving IPv6 ten
+   minutes later was never noticed, and a carrier that broke later kept
+   advertising a dead prefix until the next reboot.
+2. Demotion wrote `dhcp.lan.ra=disabled` and `dhcpv6=disabled`, but *restore*
+   re-wrote `ra=server` / `dhcpv6=server` from constants. A unit whose owner had
+   deliberately disabled RA got IPv6 forced back on after a single failed
+   probe, and every demotion/restore cycle wrote a different config than the
+   user had.
+3. `has_global_v6()` matched `inet6 2[0-9a-f]`, so a `3fff::/20` address (valid
+   global unicast) counted as "no IPv6", and any PD-only carrier - delegated
+   prefix present, no global address on the WAN netdev - was demoted even when
+   the prefix routed perfectly.
+4. Demotion also flushed the br-lan global addresses and added a bogus
+   `default dev wwan0_1 metric 2048`. The route lost against netifd's own
+   `::/0` at metric 11, so IPv6 traffic still went into the black hole, while
+   the flush broke LAN-local IPv6 and made a restore depend on odhcpd
+   renumbering the LAN.
+
+The rewrite keeps one decision point (`/usr/libexec/byte-v6-check`) and gives
+it three modes: one-shot (manual/fallback), `--watch` (procd service), and
+`--kick` (hotplug and reload). Design points:
+
+- **Autodetect.** `ensure_wanv6()` recreates `network.wanv6` when qmodem has
+  deleted it, and `ifup wanv6` is retried while the interface settles. Every
+  round also re-asserts the MAC-derived link-local on the WAN netdevs, because
+  qmi_wwan_q hands every mux interface the base MAC and odhcp6c cannot send a
+  SOLICIT without a source.
+- **Real connectivity, three probes.** ICMPv6 to two anycast resolvers, then a
+  source-bound ICMPv6 for PD-only carriers, then an HTTP GET over IPv6
+  (`uclient-fetch -6`, numeric URL) for networks that drop ICMPv6. Busybox
+  `nc` is built without `NC_EXTRA`/`NC_110_COMPAT`, so it has no `-w` and no
+  family switch - "TCP handshake with a timeout" is not available there;
+  `uclient-fetch` is, and it is in the image.
+- **PD-only is not a failure.** A delegated prefix with no WAN address is
+  probed from a LAN address that belongs to that prefix. The carrier routes
+  the prefix to the CPE, so replies arrive; without this step every PD-only
+  carrier would look broken.
+- **Debounce.** Two consecutive agreeing rounds.
+- **Demotion is fail-fast, not fail-silent.** `unreachable default metric 1`
+  wins over netifd's `::/0` at metric 11, so both forwarded and
+  router-originated IPv6 get an immediate ICMPv6 unreachable and applications
+  fall back to IPv4 at once. The br-lan addresses are left in place: the ULA
+  is what keeps LAN-local IPv6 working, and a restore that re-adds a prefix
+  captured before the outage can re-add a prefix that no longer exists.
+- **Restore is a snapshot, not a guess.** `/etc/byte/v6.state` records the
+  previous `dhcp.lan.ra` / `dhcp.lan.dhcpv6` including "the key did not
+  exist", and restore puts exactly that back (`uci delete` for an absent key).
+  The state file lives in `/etc`, so a demotion that spans a reboot is still
+  restored correctly.
+- **Cadence.** 300 s while healthy, 30 s while demoted, plus `--kick` from
+  `/etc/hotplug.d/iface/30-byte-v6` and from a procd raw interface trigger.
+  The 95-byte-v6 hotplug runner that started a second one-shot check per ifup
+  is gone: two concurrent uci commits against `dhcp` are not safe, and the
+  watcher already owns the decision.
+
+`odhcpd`'s `ra_lifetime=0` would be the neatest way to withdraw only the
+default route while keeping the LAN prefix advertised, but this odhcpd treats
+`0` as "unset" (`config.c`: `if (ra_lifetime != 0)`), so it cannot express it.
+`ra=disabled` is the honest signal: clients stop being told to use IPv6 at
+all, and the fail-fast route covers the window before their old RA expires.
+
+Verified in a stub harness (fake `uci`/`ip`/`ifstatus`/`ping6`/`wget` driving
+the real script), not on hardware: demote writes the snapshot and the three
+changes; a repeat round does not churn; restore deletes the keys that were
+absent and keeps `ra=disabled` when that was the owner's choice; PD-only with a
+working source-bound probe never demotes; `--kick` starts the service when no
+watcher holds the pidfile. The watcher's first `trap` did not `exit`, so
+`SIGTERM` (procd stop) left it running - fixed to `trap 'exit 0' INT TERM`.
+
+### Open items
+- **IPv6 policy is not verified against a live carrier.** What to check on the
+  unit: `logread | grep byte-v6` shows the watcher line at boot plus one
+  verdict; `ubus call network.interface.wanv6 status` has the same
+  `ipv6-prefix` before and after demotion; `ip -6 route | grep unreachable`
+  shows the metric-1 route only while demoted; `uci get dhcp.lan.ra` returns
+  `disabled` while demoted and the unit's original value after the carrier
+  starts passing traffic; `ping6 -c2 2001:4860:4860::8888` on the router fails
+  immediately (not after 30 s) while demoted. Delete `/etc/byte/v6.state` to
+  simulate a lost snapshot, and reboot while demoted to confirm restore still
+  works across a reboot.
 - **Untested on hardware.** The changes are build-validated only. Needed on a
   spare unit: `logread | grep byte-selfcheck`, `nss-offload status`, and a
   tcpdump on the modem netdev confirming TTL 64 for both forwarded and
@@ -877,7 +991,30 @@ Review both before republishing an image built here.
 
 ## Changelog
 
-### 1.2.x — 2026-11-03
+### 1.2.x — 2026-11-04
+- **IPv6 autodetect, real health check, self-restoring fallback.** The old
+  `byte-v6` service was a one-shot probe whose `service_triggers()` never
+  registered (no `USE_PROCD`), so a failed probe stuck until reboot and a
+  carrier that started working later was never noticed. It is now a procd
+  watcher (`START=98`, respawn, `--watch`) kicked by
+  `/etc/hotplug.d/iface/30-byte-v6` and by a raw `interface.*` trigger;
+  `ensure_wanv6()` recreates `network.wanv6` when qmodem has deleted it and
+  retries `ifup wanv6`. The health check measures traffic, not configuration:
+  ICMPv6 to `2001:4860:4860::8888` and `2606:4700:4700::1111`, a source-bound
+  ICMPv6 probe from the delegated prefix for PD-only carriers, and an HTTP GET
+  over a numeric IPv6 URL (`uclient-fetch -6`; busybox `nc` has no `-w` in this
+  image) for networks that drop ICMPv6. Two consecutive agreeing rounds are
+  required, and while demoted it re-probes every 30 s (300 s when healthy) so
+  IPv6 comes back by itself. Demotion now sets `dhcp.lan.ra`/`dhcpv6` to
+  `disabled`, writes `gai.conf` and installs `unreachable default metric 1` -
+  metric 1 beats netifd's `::/0` at 11, so IPv6 fails immediately instead of
+  blackholing. The br-lan ULA is no longer flushed (it keeps LAN-local IPv6
+  working) and restore replays the *snapshot* in `/etc/byte/v6.state`,
+  including "the key did not exist", so a user's `ra=disabled` is never
+  overwritten. The `95-byte-v6` hotplug one-shot runner is removed; two checks
+  committing uci at once was the race. **Size:** sysupgrade `35,328,809` →
+  `35,318,569` bytes (-10,240), rootfs squashfs `30,058,085` → `30,052,777`
+  bytes (-5,308): two small scripts in, one hotplug script out.
 - **SIP calling on the AW1000 phone port, and QModem moved to 3.4.0_rc3.**
   The qmodem feed pin moves from the `v3.3.0` tag to `b4effcda` on `main`,
   because AW1000 voice support (`FUjr/QModem#290`, RG500Q-EA over
@@ -1073,9 +1210,13 @@ Review both before republishing an image built here.
   gateway is reachable. Above that, IPv6 still does not pass traffic through
   this modem: only the modem's own gateway answers, the ISP resolver behind it
   does not, `Ip6OutRequests` rises with `Ip6InReceives` flat, and
-  `AT+QMAP="wwan"` reports `"IPV6","0:0:0:0:0:0:0:0"`. The existing demotion
-  path (probe, `gai.conf`, ULA withdrawn, LAN RA/DHCPv6 off) is what runs on
-  this carrier. Details in Known limits.
+  `AT+QMAP="wwan"` reports `"IPV6","0:0:0:0:0:0:0:0"`. That is the case the
+  watcher demotes: probe fails twice, `dhcp.lan.ra`/`dhcpv6` go to `disabled`,
+  `gai.conf` prefers IPv4 and `unreachable default metric 1` makes IPv6 fail
+  fast; the br-lan ULA stays. It re-probes every 30 s and restores from
+  `/etc/byte/v6.state` the moment the modem starts passing IPv6. Details in
+  Known limits and *Engineering log → IPv6: autodetect, measure, demote,
+  restore*.
 - **Dashboard: NSS offload card replaced by Storage; bottom tabs and the layout
   editor hidden.** The NSS counter only refreshes while the NSS clock scales
   itself and clock scaling is off here, so the card always read 0. The card now

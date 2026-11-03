@@ -1448,6 +1448,49 @@ ci_check_packages() {
         missing="$missing byte-voip-order(must precede qmodem_init=80)"
     [ -L "$repo_root/files/etc/rc.d/S19byte-voip" ] || \
         missing="$missing byte-voip-symlink(not enabled at boot)"
+    # IPv6 policy: the check must autodetect wanv6, measure real connectivity,
+    # and be reversible. The regressions that matter are all silent on a built
+    # image, so they are asserted here.
+    local bv6="$repo_root/files/usr/libexec/byte-v6-check"
+    [ -x "$bv6" ] || missing="$missing byte-v6-check"
+    grep -q -- '--watch' "$bv6" 2>/dev/null || missing="$missing byte-v6-watch-mode"
+    grep -q -- '--kick' "$bv6" 2>/dev/null || missing="$missing byte-v6-kick-mode"
+    # Autodetect: qmodem deletes network.wanv6 on every redial, so the check has
+    # to be able to recreate it, not just read it.
+    grep -q 'ensure_wanv6()' "$bv6" 2>/dev/null || missing="$missing byte-v6-autodetect"
+    grep -q 'ifup wanv6' "$bv6" 2>/dev/null || missing="$missing byte-v6-ifup-retry"
+    # Real connectivity, not "an address exists": ICMPv6 plus a TCP fallback.
+    grep -q 'ping6 ' "$bv6" 2>/dev/null || missing="$missing byte-v6-probe-icmp"
+    grep -q 'wget -6' "$bv6" 2>/dev/null || missing="$missing byte-v6-probe-tcp"
+    # PD-only carriers must be probed source-bound from the delegated prefix or
+    # a working network gets demoted for lacking a WAN address.
+    grep -qE 'ping6 .*-I ' "$bv6" 2>/dev/null || missing="$missing byte-v6-probe-source-bound"
+    # Fail fast rather than blackhole, and only while demoted.
+    grep -q 'unreachable default metric' "$bv6" 2>/dev/null || \
+        missing="$missing byte-v6-fail-fast-route"
+    # Demotion must be reversible from the snapshot. A hardcoded restore is the
+    # regression: it turned a user's `ra=disabled` into `ra=server`.
+    grep -q 'state_get RA' "$bv6" 2>/dev/null || missing="$missing byte-v6-state-snapshot"
+    if grep -q "uci -q set dhcp.lan.ra='server'" "$bv6" 2>/dev/null; then
+        forbidden="$forbidden byte-v6-hardcoded-restore(RA must come from the snapshot)"
+    fi
+    if grep -q "boot()" "$repo_root/files/etc/init.d/byte-v6" 2>/dev/null; then
+        forbidden="$forbidden byte-v6-init-legacy(non-procd start: triggers never register)"
+    fi
+    grep -q '^USE_PROCD=1$' "$repo_root/files/etc/init.d/byte-v6" 2>/dev/null || \
+        missing="$missing byte-v6-init-procd"
+    grep -q -- '--watch' "$repo_root/files/etc/init.d/byte-v6" 2>/dev/null || \
+        missing="$missing byte-v6-init-watcher"
+    grep -q "^START=98$" "$repo_root/files/etc/init.d/byte-v6" 2>/dev/null || \
+        missing="$missing byte-v6-order(after odhcpd)"
+    [ -L "$repo_root/files/etc/rc.d/S98byte-v6" ] || \
+        missing="$missing byte-v6-symlink(not enabled at boot)"
+    [ -x "$repo_root/files/etc/hotplug.d/iface/30-byte-v6" ] || \
+        missing="$missing byte-v6-hotplug"
+    # The old hotplug handler started a second one-shot check per ifup; with a
+    # watcher in place that races two uci commits.
+    [ -e "$repo_root/files/etc/hotplug.d/iface/95-byte-v6" ] && \
+        forbidden="$forbidden byte-v6-duplicate-hotplug(one-shot runner left behind)"
     # qmodem 3.4.0 moved the dial/driver menu options from luci-app-qmodem to
     # the qmodem package. A leftover PACKAGE_luci-app-qmodem_* line in the
     # preset is dropped by defconfig without a warning, which would silently
