@@ -103,11 +103,14 @@ gate_packages()  {
     local src
     src=$(ls -d "$tree"/build_dir/target-*/linux-qualcommax_ipq807x/qmi_wwan_q-*/qmi_wwan_q.c 2>/dev/null | head -1)
     if [ -n "$src" ]; then
-        if grep -q '#define CONFIG_QCA_NSS_DRV' "$src"; then
-            echo "FAIL $src still defines CONFIG_QCA_NSS_DRV (patch not applied)"
+        if grep -q '^#define CONFIG_QCA_NSS_DRV$' "$src"; then
+            echo "FAIL $src self-defines CONFIG_QCA_NSS_DRV (rmnet_nss_callbacks will be undefined)"
+            bad=1
+        elif ! grep -q '^#ifdef CONFIG_QCA_NSS_DRV$' "$src"; then
+            echo "FAIL $src has no CONFIG_QCA_NSS_DRV guard (NSS hook would be unconditional)"
             bad=1
         else
-            echo "ok   qmi_wwan_q source has the NSS hook removed"
+            echo "ok   qmi_wwan_q guards the NSS hook behind CONFIG_QCA_NSS_DRV (unset here)"
         fi
     fi
     # NSS_DRV_RMNET_ENABLE is a module -D flag, not a kernel symbol: the only

@@ -483,9 +483,21 @@ the chip-to-chip NSS path (`config NSS_DRV_C2C_ENABLE`, `default n`, only
 prompted for ipq806x/ipq807x). An AW1000 has one SoC, so pulling in the C2C
 front end to satisfy a dependency would add code for a topology that does not
 exist. Enabling it was rejected for that reason, not because it fails to build.
-So the NSS hand-off is compiled out in the driver instead
-(`nss/feeds/qmodem/driver/quectel_QMI_WWAN/patches/0001-disable-qca-nss-hook.patch`,
-two `#define CONFIG_QCA_NSS_DRV` lines removed, everything else untouched).
+So the NSS hand-off is compiled out in the driver instead. That used to mean a
+repo patch (`nss/feeds/qmodem/driver/quectel_QMI_WWAN/patches/0001-disable-qca-nss-hook.patch`)
+deleting the two `#define CONFIG_QCA_NSS_DRV` lines. The patch is gone: the
+qmodem pin `b4effcd` rewrote the driver so it no longer defines the symbol at
+all — every use now sits behind `#ifdef CONFIG_QCA_NSS_DRV`, a symbol the kernel
+config never sets, so `nss_cb` stays `NULL` and nothing references
+`rmnet_nss_callbacks`. The patch had nothing left to patch and stopped applying,
+which is how run `41721902711` died 1 h 42 m in:
+```
+Applying .../patches/0001-disable-qca-nss-hook.patch using plaintext:
+patching file qmi_wwan_q.c
+Hunk #1 FAILED at 58.
+Hunk #2 FAILED at 72.
+2 out of 2 hunks FAILED -- saving rejects to file qmi_wwan_q.c.rej
+```
 What is lost: `qmi_wwan_q` normally hands received modem packets to the NSS
 core (`qca_nss_rx_handler` → `nss_cb->nss_tx()`) and creates an NSS context per
 QMAP device. Without it the modem path stays on the host stack. That is also
@@ -496,12 +508,13 @@ existed to lose. LAN/WiFi acceleration (the reason NSS ships) is untouched —
 `nss_rmnet_rx_get_ifnum`.
 The driver keeps its own QMAP implementation (`qmap_mode`/`rx_qmap` module
 params, no `rmnet_data` imports), so `wwan*` netdevs are created exactly as
-before. Verified by building the patched `qmi_wwan_q.ko` against a kernel tree:
-`nm -u qmi_wwan_q.ko | grep rmnet` is empty, and the unpatched source fails
-modpost with the symbol above.
+before. Verified on the built module: `nm -u qmi_wwan_q.ko` has no `nss`
+symbol, and the packaged `qmi_wwan_q.c` is byte-identical to the feed source
+(`cmp`), i.e. nothing was patched.
 
-That first fix did not take, and the reason is worth keeping: **the patch was
-never applied.** `quectel_QMI_WWAN` defines its own `Build/Prepare`
+Two earlier attempts are worth keeping, because both failed for reasons that a
+successful compile would not have caught. **First, the patch was never
+applied.** `quectel_QMI_WWAN` defines its own `Build/Prepare`
 (`mkdir -p $(PKG_BUILD_DIR)` + `$(CP) ./src/* $(PKG_BUILD_DIR)/`) and, unlike
 `Build/Prepare/Default`, it never calls `$(Build/Patch)`. A package that
 overrides `Build/Prepare` and skips that call has an inert `patches/` directory:
@@ -511,23 +524,24 @@ the file is copied into the feed, listed in the repo, and never read. Run
 `patch -p1` directly, which validated the *content* and not the build path —
 exactly the kind of gap the local gates in
 [Local build verification](#local-build-verification-ci-is-the-release-path-not-the-debugger)
-exist to close.
+exist to close. The fix then was injecting `$(Build/Patch)` into that
+`Build/Prepare`; **second**, that fix was already obsolete by the time it
+reached CI, because the feed bump that carried the new driver source landed in
+the same batch (see below).
 
-`apply_preset()` now appends `$(Build/Patch)` to that `Build/Prepare` (after the
-flattening copy, which the `-p1` patch needs), and the tree was scanned for the
-same class of bug: of every package under `feeds/` and `package/` that ships
-`patches/*.patch`, this was the only one whose `Build/Prepare` did not reach
-`$(Build/Patch)` or `Build/Prepare/Default`. CI asserts the call is present, and
-the `packages` gate additionally fails on any `*.rej`/`*.orig` left in
-`build_dir` — `$(PATCH)` runs with `-f`, so a non-applying hunk would otherwise
-be silent.
+`apply_preset()` no longer patches that package. It deletes any `patches/`
+directory the old overlay may have left behind (a stale copy only fails the
+build again), then asserts the driver source itself: a bare
+`#define CONFIG_QCA_NSS_DRV` is an error, and the `#ifdef CONFIG_QCA_NSS_DRV`
+guard must exist. Both checks run in seconds, before any compilation, so a feed
+bump that reverts to the self-defining driver is caught at the top of the build
+instead of at modpost an hour in. The `packages` gate additionally fails on any
+`*.rej`/`*.orig` left in `build_dir`, since `$(PATCH)` runs with `-f` and a
+non-applying hunk would otherwise be silent.
 
-CI asserts the patch is present in the repo,
-that the `nss/` overlay copied it into `feeds/qmodem`, that it still removes
-both `#define` lines, that `Build/Prepare` still flattens `./src/*` into
-`PKG_BUILD_DIR` (the patch is `-p1` against the build root), that the same
-`Build/Prepare` runs `$(Build/Patch)`, and that `kmod-rmnet-nss` stays out of
-the image.
+CI asserts the source is guarded, has no self-define, that
+`feeds/qmodem/driver/quectel_QMI_WWAN/patches/` does not exist, and that
+`kmod-rmnet-nss` stays out of the image.
 ### Conntrack events on 6.12 (checked, no action)
 
 ECM registers a conntrack notifier to release state as soon as a connection is
@@ -855,7 +869,7 @@ it goes green, so the loop after a fix is minutes instead of hours:
 | `config` | `make defconfig` kept every `=y` package `preset` asked for, and names the ones it silently dropped | seconds |
 | `target` | qualcommax 6.12.94 plus `nss/target` patches apply and the kernel builds | 15-25 min |
 | `kconf` | the *built* kernel config really has `NF_CONNTRACK_DSCPREMARK_EXT` (and `.config.override` carries it), and has no `CONFIG_BONDING` or `ECM_INTERFACE_BOND_ENABLE` left | seconds |
-| `packages` | every enabled package compiles, no `*.rej`/`*.orig` anywhere, `qmi_wwan_q` source is really patched, `qca-nss-drv.ko` really exports `nss_rmnet_rx_get_ifnum` | 30-50 min |
+| `packages` | every enabled package compiles, no `*.rej`/`*.orig` anywhere, `qmi_wwan_q`'s NSS hook is guarded (no self-define, no `patches/`), `qca-nss-drv.ko` really exports `nss_rmnet_rx_get_ifnum` | 30-50 min |
 | `js` | `node --check` on every shipped LuCI view | seconds |
 | `image` | squashfs, sysupgrade tar and manifest assemble | 10-20 min |
 | `ondemand`, `repo` | the on-demand package set and the signed opkg repo build | 20-40 min |
@@ -1058,6 +1072,25 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-04
+- **Build fix: the `qmi_wwan_q` patch is retired, the driver guards the NSS hook
+  itself.** The qmodem pin `b4effcd` rewrote `qmi_wwan_q.c`: it no longer
+  `#define CONFIG_QCA_NSS_DRV` on IPQ807x, every NSS use now sits behind
+  `#ifdef CONFIG_QCA_NSS_DRV`, and the kernel config never sets that symbol, so
+  `nss_cb` stays `NULL` and `rmnet_nss_callbacks` is never referenced. The repo
+  patch that deleted the two `#define` lines therefore had no context left and
+  `apply_preset()` still ran the `$(Build/Patch)` injection, so run `41721902711`
+  died at `Hunk #1 FAILED at 58` / `Hunk #2 FAILED at 72`, 1 h 42 m in, after
+  ndisc6 had been fixed. The patch file is deleted from the `nss/` overlay, the
+  `$(Build/Patch)` injection is gone (the package still overrides
+  `Build/Prepare` and still never patches anything), and `apply_preset()` now
+  `rm -rf`s any leftover `patches/` plus asserts the driver source: a bare
+  `#define CONFIG_QCA_NSS_DRV` is an error, the `#ifdef` guard is required. Both
+  checks run before compilation, so a feed bump that reverts the driver fails in
+  seconds instead of at modpost an hour in. Verified locally with a from-scratch
+  rebuild of the package: `nm -u qmi_wwan_q.ko` reports zero `nss` symbols and
+  the packaged source is byte-identical to the feed (`cmp`). **Size:** unchanged
+  - sysupgrade `35,318,569`, rootfs squashfs `30,054,513`; the patch never
+  reached the image (it removed lines, and it was never applied on this tree).
 - **Build fix: ndisc6 is pinned by `PKG_HASH` now.** OpenWrt renamed
   `PKG_MD5SUM` to `PKG_HASH` and the qmodem feed copy followed, so the
   `sed`-based pin in `apply_preset()` matched no line and run `41704830850`
@@ -1517,7 +1550,9 @@ Review both before republishing an image built here.
   the tree was scanned for the same pattern (this was the only package under
   `feeds/` + `package/` with patches that skipped the patch step). The new
   `packages` gate fails on leftover `*.rej`/`*.orig`, since `$(PATCH)` runs
-  with `-f` and a failed hunk is otherwise silent.
+  with `-f` and a failed hunk is otherwise silent. *(Superseded on 2026-11-04:
+  the feed ships a guarded driver now, so the patch and the injection are
+  gone — see the top of this changelog.)*
 - **New: `scripts/local-verify.sh` — build locally, push once.** CI is a ~3 h
   run that stops at the first failure, so the last four fixes each cost a full
   run to discover. The script reproduces the CI job as ordered gates

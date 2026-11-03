@@ -631,33 +631,31 @@ PY
         fi
         echo -e "${BOLD_GREEN}ndisc6: 1.0.2 -> 1.0.8, PKG_HASH pinned (1.0.2 answered 410)${RESET}"
     fi
-    # A patch directory is only applied if Build/Prepare actually calls
-    # $(Build/Patch). qmi_wwan_q overrides Build/Prepare (copy src/ flat into
-    # PKG_BUILD_DIR) and never called it, so patches/0001-disable-qca-nss-hook
-    # existed, was copied into the feed, and was never applied: modpost kept
-    # failing with "rmnet_nss_callbacks ... undefined!" (run 41469086214). The
-    # copy stays flat because the patch is -p1 against PKG_BUILD_DIR root; only
-    # the patch step is appended.
-    local qmm="$PWD/feeds/qmodem/driver/quectel_QMI_WWAN/Makefile"
-    if [ -f "$qmm" ]; then
-        if ! grep -qF '$(Build/Patch)' "$qmm"; then
-            awk '
-                /^define Build\/Prepare$/ { blk = 1 }
-                blk && /\$\(CP\) \.\/src\// {
-                    print
-                    print "\t$(Build/Patch)"
-                    blk = 0
-                    next
-                }
-                /^endef$/ { blk = 0 }
-                { print }
-            ' "$qmm" >"$qmm.tmp" && mv "$qmm.tmp" "$qmm"
-        fi
-        if ! grep -qF '$(Build/Patch)' "$qmm"; then
-            echo -e "${BOLD_RED}qmi_wwan_q: Build/Prepare does not apply patches${RESET}"
+    # qmi_wwan_q 1.5 used to #define CONFIG_QCA_NSS_DRV itself on every
+    # IPQ807x/IPQ5018/IPQ8074 target, which made it reference
+    # rmnet_nss_callbacks from rmnet_nss.ko - a module that cannot be selected
+    # here, so modpost aborted. This repo carried a patch that deleted the two
+    # #define lines. The pinned qmodem tree (b4effcd) rewrote the driver: the
+    # hook now sits behind #ifdef CONFIG_QCA_NSS_DRV, the kernel never sets that
+    # symbol, and the old patch no longer applies (run 41721902711, hunks 1-2
+    # FAILED at 58/72). Assert the upstream form here so a feed bump that brings
+    # the unconditional #define back fails in seconds instead of at modpost an
+    # hour in, and drop any stale patches/ copy left by the old overlay.
+    local qms="$PWD/feeds/qmodem/driver/quectel_QMI_WWAN/src/qmi_wwan_q.c"
+    if [ -f "$qms" ]; then
+        if grep -q '^#define CONFIG_QCA_NSS_DRV$' "$qms"; then
+            echo -e "${BOLD_RED}qmi_wwan_q self-defines CONFIG_QCA_NSS_DRV (rmnet_nss_callbacks undefined at modpost)${RESET}"
             exit 1
         fi
-        echo -e "${BOLD_GREEN}qmi_wwan_q: Build/Prepare applies patches/ (NSS hook stripped)${RESET}"
+        if ! grep -q '^#ifdef CONFIG_QCA_NSS_DRV$' "$qms"; then
+            echo -e "${BOLD_RED}qmi_wwan_q: NSS hook is not guarded by CONFIG_QCA_NSS_DRV${RESET}"
+            exit 1
+        fi
+        # Only the obsolete file goes: a future feed pin could legitimately ship
+        # patches of its own, and Build/Prepare never ran $(Build/Patch) here.
+        rm -f "$(dirname "$qms")/../patches/0001-disable-qca-nss-hook.patch"
+        rmdir "$(dirname "$qms")/../patches" 2>/dev/null
+        echo -e "${BOLD_GREEN}qmi_wwan_q: NSS hook guarded upstream, obsolete patch retired${RESET}"
     fi
     # qmodem reports the wrong connection state on this modem. The Quectel
     # RG500Q answers AT+CGPADDR=1 with IPv4 and dotted-decimal IPv6 inside ONE
@@ -1081,34 +1079,31 @@ ci_check_packages() {
     else
         missing="$missing ndisc6-feed-Makefile"
     fi
-    # qmi_wwan_q 1.5 defines CONFIG_QCA_NSS_DRV on every IPQ807x/IPQ5018/IPQ8074
-    # target and then references rmnet_nss_callbacks from the separate
-    # rmnet_nss.ko. That module is unselectable here (its DEPENDS include
-    # +@NSS_DRV_C2C_ENABLE, a chip-to-chip path an AW1000 does not want), so
-    # modpost aborts: "rmnet_nss_callbacks" [qmi_wwan_q.ko] undefined! (run
-    # 41456411377). The patch drops the two #define lines; the driver keeps its
-    # own QMAP implementation and only the optional NSS RX hand-off goes away.
-    # ECM excludes wwan*/rmnet* anyway (patch 0027), so no WAN offload is lost.
-    qmp="$repo_root/nss/feeds/qmodem/driver/quectel_QMI_WWAN/patches/0001-disable-qca-nss-hook.patch"
-    [ -f "$qmp" ] || missing="$missing qmi_wwan_q-no-nss-patch"
-    [ -f "feeds/qmodem/driver/quectel_QMI_WWAN/patches/0001-disable-qca-nss-hook.patch" ] || \
-        missing="$missing qmi_wwan_q-patch-not-copied(nss/ overlay)"
-    grep -q '^-#define CONFIG_QCA_NSS_DRV$' "$qmp" 2>/dev/null || \
-        missing="$missing qmi_wwan_q-patch-no-define-removal"
-    # The patch is -p1 against PKG_BUILD_DIR root, so Build/Prepare must keep
-    # copying the *contents* of src/ (a move to 'cp -r src' would break it).
-    grep -qF '$(CP) ./src/* $(PKG_BUILD_DIR)/' \
-        feeds/qmodem/driver/quectel_QMI_WWAN/Makefile 2>/dev/null || \
-        missing="$missing qmi_wwan_q-prepare-flattened(patch is -p1)"
-    # ... and Build/Prepare must actually run the patch step: a build that only
-    # ships patches/ still fails modpost (run 41469086214).
-    grep -qF '$(Build/Patch)' \
-        feeds/qmodem/driver/quectel_QMI_WWAN/Makefile 2>/dev/null || \
-        missing="$missing qmi_wwan_q-patches-never-applied(Build/Prepare skips Build/Patch)"
+    # qmi_wwan_q used to #define CONFIG_QCA_NSS_DRV itself on IPQ807x and then
+    # reference rmnet_nss_callbacks from rmnet_nss.ko, which cannot be selected
+    # here (its DEPENDS include +@NSS_DRV_C2C_ENABLE, a chip-to-chip path an
+    # AW1000 does not have), so modpost aborted with
+    #   "rmnet_nss_callbacks" [qmi_wwan_q.ko] undefined! (run 41456411377).
+    # This repo patched the two #define lines away. The pinned qmodem tree
+    # (b4effcd) moved the hook behind #ifdef CONFIG_QCA_NSS_DRV instead, the
+    # kernel never sets that symbol, and the patch stopped applying - CI run
+    # 41721902711 died at "Hunk #1 FAILED at 58" before compiling the image.
+    # Assert the upstream shape, and forbid the self-define so a feed bump that
+    # reverts it is caught here rather than at modpost an hour in.
+    qms="feeds/qmodem/driver/quectel_QMI_WWAN/src/qmi_wwan_q.c"
+    [ -f "$qms" ] || missing="$missing qmi_wwan_q-src(missing driver source)"
+    grep -q '^#ifdef CONFIG_QCA_NSS_DRV$' "$qms" 2>/dev/null || \
+        missing="$missing qmi_wwan_q-nss-hook-not-guarded"
+    grep -q '^#define CONFIG_QCA_NSS_DRV$' "$qms" 2>/dev/null && \
+        forbidden="$forbidden qmi_wwan_q-self-defines-CONFIG_QCA_NSS_DRV(undefined callbacks)"
+    # The patch is retired; a copy coming back through the nss/ overlay would
+    # only fail the build again, so it is an error if it reappears.
+    [ -e feeds/qmodem/driver/quectel_QMI_WWAN/patches/0001-disable-qca-nss-hook.patch ] && \
+        forbidden="$forbidden qmi_wwan_q-stale-patch(obsolete since b4effcd)"
     # rmnet-nss cannot be selected (C2C unmet) and is not wanted: assert it
-    # stays out so the patch and the image agree.
+    # stays out so the guarded hook and the image agree.
     grep -q '^CONFIG_PACKAGE_kmod-rmnet-nss=y$' .config && \
-        forbidden="$forbidden kmod-rmnet-nss(unselectable, C2C dep; patch handles it)"
+        forbidden="$forbidden kmod-rmnet-nss(unselectable, C2C dep; hook is guarded)"
     # Ruby's Kconfig defaults RUBY_ENABLE_YJIT to y on aarch64 and that pulls
     # rust/host into the build. The Rust host package downloads prebuilt LLVM
     # from ci-artifacts.rust-lang.org, and rust-lang rotates those out, so the
