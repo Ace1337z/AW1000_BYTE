@@ -154,6 +154,14 @@ update_feeds() {
     # config, which makes older xray refuse to start; 26.4.10 has neither.
     grep -q '^src-git passwall_luci ' feeds.conf.default 2>/dev/null || \
         echo 'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall2.git^4b4b84dc120bb37592ea51e7107ce4fe0083420f' >> feeds.conf.default
+    # PassWall v1 has NO feed line on purpose: it is vendored at
+    # packages/luci-app-passwall (4.66-8) and only built on demand, because v1
+    # and v2 fight over the same transparent-proxy rules and port 53. Adding a
+    # src-git for it would put a second, differently-versioned luci-app-passwall
+    # into the feed metadata and invite `opkg upgrade` to swap the vendored
+    # copy for an upstream one (that is exactly what happened to qmodem's TTL
+    # script). packages/ is copied into ./package/, which wins over feeds for
+    # the in-tree name.
     # vantage theme + dashboard: dropped. The image ships Footstrap only -
     # keeping a second JS theme costs space and its luci-app-vantage dashboard
     # duplicates pages the Vantage-derived widgets now provide.
@@ -1072,6 +1080,59 @@ ci_check_packages() {
         missing="$missing repo-publishes-luci-app-adguardhome"
     grep -q 'adguardhome|luci-app-adguardhome' "$repo_root/.github/build-package-repo.sh" 2>/dev/null || \
         missing="$missing repo-publishes-adguardhome-binary"
+    # PassWall v1 (Lua) is published on demand, never installed. It is vendored
+    # at packages/luci-app-passwall (4.66-8) rather than pulled from a feed, so
+    # the on-demand build compiles the exact copy that was reviewed here and no
+    # `opkg upgrade` can swap it for an upstream version - same failure mode as
+    # qmodem's TTL script.
+    local pwall="$repo_root/packages/luci-app-passwall" inc
+    [ -f "$pwall/Makefile" ] || missing="$missing passwall-v1-vendored"
+    grep -q '^PKG_VERSION:=4\.66-8$' "$pwall/Makefile" 2>/dev/null || \
+        missing="$missing passwall-v1-version(must be 4.66-8)"
+    # Cores pinned to Xray only: xray-core is already in the image, while the
+    # other eight INCLUDE_* options would add ~25 MB of repo assets and a Go +
+    # Rust build to every CI run. A `default y` creeping back in is silent -
+    # the package still builds, just three times slower.
+    for inc in Haproxy Shadowsocks_Libev_Client Shadowsocks_Libev_Server \
+               Shadowsocks_Rust_Client ShadowsocksR_Libev_Client Simple_Obfs \
+               Trojan_Plus V2ray V2ray_Plugin Xray_Plugin; do
+        awk -v want="config PACKAGE_\$(PKG_NAME)_INCLUDE_${inc}" '
+            $0 == want { f = 1; next }
+            f && /^config / { exit }
+            f && /^[[:space:]]*default / { print; exit }
+        ' "$pwall/Makefile" 2>/dev/null | grep -q 'default n' || \
+            missing="$missing passwall-v1-core-enabled(${inc}; Xray only)"
+    done
+    awk -v want='config PACKAGE_$(PKG_NAME)_INCLUDE_Xray' '
+        $0 == want { f = 1; next }
+        f && /^config / { exit }
+        f && /^[[:space:]]*default / { print; exit }
+    ' "$pwall/Makefile" 2>/dev/null | grep -q 'default y' || \
+        missing="$missing passwall-v1-no-xray-default"
+    # Every script must be executable in the ipk. The uci-defaults one is the
+    # one that matters: it creates /etc/config/passwall from 0_default_config
+    # and flips use_nft to 1, so shipping it 0644 means v1 starts with no
+    # config at all and an iptables path this image does not have - and
+    # nothing fails, it just does not work.
+    local pwf
+    for pwf in root/etc/init.d/passwall root/etc/init.d/passwall_server \
+               root/etc/uci-defaults/luci-passwall \
+               root/etc/hotplug.d/iface/98-passwall \
+               root/usr/share/passwall/app.sh root/usr/share/passwall/monitor.sh; do
+        [ -x "$pwall/$pwf" ] || missing="$missing passwall-v1-not-executable($pwf)"
+    done
+    # v1 must be published (it is not in the image manifest, so a typo in the
+    # on-demand list would silently leave it out of the repo), and its three
+    # non-image runtime deps with it.
+    for inc in luci-app-passwall dns2socks dns2tcp microsocks; do
+        grep -qx "$inc" "$repo_root/.github/repo/ondemand.txt" 2>/dev/null || \
+            missing="$missing ondemand-missing:$inc"
+    done
+    # ...and it must have no feed line: a src-git pin would reintroduce a
+    # second luci-app-passwall into the feed metadata. Checked on the generated
+    # feeds.conf.default (the source only mentions it in a comment).
+    grep -q '^src-git passwall1 ' feeds.conf.default 2>/dev/null && \
+        forbidden="$forbidden passwall1-feed(vendored copy must win)"
 
     # The image must trust the key the repo is signed with, otherwise every
     # index fails verification while opkg still reports "Updated list". That

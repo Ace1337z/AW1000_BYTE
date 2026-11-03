@@ -82,6 +82,7 @@ opkg update
 opkg install luci-app-banip luci-app-smartdns luci-app-mwan3 luci-app-sqm
 opkg install luci-app-openclash luci-app-adguardhome luci-app-nikki
 opkg install tailscale luci-app-tailscale-community
+opkg install luci-app-passwall   # PassWall v1 (Lua); disable passwall2 first
 ```
 
 ### Tuning defaults
@@ -636,6 +637,63 @@ LuCI app that no longer exists in this luci pin — see the changelog.
 Only a green `repo` gate justifies a push. CI then re-confirms the same targets
 and publishes the artifacts; it no longer discovers problems.
 
+### PassWall v1 is published, never installed
+`luci-app-passwall` (PassWall **v1**, Lua, `PKG_VERSION:=4.66-8`) is vendored at
+`packages/luci-app-passwall` and built by `.github/build-ondemand-packages.sh`,
+so the `.ipk` lands in the release's opkg repo while the image keeps only
+passwall2. Reasons:
+
+- **They cannot coexist.** Both install transparent-proxy rules on the same
+  nft hook and both want port 53. Whichever reloads last wins, the other is torn
+  down and its page reports "not running". Installing v1 is therefore a
+  deliberate switch: disable passwall2 first, `reboot`, then enable v1.
+- **Lua controllers.** v1 is `luasrc/` (pulls `luci-lua-runtime`,
+  `luci-compat`, `luci-lib-jsonc`), which the image otherwise avoids.
+
+It is **vendored, not a feed pin**, so the on-demand build compiles the exact
+copy reviewed here and no `opkg upgrade` can swap it for an upstream version -
+the failure mode that hit qmodem's TTL script (see above). `ondemand.txt` lists
+`dns2socks`, `dns2tcp` and `microsocks` (its only hard deps the image lacks) so
+Kconfig keeps the parent selectable, but they are not republished: the same
+`dns2tcp 1.1.2-r1` / `microsocks 1.0.5-r2` are in the ImmortalWrt 24.10.6
+packages feed that `/etc/opkg/distfeeds.conf` already carries. `dnsmasq-full`,
+`chinadns-ng`, `ip-full`, `unzip`, `ipset`, `nftables-json` (provides `nft`)
+and `kmod-nft-{socket,tproxy,nat}` are in the image, so v1's **Nftables
+Transparent Proxy** variant works as-is and its uci-defaults auto-detects
+`use_nft=1`.
+
+Cores are pinned to **Xray only** (the Makefile's header comment says why).
+Upstream turns on nine `INCLUDE_*` options for aarch64, which would make every
+CI run compile v2ray-core (Go), shadowsocks-libev, shadowsocks-rust (Rust),
+shadowsocksr-libev, trojan-plus, simple-obfs and haproxy, then publish ~25 MB
+of cores nobody asked for. `xray-core` is already in the image for passwall2,
+so v1 has a working core at zero cost; any other core is one
+`opkg install shadowsocks-libev-ss-redir` (official feeds) away, and turning an
+`INCLUDE_*` default back to `y` is a one-line change.
+
+Gates assert: the package is vendored with version `4.66-8`, every heavy
+`INCLUDE_*` default stays `n` while `INCLUDE_Xray` stays `y`, the four names are
+in `ondemand.txt`, `luci-app-passwall` stays out of the image `.config`, and no
+`src-git passwall1` line sneaks back into `aw1000_byte.sh`.
+
+Local smoke test: `make package/luci-app-passwall/compile
+package/feeds/packages/dns2tcp/compile package/feeds/packages/microsocks/compile`
+gives `luci-app-passwall_4.66-8_all.ipk` (77 files,
+`Depends: ... xray-core, luci-lua-runtime`), plus `dns2tcp_1.1.2-r1` and
+`microsocks_1.0.5-r2`.
+
+Two fixes to the vendored copy, both silent failures otherwise:
+
+- `root/etc/uci-defaults/luci-passwall` arrived as `0664`, so the ipk shipped
+  it non-executable. That script is what creates `/etc/config/passwall` from
+  `0_default_config` and flips `use_nft` to `1`, so v1 would start with no
+  config and the iptables path this image does not have. Now `0755`, and a gate
+  asserts every script in the package is executable.
+- The `INCLUDE_*` sub-options lacked `depends on PACKAGE_$(PKG_NAME)`, so
+  `_INCLUDE_Xray=y` survived in the image `.config` with the parent `n`. Adding
+  the dependency keeps them out of the image and still defaults `Xray` on for
+  the on-demand build.
+
 ### Open items
 
 - **Untested on hardware.** The changes are build-validated only. Needed on a
@@ -666,6 +724,28 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-03
+- **PassWall v1 is published on demand, never installed.** `luci-app-passwall`
+  (v1, Lua, `4.66-8`) is vendored at `packages/luci-app-passwall` and built by
+  `build-ondemand-packages.sh`, so the ipk ships in the opkg repo while the
+  image keeps passwall2 only - the two install the same transparent-proxy
+  rules and both want port 53, so running both tears one down and its page
+  reports "not running". Vendored rather than feed-pinned, so `opkg upgrade`
+  cannot swap it for an upstream copy (the failure mode that hit qmodem's TTL
+  script). `ondemand.txt` lists only `dns2socks`, `dns2tcp`, `microsocks`
+  (kept selectable in Kconfig, not republished - the same versions are in the
+  ImmortalWrt 24.10.6 feed distfeeds already points at); dnsmasq-full,
+  chinadns-ng, ip-full, unzip, ipset, nftables-json and
+  kmod-nft-{socket,tproxy,nat} are already in the image, so the nftables
+  variant works as-is. Build defaults are pinned to **Xray only** instead of
+  upstream's nine `INCLUDE_*` defaults for aarch64, which would add a Go +
+  Rust + C core build to every CI run and ~25 MB of repo assets for nothing
+  (xray-core is already in the image). Smoke-built locally: ipk contains 77
+  files and depends on `xray-core` + `luci-lua-runtime`; `dns2tcp` and
+  `microsocks` build too. Gates cover the vendored version, the pinned core
+  defaults, the on-demand names, the image exclusion, the absence of a
+  `src-git passwall1` line, and that every packaged script is executable (the
+  vendored uci-defaults script arrived `0664` and would have skipped both
+  `/etc/config/passwall` creation and the nftables auto-detect).
 - **qmodem's TTL is replaced at the package level, not only in the image.**
   Upstream `luci-app-qmodem-ttlfw4` matched `iifname br-lan` (router-originated
   packets kept the host TTL), wrote its own `chain postrouting` (fw4 generates

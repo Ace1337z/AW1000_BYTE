@@ -89,6 +89,27 @@ geoview
 v2ray-geoip
 v2ray-geosite
 chinadns-ng
+# --- PassWall v1 (Lua, fw4 capable) --------------------------------------
+# Vendored at packages/luci-app-passwall (4.66-8), not from a feed, and NOT in
+# the image: v1 and v2 install the same transparent-proxy rules and both want
+# port 53, so v1 replaces passwall2 - the one the TTL/nftables policy is tuned
+# for. Installing it is a deliberate choice; disable passwall2 first.
+#
+# luci-compat, lua (+luci-lua-runtime, libuci-lua, luci-lib-jsonc),
+# coreutils(+base64/nohup), curl, chinadns-ng, ip-full, unzip, resolveip,
+# tcping, ipset and nftables-json (provides nft) are already in the image, as
+# are kmod-nft-socket/tproxy/nat, so v1's nftables variant works as-is and the
+# repo serves those from the image manifest.
+# dns2socks, dns2tcp and microsocks are the only hard deps the image does not
+# carry. They are listed here because a Kconfig `depends on` would otherwise
+# switch the parent off, but they are NOT published: the identical
+# dns2tcp 1.1.2-r1 and microsocks 1.0.5-r2 sit in the ImmortalWrt 24.10.6
+# packages feed that /etc/opkg/distfeeds.conf already points at, and
+# republishing ours would shadow that feed with a copy we cannot keep current.
+luci-app-passwall
+dns2socks
+dns2tcp
+microsocks
 # --- OpenClash (clash) ---
 luci-app-openclash
 haproxy

@@ -5293,29 +5293,16 @@ CONFIG_PACKAGE_luci-app-netstat=y
 # CONFIG_PACKAGE_luci-app-p910nd is not set
 CONFIG_PACKAGE_luci-app-package-manager=y
 # CONFIG_PACKAGE_luci-app-pagekitec is not set
-# passwall (v1) removed: it cannot coexist with passwall2 - both install
-# redirect rules on the same nft table and hijack port 53, so whichever
-# restarts last wins and v1 is torn down. Leaving only passwall2 avoids
-# two competing dashboards and a confusing "not running" state.
+# passwall (v1) is NOT in the image: it cannot coexist with passwall2 - both
+# install redirect rules on the same nft hook and hijack port 53, so whichever
+# restarts last wins and the other is torn down. Only passwall2 ships.
+# v1 is vendored at packages/luci-app-passwall (4.66-8) and built on demand, so
+# it is installable from the BYTE opkg repo. Its Configuration block is left
+# out here on purpose: those symbols are live now, and an explicit
+# "INCLUDE_Xray is not set" would also apply to the on-demand build and leave
+# the published ipk without its only core. The vendored Makefile pins the core
+# defaults instead (Xray y, the rest n).
 # CONFIG_PACKAGE_luci-app-passwall is not set
-
-#
-# Configuration
-#
-# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy is not set
-# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Hysteria is not set
-# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_NaiveProxy is not set
-# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client is not set
-# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Server is not set
-# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs is not set
-# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox is not set
-# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Geodata is not set
-# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Geoview is not set
-# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin is not set
-# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray is not set
-# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray_Plugin is not set
-# end of Configuration
-
 CONFIG_PACKAGE_luci-app-passwall2=y
 
 #
