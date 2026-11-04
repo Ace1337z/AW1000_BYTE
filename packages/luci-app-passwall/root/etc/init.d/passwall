@@ -33,6 +33,12 @@ unlock() {
 }
 
 boot() {
+	# BYTE by ACE: this package ships in the image DISABLED, and the buildroot
+	# enables every rc.common script while assembling the rootfs
+	# (include/rootfs.mk, prepare_rootfs), so it gets an S99 symlink no matter
+	# what the package contains. The gate therefore lives here: without this,
+	# boot runs app.sh stop+start against passwall2's rules and port 53.
+	[ "$(uci -q get ${CONFIG}.@global[0].enabled)" = "1" ] || exit 0
 	local delay=$(uci -q get ${CONFIG}.@global_delay[0].start_delay || echo 1)
 	if [ "$delay" -gt 0 ]; then
 		$APP_FILE echolog "执行启动延时 $delay 秒后再启动!"

@@ -18,263 +18,103 @@ START=96
 STOP=12
 USE_PROCD=1
 
-# All four cores. The kernel prints this mask without the leading zero ("f");
-# byte-selfcheck derives the same bitmap from /proc/cpuinfo instead of
-# hardcoding it, so the two cannot drift on a different core count.
-RPS_MASK=0f
+RPS_MASK=0f          # all four cores
 # Must be >= network.@globals[0].steering_flows, otherwise RFS is clamped and
 # the flow table is smaller than the per-queue tables packet_steering writes.
 RPS_FLOW=32768
-# Software IRQ coalescing (net/core/dev.c: napi_defer_hard_irqs /
-# gro_flush_timeout, both registered unconditionally in net-sysfs.c on 6.12).
-# The modem's xhci interrupt cannot be spread (the kernel collapses
-# effective_affinity back to one CPU), so instead of every packet taking a hard
-# IRQ on that one core, the NAPI poll keeps its budget and only re-arms the IRQ
-# after NAPI_DEFER empty polls. GRO_FLUSH_NS is nanoseconds: 20000 ns = 20 us,
-# which is also what netdev_sw_irq_coalesce_default_on() uses upstream -
-# invisible latency, measurably fewer interrupts.
+XPS_PROBE_DONE=/var/run/byte-affinity.xps-probed
+# NAPI deferral, applied only where it can do something. See napi_capable().
 NAPI_DEFER=2
-GRO_FLUSH_NS=20000
+GRO_FLUSH_NS=4000
 
-# WAN queue bound (see /etc/config/byte). fq is what paces BBR; its default
-# queue is 10000 packets, i.e. ~15 MB, which on a 100-200 Mbit cellular uplink
-# is 0.6-1.2 s of standing queue. Sizing the aggregate queue to ~3x the bearer's
-# bandwidth-delay product keeps the link full while capping how much delay a
-# burst can build up, and that is done without shaping: no rate ceiling, no
-# classification - the qdisc only refuses to grow past a bound.
+# Is this netdev driven by a driver that registers a NAPI instance?
 #
-# The per-flow cap is the latency-critical one: 100 packets of 1500 B = 150 KB,
-# under 15 ms at 100 Mbit/s and under 7 ms at 200 Mbit/s. A single upload
-# cannot build a longer queue than that regardless of how many flows run.
-FQ_UPLINK_KBIT=200000
-FQ_RTT_MS=40
-FQ_FLOW_LIMIT=100
-FQ_INITIAL_QUANTUM=65536
-# Clamp the computed aggregate limit. The floor keeps a mis-set uplink_kbit
-# from starving TCP on a real bearer; the ceiling keeps an unset one from
-# restoring the 10000-packet default this exists to avoid.
-FQ_LIMIT_MIN=1000
-FQ_LIMIT_MAX=10000
-
-RUNDIR=/var/run
-CHANGED=0
-
-# set_sysfs <path> <want> [16]
-#
-# Write only when the value actually differs. Reading sysfs is free, writing is
-# not: rewriting rps_cpus with the same mask still allocates a new steering map
-# and schedules call_rcu, so a 15s self-reload used to churn the RCU path for
-# the life of the boot. The kernel prints masks without leading zeros ("f", not
-# "0f"), hence the numeric compare for hex attributes.
-set_sysfs() {
-	local f="$1" want="$2" base="${3:-10}" cur
-	[ -e "$f" ] || return 1
-	cur=$(cat "$f" 2>/dev/null)
-	[ "$cur" = "$want" ] && return 0
-	if [ "$base" = 16 ]; then
-		case "$cur" in
-			'' | *[!0-9a-fA-F]*) : ;;
-			*) [ $((0x$cur)) -eq $((0x$want)) ] && return 0 ;;
-		esac
-	fi
-	printf '%s\n' "$want" > "$f" 2>/dev/null || return 1
-	CHANGED=$((CHANGED + 1))
+# dev->napi_defer_hard_irqs and dev->gro_flush_timeout are read in the
+# napi_schedule path (net/core/dev.c: napi_schedule_prep and the threaded
+# handler). usbnet - which is what qmi_wwan and every cdc_* driver here are
+# built on - receives with netif_rx() into the CPU backlog and registers no
+# NAPI at all, so writing those two files on wwan* changes nothing. 1.2.33
+# did exactly that and reported the values back as if applied; this gate makes
+# the distinction explicit instead of pretending.
+napi_capable() {
+	local drv
+	drv=$(basename "$(readlink -f "/sys/class/net/$1/device/driver" 2>/dev/null)" 2>/dev/null)
+	[ -n "$drv" ] || return 1
+	case "$drv" in
+		usb*|qmi_wwan|cdc_*|rndis*|option|hso|sierra*|gobi*) return 1 ;;
+	esac
 	return 0
 }
 
-# BBR computes a send rate, but only sch_fq can pace it; fq_codel (the OpenWrt
-# default) queues and bursts. default_qdisc=fq covers devices that exist at boot
-# - the wwan mux interface is registered after qmodem dials, so it is set here
-# instead of relying on the sysctl alone.
-#
-# fq is also the only queue control this image has: SQM is not installed. Its
-# aggregate limit is therefore sized from the bearer (fq_limit_for) instead of
-# being left at 10000 packets.
-#
-# Everything is read back from the kernel before writing, same as set_sysfs:
-# tc qdisc replace resets the qdisc, which zeroes its backlog accounting and its
-# drop counters, and this runs from a 60 s timer.
-
-# uci_uint <option> <default>: read an unsigned integer from /etc/config/byte.
-uci_uint() {
-	local v
-	v=$(uci -q get "byte.fq.$1" 2>/dev/null)
-	case "$v" in
-		'' | *[!0-9]*) printf '%s\n' "$2" ;;
-		*) printf '%s\n' "$v" ;;
-	esac
-}
-
-# fq_limit_for <dev>: aggregate queue limit in packets, or empty when the queue
-# is deliberately left at the kernel default (byte.fq.enabled=0).
-#
-# Sizing is 3x the bandwidth-delay product:
-#   BDP_bytes   = uplink_kbit * 1000 / 8 * rtt_ms / 1000 = uplink_kbit * rtt_ms / 8
-#   BDP_packets = BDP_bytes / 1514
-# so 3 * uplink_kbit * rtt_ms / (8 * 1514) = 3 * uplink_kbit * rtt_ms / 12112.
-# At 200000 kbit and 40 ms that is 1981 packets (~3 MB, ~120 ms of queue at the
-# bearer rate) - enough to keep the link full, far below the 10000 default.
-fq_limit_for() {
-	local name="$1" up rt limit
-	[ "$(uci -q get byte.fq.enabled 2>/dev/null)" = "0" ] && return 0
-	up=$(uci_uint uplink_kbit "$FQ_UPLINK_KBIT")
-	if [ "$up" -eq 0 ] 2>/dev/null; then
-		# No configured rate: ask the driver. wwan devices report 0 or a
-		# link-layer number that is not the bearer rate, so only trust it
-		# when it lands inside the range a cellular bearer can have.
-		up=$(cat "/sys/class/net/$name/speed" 2>/dev/null)
-		case "$up" in
-			'' | *[!0-9]*) up=0 ;;
-		esac
-		if [ "$up" -ge 1 ] 2>/dev/null && [ "$up" -le 40000 ] 2>/dev/null; then
-			up=$((up * 1000))
-		else
-			up=$FQ_UPLINK_KBIT
-		fi
+# Compare-before-write. apply() runs from a 15 s timer in a fresh process, and
+# rewriting rps_cpus with an IDENTICAL mask still allocates a new steering map
+# and schedules call_rcu - so a blind write four times a minute keeps the RCU
+# path busy for the life of the boot. Values are hex as the kernel prints them
+# ("f", not "0f"), so compare as strings only after they are already in that
+# form.
+CHANGED=0
+w() {
+	[ -e "$1" ] || return 0
+	[ "$(cat "$1" 2>/dev/null)" = "$2" ] && return 0
+	if echo "$2" > "$1" 2>/dev/null; then
+		CHANGED=1
 	fi
-	[ "$up" -ge 1000 ] 2>/dev/null || up=$FQ_UPLINK_KBIT
-	rt=$(uci_uint rtt_ms "$FQ_RTT_MS")
-	[ "$rt" -ge 1 ] 2>/dev/null || rt=$FQ_RTT_MS
-	limit=$((3 * up * rt / 12112))
-	[ "$limit" -lt "$FQ_LIMIT_MIN" ] && limit=$FQ_LIMIT_MIN
-	[ "$limit" -gt "$FQ_LIMIT_MAX" ] && limit=$FQ_LIMIT_MAX
-	printf '%s\n' "$limit"
-}
-
-# fq_params <dev>: print "<limit> <flow_limit>" of the live qdisc, empty fields
-# when it is not fq. Field-name based on purpose: "flow_limit" contains the
-# substring "limit", so a pattern match would read the wrong number.
-fq_params() {
-	tc qdisc show dev "$1" 2>/dev/null | awk '
-		$2 == "fq" {
-			for (i = 1; i < NF; i++) {
-				if ($i == "limit") { l = $(i + 1) }
-				if ($i == "flow_limit") { f = $(i + 1) }
-			}
-			gsub(/p/, "", l); gsub(/p/, "", f)
-			print l, f
-			exit
-		}'
-}
-
-apply_fq() {
-	local name="$1" limit flow cur_limit cur_flow cur
-	command -v tc >/dev/null 2>&1 || return 0
-
-	limit=$(fq_limit_for "$name")
-	if [ -z "$limit" ]; then
-		# Tuning disabled: still guarantee the qdisc BBR is designed for.
-		case "$(tc qdisc show dev "$name" 2>/dev/null | awk '{print $2; exit}')" in
-			fq) return 0 ;;
-		esac
-		if tc qdisc replace dev "$name" root fq 2>/dev/null; then
-			CHANGED=$((CHANGED + 1))
-		fi
-		return 0
-	fi
-
-	flow=$(uci_uint flow_limit "$FQ_FLOW_LIMIT")
-	[ "$flow" -ge 1 ] 2>/dev/null || flow=$FQ_FLOW_LIMIT
-	# fq rejects a per-flow cap at or above the aggregate one.
-	[ "$flow" -ge $((limit / 2)) ] && flow=$((limit / 2))
-
-	# Read back before writing: tc qdisc replace tears the qdisc down and
-	# zeroes its backlog and drop counters, and this runs from a 60 s timer.
-	# Word splitting on purpose - fq_params prints "<limit> <flow_limit>".
-	cur=$(fq_params "$name")
-	cur_limit=${cur%% *}
-	cur_flow=${cur##* }
-	[ "$cur_limit" = "$limit" ] && [ "$cur_flow" = "$flow" ] && return 0
-
-	if tc qdisc replace dev "$name" root fq \
-		limit "$limit" \
-		flow_limit "$flow" \
-		initial_quantum "$(uci_uint initial_quantum "$FQ_INITIAL_QUANTUM")" \
-		2>/dev/null; then
-		CHANGED=$((CHANGED + 1))
-	fi
-}
-
-# XPS, probed once per device per boot. xps_cpus is effectively write-only and
-# a device with a single tx queue has nothing to steer (the kernel rejects a
-# multi-CPU mask: num_tx_queues < 2). qmi_wwan's mux interfaces are exactly
-# that case, so the verdict is stored in a file - apply() runs from a timer in a
-# fresh process, a shell variable would not survive, and retrying a write the
-# kernel will never accept just burns forks.
-apply_xps() {
-	local name="$1" dev="$2" stamp="$RUNDIR/byte-affinity.xps.$name" q n=0
-	[ -e "$stamp" ] && return 0
-	for q in "$dev"/queues/tx-*/xps_cpus; do
-		[ -e "$q" ] || continue
-		n=$((n + 1))
-	done
-	if [ "$n" -lt 2 ]; then
-		echo unsupported > "$stamp"
-		return 0
-	fi
-	for q in "$dev"/queues/tx-*/xps_cpus; do
-		[ -e "$q" ] || continue
-		if ! { echo "$RPS_MASK" > "$q"; } 2>/dev/null; then
-			echo rejected > "$stamp"
-			return 0
-		fi
-	done
-	echo ok > "$stamp"
-	CHANGED=$((CHANGED + 1))
-}
-
-xps_state() {
-	local s out=
-	for s in "$RUNDIR"/byte-affinity.xps.*; do
-		[ -e "$s" ] || continue
-		out="$out ${s##*/byte-affinity.xps.}=$(cat "$s" 2>/dev/null)"
-	done
-	[ -n "$out" ] || out=" none"
-	echo "${out# }"
-}
-
-# fq_state: "wwan0_1=1981/100" per modem interface, or "none" before the modem
-# dials. Logged so the queue bound is visible in logread next to the RPS masks,
-# instead of requiring an SSH session with tc.
-fq_state() {
-	local dev name p out=
-	for dev in /sys/class/net/wwan*; do
-		[ -e "$dev" ] || continue
-		name=${dev##*/}
-		p=$(fq_params "$name")
-		[ -n "$p" ] || continue
-		out="$out $name=$(echo "$p" | tr ' ' '/')"
-	done
-	[ -n "$out" ] || out=" none"
-	echo "${out# }"
+	return 0
 }
 
 apply() {
-	CHANGED=0
+	NAPI_STATE=none
 	# Global RFS table. Without this rps_flow_cnt is inert.
-	set_sysfs /proc/sys/net/core/rps_sock_flow_entries "$RPS_FLOW"
+	w /proc/sys/net/core/rps_sock_flow_entries "$RPS_FLOW"
 
 	for dev in /sys/class/net/*; do
 		name=${dev##*/}
-		# Only the modem data interfaces matter here; touching wlan*/eth*
-		# would fight the NSS/ath11k steering.
+		# Only the modem data interfaces and the LAN bridge matter here;
+		# touching wlan*/eth* would fight the NSS/ath11k steering.
 		case "$name" in
 			wwan*|rmnet*) ;;
 			*) continue ;;
 		esac
+
 		for q in "$dev"/queues/rx-*/rps_cpus; do
-			[ -e "$q" ] || continue
-			set_sysfs "$q" "$RPS_MASK" 16
+			w "$q" "$RPS_MASK"
 		done
 		for q in "$dev"/queues/rx-*/rps_flow_cnt; do
-			[ -e "$q" ] || continue
-			set_sysfs "$q" "$RPS_FLOW"
+			w "$q" "$RPS_FLOW"
 		done
-		set_sysfs "$dev/napi_defer_hard_irqs" "$NAPI_DEFER"
-		set_sysfs "$dev/gro_flush_timeout" "$GRO_FLUSH_NS"
-		apply_xps "$name" "$dev"
-		apply_fq "$name"
+		# NAPI deferral: interrupt-driven drivers only. Gated, not blind -
+		# writing these on usbnet is a no-op that looks like tuning.
+		if napi_capable "$name"; then
+			w "$dev/napi_defer_hard_irqs" "$NAPI_DEFER"
+			w "$dev/gro_flush_timeout" "$GRO_FLUSH_NS"
+			NAPI_STATE="applied($name)"
+		fi
+		# Transmit-side steering. xps_cpus is write-only, so success cannot be
+		# confirmed by reading it back. Probe once by writing and checking for
+		# a kernel error; on qmi_wwan the write is rejected, and re-attempting
+		# it every 15s reload would just spam a dead path. The result is
+		# CACHED IN THE FILE: apply() runs from a timer in a fresh process, so
+		# a shell variable would not survive between reloads.
+		if [ ! -e "$XPS_PROBE_DONE" ]; then
+			local xps_ok=1
+			for q in "$dev"/queues/tx-*/xps_cpus; do
+				[ -e "$q" ] || continue
+				if { echo "$RPS_MASK" > "$q"; } 2>/dev/null; then
+					xps_ok=1
+				else
+					xps_ok=0
+				fi
+				break
+			done
+			echo "$xps_ok" > "$XPS_PROBE_DONE" 2>/dev/null
+		fi
+		if [ "$(cat "$XPS_PROBE_DONE" 2>/dev/null)" = 1 ]; then
+			for q in "$dev"/queues/tx-*/xps_cpus; do
+				w "$q" "$RPS_MASK"
+			done
+		fi
 	done
+
 	# Deliberately NOT touching IRQ affinity. Testing on the live modem showed
 	# that writing an all-cores mask to a single IRQ (e.g. IRQ 43,
 	# xhci-hcd:usb3) makes the kernel collapse effective_affinity back to one
@@ -283,23 +123,25 @@ apply() {
 	# KNOWN CEILING: the modem's xhci interrupt therefore stays on one core
 	# (observed: 209k interrupts on cpu2, zero on the others). RPS moves the
 	# *processing* to all cores, which is what lifts the throughput ceiling,
-	# but the interrupt itself is not spread. NAPI deferral above reduces how
-	# often it fires; it does not move it.
-	if [ "$CHANGED" -gt 0 ]; then
-		logger -t byte-affinity "applied=$CHANGED rps=$RPS_MASK rfs=$RPS_FLOW napi=$NAPI_DEFER/$GRO_FLUSH_NS xps=$(xps_state) fq=$(fq_state)"
+	# but the interrupt itself is not spread. Anything that pins a single
+	# high-rate IRQ to one CPU keeps that CPU's softirq share elevated.
+
+	local xps_state
+	xps_state=$(cat "$XPS_PROBE_DONE" 2>/dev/null)
+	[ "$xps_state" = 1 ] || xps_state=unsupported
+	# Log once per state change, not once per 15 s reload: this runs from a
+	# timer, and 4 identical lines a minute is noise that hides real events.
+	if [ "$CHANGED" = 1 ]; then
+		logger -t byte-affinity "rps=$RPS_MASK rfs=$RPS_FLOW xps=$xps_state napi=$NAPI_STATE"
 	fi
 }
 
 start_service() {
 	apply
 	procd_open_instance
-	# 60s, not 15s: hotplug.d/iface and the netifd raw trigger below already
-	# cover redial, so the timer is only a safety net for a driver that resets
-	# a queue without emitting an event. Every write is idempotent now, so the
-	# cost of the reload is a few reads.
 	procd_set_param command /bin/sh -c '
 		while true; do
-			sleep 60
+			sleep 15
 			/etc/init.d/byte-affinity reload
 		done'
 	procd_set_param respawn 3600 5 0
@@ -315,8 +157,6 @@ stop_service() {
 		for q in "$dev"/queues/rx-*/rps_cpus; do
 			[ -e "$q" ] && echo 0 > "$q" 2>/dev/null
 		done
-		[ -e "$dev/napi_defer_hard_irqs" ] && echo 0 > "$dev/napi_defer_hard_irqs" 2>/dev/null
-		[ -e "$dev/gro_flush_timeout" ] && echo 0 > "$dev/gro_flush_timeout" 2>/dev/null
 	done
 	logger -t byte-affinity "cleared"
 }

@@ -1,41 +1,29 @@
 #!/bin/sh /etc/rc.common
-# BYTE by ACE - keep IPv6 measured, and prefer IPv4 only while it is broken.
+# BYTE by ACE - prefer IPv4 when the carrier's IPv6 is not actually usable.
 #
-# The work lives in /usr/libexec/byte-v6-check. This service exists so that the
-# measurement runs as a supervised, long-lived watcher instead of a one-shot
-# probe fired once 60s after boot:
-#
-#   * the old one-shot could not notice the carrier fixing itself (or breaking
-#     later), and its service_triggers() was dead code because the script had
-#     no USE_PROCD - so a failed probe was permanent until reboot;
-#   * procd restarts the watcher if it ever dies, and a raw interface trigger
-#     plus /etc/hotplug.d/iface/30-byte-v6 kick it on every ifup/ifdown, so a
-#     modem redial is judged within seconds instead of after the backoff.
-#
-# START=98: after netifd (START=about 20), odhcpd (START=96) and the modem
-# helpers, so the first round sees a real interface rather than a dialling one.
-# The watcher itself waits for `wan` to be up before judging anything.
-USE_PROCD=1
+# IPv6 stays enabled by default: users on carriers that support it keep it.
+# This only demotes IPv6 after measuring that it does not work, which is the
+# case on networks that delegate a prefix but never provide a routable WAN
+# address. Without this the router and its clients pick IPv6, send traffic into
+# a route with no usable source, and everything hangs - "internet is fine but I
+# cannot browse". See /usr/libexec/byte-v6-check for the full reasoning.
+
 START=98
 STOP=10
 
-start_service() {
-	procd_open_instance
-	procd_set_param command /usr/libexec/byte-v6-check --watch
-	procd_set_param respawn 3600 5 0
-	procd_set_param stdout 0
-	procd_set_param stderr 1
-	procd_close_instance
+boot() {
+	[ -x /usr/libexec/byte-v6-check ] || return 0
+	# Background: the probe waits up to ~60s for wanv6 to settle and must not
+	# hold up the rest of the boot.
+	( /usr/libexec/byte-v6-check ) &
 }
 
-reload_service() {
-	/usr/libexec/byte-v6-check --kick
+start() {
+	[ -x /usr/libexec/byte-v6-check ] || return 0
+	( /usr/libexec/byte-v6-check ) &
 }
 
+# Re-evaluate whenever the modem reconnects - DHCPv6 may succeed next time.
 service_triggers() {
-	# Reload on a netifd reconfigure (LuCI apply, sysupgrade config restore),
-	# and on interface events. The hotplug script is the primary path; this
-	# covers reloads that do not emit a hotplug event.
 	procd_add_reload_trigger "network"
-	procd_add_raw_trigger "interface.*" 2000 /usr/libexec/byte-v6-check --kick
 }

@@ -35,6 +35,10 @@ sysupgrade -n BYTE_by_ACE-<version>-qualcommax-ipq807x-arcadyan_aw1000-squashfs-
 
 - `-n` discards `/etc/config`. Use it when coming from another firmware; drop it
   to keep settings.
+- **Coming from 1.2.38:** that release could leave `dhcp.lan.ra='disabled'` and
+  `dhcpv6='disabled'` on the overlay. Keeping settings keeps them, so IPv6 stays
+  demoted until the carrier passes traffic or you set them back to `server`, or
+  flash with `-n`.
 - First install or a bricked unit: flash `...-squashfs-factory.ubi` from
   U-Boot/TFTP.
 - Non-destructive test: boot `...-initramfs-uImage.itb` straight into RAM first.
@@ -83,7 +87,9 @@ sysupgrade -n BYTE_by_ACE-<version>-qualcommax-ipq807x-arcadyan_aw1000-squashfs-
 - **Dashboard widgets** — Mobile, Temperature and Storage. NSS offload is not
   shown: its counter only moves while the NSS clock scales itself, which is off
   here. NSS/ECM still accelerate traffic (`qca-nss-ecm` ships and stays loaded).
-- **Proxy** — PassWall2 with Xray; first-run rules in place.
+- **Proxy** — PassWall2 with Xray; first-run rules in place. PassWall **v1**
+  (4.66-8) is also in the image and ships **disabled** — enable it from the menu
+  after disabling PassWall2; they cannot run together.
 - **Remote** — Tailscale on demand; `tailscaled` starts only once credentials
   exist.
 - **Tuning** — see below.
@@ -95,8 +101,10 @@ opkg update
 opkg install luci-app-banip luci-app-smartdns luci-app-mwan3 luci-app-sqm
 opkg install luci-app-openclash luci-app-adguardhome luci-app-nikki
 opkg install tailscale luci-app-tailscale-community
-opkg install luci-app-passwall   # PassWall v1 (Lua); disable passwall2 first
 ```
+PassWall v1 is *already installed* (disabled). To use it, disable PassWall2 in
+LuCI first — both want port 53 and the same nft redirect hooks, so whichever
+reloads last wins and the other reports "not running".
 
 ### Tuning defaults
 
@@ -105,12 +113,11 @@ opkg install luci-app-passwall   # PassWall v1 (Lua); disable passwall2 first
 | Congestion control | `bbr` with `fq` (`kmod-tcp-bbr`), `tcp_slow_start_after_idle=0` |
 | Socket buffers | `tcp_rmem`/`tcp_wmem` capped at 4 MB, `tcp_moderate_rcvbuf=1`, `tcp_notsent_lowat=131072` |
 | TCP Fast Open | `tcp_fastopen=3` (client + server), blackhole timeout 60 s |
-| NAPI / backlog | `netdev_budget=2400`, `netdev_max_backlog=16384`, `dev_weight=64`, `napi_defer_hard_irqs=2` + `gro_flush_timeout=20000` ns on `wwan*` |
-| WAN egress queue | `fq` sized from the bearer instead of the 10000-packet default: `limit` ≈ 3× BDP (1981 packets at 200 Mbit/40 ms), `flow_limit=100`, `initial_quantum=64 KB`; knobs in `/etc/config/byte` |
-| Busy polling | `busy_poll=50`, `busy_read=50` — opt-in per socket (`SO_BUSY_POLL`), so it only affects the router's own services |
-| Neighbour tables | `gc_thresh1/2/3 = 512/2048/4096` for IPv4 **and** IPv6 |
-| Packet steering | `packet_steering=1`, `steering_flows=32768`, RPS/RFS `0f` on `wwan*`, bounded `fq` on the modem netdev, XPS probed per device |
-| Fail-fast | `tcp_no_metrics_save=1`, `tcp_syn_retries=3`, `tcp_synack_retries=3`, `tcp_retries2=8` |
+| NAPI / backlog | `netdev_budget=2400`, `netdev_max_backlog=16384`, `dev_weight=64`; NAPI deferral (`napi_defer_hard_irqs=2`, `gro_flush_timeout=4000` ns) is written **only** on drivers that register a NAPI instance — usbnet/`qmi_wwan` does not, so `wwan*` skips it with an explicit log instead of faking it |
+| WAN egress queue | `fq` **sized from measurement, not from a guess**: `byte-fq-learn` samples `tx_bytes` (5 s window, 300 s interval), keeps a raise-only best with a 15 % margin, converts it to 60 ms of link at 1538 B/frame (clamped 128..2000), and applies it to `wwan0_1`; `wwan0` (the parent the driver re-enqueues on) gets a fixed `limit 64`. No measurement yet ⇒ kernel default untouched |
+| Busy polling | `busy_poll=50` only. It is armed and **inert** on this hardware: no driver in 6.12.94 implements `ndo_busy_poll`, and usbnet receives via `netif_rx()` so no `napi_id` is ever attached. `busy_read` stays 0 — it is *not* opt-in per socket (`net/core/sock.c:3649`) |
+| Packet steering | `packet_steering=1`, `steering_flows=32768`, RPS/RFS `0f` on `wwan*`, XPS probed per device. `byte-affinity` no longer touches `tc`; `byte-fq` is the only actor that does |
+| Not tuned | `tcp_no_metrics_save`, `tcp_syn_retries`, `tcp_synack_retries`, `tcp_retries2` and the `gc_thresh*` neighbour tables are absent: `sysctl.conf` is back on the 1.2.30 baseline (plus `busy_poll`), and 1.2.39 deliberately does not re-add them |
 | CPU / memory | `performance` governor, zram, modem IRQs spread across cores |
 | Conntrack | 32768 max, 7440 established, keepalive 120/15/4 |
 | vnStat | `DatabaseDir=/etc/vnstat` on the overlay, re-asserted every boot |
@@ -249,19 +256,14 @@ nss/                       NSS sources + kernel patches
   NSS driver queues, not from a flow-offload shortcut.
 - **No hardware flow offload.** `flow_offloading_hw` stays `0` — `nss-dp` does
   not implement it, so fw4 would accept a `1` and silently ignore it.
-- **WAN IPv6 is autodetected, measured, and demoted only while it is broken.**
-  `/usr/libexec/byte-v6-check` recreates `wanv6` (`proto=dhcpv6`,
-  `device=@wan`) whenever qmodem has deleted it on a redial, then retries
-  `ifup wanv6` until it settles. Connectivity is measured with real traffic,
-  never "an address exists": ICMPv6 echo to two anycast resolvers
-  (`2001:4860:4860::8888`, `2606:4700:4700::1111`) plus an HTTP GET over IPv6
-  (`uclient-fetch -6`) for networks that filter ICMPv6. Every probe uses a
-  numeric address, so a broken DNS server cannot look like a broken uplink. On
-  PD-only carriers (delegated prefix, no global address on the WAN netdev) the
-  ICMPv6 probe is source-bound to the LAN address that came from the delegated
-  prefix - the only way to tell "the prefix is routed" from "there is no source
-  address". Two consecutive agreeing rounds are required before anything
-  changes.
+- **WAN IPv6 is measured once at bring-up and demoted only while it is broken.**
+  `/usr/libexec/byte-v6-check` runs at `S98` and once more from `95-byte-v6` on
+  `wan`/`wanv6` ifup: it waits for `wanv6` to settle (20 × 3 s) and then probes.
+  Connectivity is measured with real traffic, never "an address exists":
+  `wget -6` against three targets with a 6 s timeout, at least one numeric, so a
+  broken DNS server or a carrier that drops ICMPv6 cannot look like a broken
+  uplink. A router with no global v6 source address at all is demoted
+  immediately - it could not route v6 for its clients either.
   On this carrier (`wanv6` completes the DHCPv6 exchange - global `/64`,
   delegated `/64`, both ISP resolvers - but nothing past the modem answers: the
   modem's own gateway `fe80::ad53:8745:d045:ba03` replies while the ISP
@@ -269,17 +271,17 @@ nss/                       NSS sources + kernel patches
   flat, and `AT+QMAP="wwan"` reports no IPv6 on the mux
   (`"IPV6","0:0:0:0:0:0:0:0"`)) the verdict is demotion:
   `dhcp.lan.ra`/`dhcpv6` are set to `disabled` so clients stop receiving a
-  prefix they cannot use, `gai.conf` prefers IPv4 for any glibc binary added
-  later, and `unreachable default metric 1` replaces the black hole with an
-  immediate ICMPv6 unreachable. Metric 1 is deliberate: netifd installs its
-  own `::/0` at metric 11 and would otherwise re-open the hole on the next
-  renew. While demoted the check re-probes every 30 s (300 s when healthy) and
-  every interface event kicks it, so as soon as the carrier passes IPv6 the
-  original `dhcp.lan.ra`/`dhcpv6` values come back from `/etc/byte/v6.state`
-  and traffic returns to IPv6 without a reboot. The br-lan ULA is deliberately
-  left alone - it keeps LAN-local IPv6 (router access, PassWall) working, and
-  the fail-fast route is what removes the hang, not the missing ULA. A unit
-  whose owner set `ra=disabled` gets exactly that value back after a restore.
+  prefix they cannot use, `gai.conf` makes `getaddrinfo()` return IPv4 first,
+  the br-lan ULA is flushed so the kernel cannot source internet traffic from an
+  address that can never be routed back, and a `metric 2048` default route is
+  added so the broken path fails instead of hanging. Metric 2048 is deliberate:
+  netifd installs its own `::/0` at metric 11, so this route never wins - it
+  exists only to keep a usable default present after the flush.
+  There is **no watcher**: the check decides and exits. A later success (next
+  boot, or the next `wan`/`wanv6` ifup) restores `ra=server`/`dhcpv6=server` and
+  removes the route. No snapshot file, so restore is deterministic. The br-lan
+  ULA is withdrawn only for internet sourcing; LAN-local IPv6 (router access,
+  PassWall) still works over link-local, and the prefix comes back on restore.
 - **Whoever touches the QMAP mux: it has no link-local unless one is added.**
   `qmi_wwan_q` gives `wwan0_1` the base interface's MAC, so the EUI-64
   link-local the kernel would generate is already owned by `wwan0` and
@@ -661,12 +663,16 @@ stays on that core regardless. Everything below works *around* that, not on it.
   `rps_flow_cnt=32768` and `net.core.rps_sock_flow_entries=32768`, which is the
   same number `steering_flows` carries - a lower global value silently clamps
   the per-queue tables that `packet_steering` writes.
-- **NAPI deferral** cuts how often that one IRQ fires at all:
-  `napi_defer_hard_irqs=2` with `gro_flush_timeout=20000` (nanoseconds, i.e.
-  20 us) on the modem netdev. These are the values
-  `netdev_sw_irq_coalesce_default_on()` uses upstream; usbnet never calls it, so
-  they are 0 by default here. 20 us is below any measurable RTT - this is an
-  interrupt-count win that costs no latency.
+- **NAPI deferral, only where it can do anything.** `napi_defer_hard_irqs` and
+  `gro_flush_timeout` are read exclusively on the `napi_schedule` path
+  (`net/core/dev.c`), and usbnet - which is what `qmi_wwan`/`qmi_wwan_q` and
+  every `cdc_*` here are built on - receives with `netif_rx()` into the CPU
+  backlog and registers **no** NAPI at all. 1.2.33 wrote the two sysfs files on
+  `wwan*` anyway and reported the values back as if applied. `byte-affinity` now
+  checks the driver first (`napi_capable()`), skips the write on every
+  usbnet-family driver, and logs `napi=none` so the log says which happened.
+  Where a driver does register a NAPI the values are
+  `napi_defer_hard_irqs=2` and `gro_flush_timeout=4000` ns.
 - **XPS cannot be spread.** `qmi_wwan`/`qmi_wwan_q` mux netdevs expose a single
   tx queue, and the kernel rejects a multi-CPU `xps_cpus` mask in that case.
   `byte-affinity` therefore counts the tx queues per device, attempts the write
@@ -674,65 +680,91 @@ stays on that core regardless. Everything below works *around* that, not on it.
   `/var/run/byte-affinity.xps.<dev>`; the boot log line reports
   `xps=wwan0=unsupported wwan0_1=unsupported` instead of pretending otherwise.
   Retrying a write the kernel will never accept just burns forks every minute.
-- **fq on the modem netdev, with a bound.** BBR computes a rate but only
-  `sch_fq` paces it. `default_qdisc=fq` covers devices present at boot; the wwan
-  mux interface is registered after qmodem dials, so `byte-affinity` checks the
-  live qdisc and runs `tc qdisc replace dev wwan0 root fq` when it is not
-  already `fq`. It no longer stops at "the qdisc is fq": the parameters are read
-  back and re-applied when they differ from the sized ones (see below).
-- **The reload no longer churns.** Every sysfs write goes through `set_sysfs`,
+- **`tc` is not this service's job any more.** BBR computes a rate and only
+  `sch_fq` paces it, so `fq` still has to be on the modem netdevs - but sizing
+  it belongs to the service that measures the link. `byte-affinity` stopped
+  calling `tc` entirely in 1.2.39 (`byte-fq` is the only actor); 1.2.37 had a
+  `tc qdisc replace` inside a function that ran on every interface event, which
+  rebuilt the WAN queue every 2 s while the IPv6 watcher was up.
+- **The reload does not churn.** Every sysfs write goes through `set_sysfs`,
   which compares first - numerically for hex masks, because the kernel prints
   `f`, not `0f`, and a string compare would rewrite every time. Rewriting
   `rps_cpus` with an identical value still allocates a new steering map and
-  schedules `call_rcu`, so the old 15 s reload was keeping the RCU path busy for
-  the life of the boot. The timer is now 60 s (hotplug + the netifd raw trigger
-  already cover redial) and steady state does zero writes, zero `tc` forks and
-  logs nothing.
+  schedules `call_rcu`, so steady state must do zero writes and log nothing.
+  The 15 s loop, the `network` reload trigger and the 2 s `interface.*` raw
+  trigger are all still there; they are safe now precisely because every write
+  is idempotent and none of them touches `tc` or calls `ifup`.
 No SQM is involved: latency under load stays the job of a bounded `fq` plus BBR
-(see the next section), and the added TCP keys only change *time to notice* a
-dead path (`tcp_no_metrics_save=1`, `tcp_syn_retries=3`,
-`tcp_synack_retries=3`, `tcp_retries2=8`) - none of them touches throughput.
-Gates: `RPS_MASK=0f`, `RPS_FLOW=32768`, `START=96`, the NAPI/GRO constants, the
-`set_sysfs` helper, the `tc qdisc replace` path, the fq sizing helpers and the
-per-device XPS probe must all be present; a `sleep 15` reload is a build
-failure.
+(see the next section).
+Gates: `RPS_MASK=0f`, `RPS_FLOW=32768`, `START=96`, the `NAPI_DEFER` /
+`GRO_FLUSH_NS` constants, the `napi_capable()` driver gate, the `set_sysfs`
+helper, the per-device XPS probe, and the **absence** of any `tc qdisc` call
+must all hold; the gate that used to require the fq sizing helpers now fails if
+they come back.
 
-### The WAN queue is bounded, not shaped
+### The WAN queue is bounded, from measurement
 The image ships no SQM, so the only thing standing between a saturated upload
-and a 1-second latency spike is the size of the modem's egress queue. It was
-the kernel default: `fq` with `limit 10000` packets, i.e. ~15 MB, which is
-0.6 s of queue at 200 Mbit/s and 1.2 s at 100 Mbit/s. `flow_limit` (100) already
-bounded a *single* flow, but a client running parallel uploads multiplies that
-by the number of flows.
-
-The queue is now sized from the bearer instead of left at the default:
+and a 1-second latency spike is how many packets our own qdisc will hold. The
+kernel default is `fq` with `limit 10000` **per band** (`sch_fq.c`: the limit is
+a per-band cap, not a global one), i.e. ~15 MB, which is 0.6 s of queue at
+200 Mbit/s and 1.2 s at 100 Mbit/s. What 1.2.37 did about that was worse than
+leaving it alone: it applied
 
 ```
-limit         = 3 * uplink_kbit * rtt_ms / 12112      (packets)
-              = 1981 at 200 Mbit/s and 40 ms           (~3 MB, ~120 ms)
-flow_limit    = 100                                   (150 KB, <7 ms at 200 Mbit/s)
-initial_quantum = 65536                               (slow-start burst, was 15140)
+tc qdisc replace dev wwan0_1 root fq limit 1981
 ```
 
-`12112` is `8 * 1514`: the divisor that turns kbit/s x ms into 1500-byte
-packets. Three times the bandwidth-delay product is the usual compromise -
-enough in flight to keep the bearer full, small enough that the queue cannot
-hide a second of delay. Nothing is shaped: there is no rate ceiling and no
-classification, the qdisc simply refuses to grow past the bound, so a flow that
-is not saturating the link never sees it.
+where `1981` came from `uplink_kbit=200000` typed into `/etc/config/byte` by
+hand, applied from the interface hotplug path — so every redial rebuilt the
+queue, and on a 20 Mbit SIM the "3x BDP" bound was really 1.2 s of standing
+queue in our own qdisc. That is latency added by the firmware.
 
-Knobs live in `/etc/config/byte` (`byte.fq.uplink_kbit`, `rtt_ms`, `flow_limit`,
-`initial_quantum`, `enabled`). Defaults are what this image was tuned with;
-`enabled=0` restores the kernel default but keeps `fq` installed, because BBR
-still needs pacing. Nothing here needs a reflash to change - hence a config file
-rather than constants baked into the init script - and `byte-affinity` logs
-`fq=wwan0_1=1981/100` next to the RPS masks so the applied bound is visible in
-`logread` without an SSH session.
+1.2.39 removes the guess and the config file both. `byte-fq-learn` measures:
 
-`byte-fq-measure` reports what the queue is doing: qdisc parameters, backlog and
-drops, the live sysctl values, and p50/p95/p99 for the gateway and `1.1.1.1`.
-Run it idle and again during a saturating upload; the p99 delta is the number
-that matters.
+1. **Sample** `tx_bytes` on the interface that actually carries IP (`wwan0_1`
+   when `qmi_wwan` created the mux, else the default route's dev) over a 5 s
+   window, once every 300 s. No probe traffic, no external server.
+2. **Keep a raise-only best**: a sample enters only if it beats the recorded
+   best by 15 %, so one slow 5 s window cannot shrink the queue and a genuinely
+   faster link is recorded once.
+3. **Convert** to `limit = kbit*1000/8 * 60 ms / 1538 B`, clamped 128..2000
+   packets. At 20 Mbit that is 128 (the floor), 35 Mbit 170, 100 Mbit 487,
+   200 Mbit 975, 300 Mbit 1462.
+4. **Apply, then compare against the live qdisc** on every later round: `tc`
+   runs only when the limit actually on the device differs from the computed
+   one. A state file alone is not enough — a reboot, or a qmodem redial that
+   recreates the mux, drops the qdisc while the state still records a limit,
+   and the bound would then never come back. A unit that never uploads never
+   gets a `tc` call and keeps the kernel default.
+
+The queue is two-stage because the driver makes it two-stage. `qmimux_start_xmit`
+sets `skb->dev = real_dev` and calls `dev_queue_xmit` again
+(`drivers/net/usb/qmi_wwan.c:110`), so a packet passes the `wwan0_1` qdisc and
+*then* the `wwan0` qdisc. Bounding only the child leaves the parent free to hold
+another full BDP. So:
+
+| stage | device | bound |
+|---|---|---|
+| child | `wwan0_1` | measured BDP, 128..2000 packets, re-applied only when the live qdisc limit differs |
+| parent | `wwan0` | fixed `limit 64` — enough to keep the USB URBs fed, applied at most once per boot |
+
+`fq` and not `fq_codel`: without `maxrate` fq does not shape (`sch_fq.c:307`), so
+throughput is never capped — only the depth of our own queue changes, and
+overflow is plain tail drop. The modem's internal buffer is downstream and not
+reachable from here; fixing that needs shaping, i.e. SQM, which this image does
+not ship by policy.
+
+`byte-affinity` no longer touches `tc` at all. `byte-fq` (one procd instance, no
+timer, no hotplug) is the only actor. Inspect it with
+`byte-fq-learn --show`, or override the measurement after a speed test with
+`byte-fq-learn --set 35000`; state lives in `/etc/byte/fq.state` and
+`byte-selfcheck` reports `queue.wwan0_1.limit` / `queue.wwan0.parent_limit`
+against it at boot.
+
+Two honest limits of the raise-only rule: a unit that moves to a *slower* SIM
+keeps the larger bound recorded earlier (delete `/etc/byte/fq.state` or use
+`--set`), and a link that idles at a few kbit during the 5 s window records the
+idle rate - which is harmless, because it lands on the 128-packet floor.
 
 Two things deliberately **not** changed here:
 
@@ -840,13 +872,13 @@ and the image's `qca-nss-ecm.init` is the patched reader (no
 `disable_packet_steering`, `apply_packet_steering` called from both start and
 reload).
 
-The IPv6 overlay was checked the same way in the 1.2.32 build:
+The IPv6 overlay was checked in the 1.2.39 preflight:
 `usr/libexec/byte-v6-check` (md5 matches the repo copy), `etc/init.d/byte-v6`
-with `USE_PROCD=1` / `START=98` / `--watch`, `etc/rc.d/S98byte-v6` →
-`../init.d/byte-v6`, `etc/hotplug.d/iface/30-byte-v6` executable, and no
-`95-byte-v6` left anywhere in the image. `odhcpd` is the 2026.06.29 build whose
-`config.c` treats `ra_lifetime=0` as "unset", which is why demotion uses
-`ra=disabled` plus the unreachable default instead of a lifetime-0 RA.
+with `START=98` and **no** `USE_PROCD`, `etc/rc.d/S98byte-v6` →
+`../init.d/byte-v6`, `etc/hotplug.d/iface/95-byte-v6` executable, and no
+`30-byte-v6` or `/etc/byte/v6.state` anywhere in the image. `odhcpd` is the
+2026.06.29 build whose `config.c` treats `ra_lifetime=0` as "unset", which is
+why demotion uses `ra=disabled` instead of a lifetime-0 RA.
 
 ### LuCI pages
 #### modeminfo — shared cache, SA support
@@ -968,138 +1000,193 @@ LuCI app that no longer exists in this luci pin — see the changelog.
 Only a green `repo` gate justifies a push. CI then re-confirms the same targets
 and publishes the artifacts; it no longer discovers problems.
 
-### PassWall v1 is published, never installed
+### PassWall v1 ships in the image, disabled
 `luci-app-passwall` (PassWall **v1**, Lua, `PKG_VERSION:=4.66-8`) is vendored at
-`packages/luci-app-passwall` and built by `.github/build-ondemand-packages.sh`,
-so the `.ipk` lands in the release's opkg repo while the image keeps only
-passwall2. Reasons:
+`packages/luci-app-passwall`. It was published **on demand** (release opkg repo,
+not the image) through 1.2.38, and in practice that was unreachable: the repo is
+filtered against the image manifest, so its three hard runtime deps —
+`dns2socks`, `dns2tcp`, `microsocks` — were never published, `opkg` could not
+resolve them, and the install simply failed. The package looked available and
+never installed.
 
-- **They cannot coexist.** Both install transparent-proxy rules on the same
-  nft hook and both want port 53. Whichever reloads last wins, the other is torn
-  down and its page reports "not running". Installing v1 is therefore a
-  deliberate switch: disable passwall2 first, `reboot`, then enable v1.
-- **Lua controllers.** v1 is `luasrc/` (pulls `luci-lua-runtime`,
-  `luci-compat`, `luci-lib-jsonc`), which the image otherwise avoids.
+Since 1.2.39 all four are **in the image**, and v1 **ships disabled**:
 
-It is **vendored, not a feed pin**, so the on-demand build compiles the exact
-copy reviewed here and no `opkg upgrade` can swap it for an upstream version -
-the failure mode that hit qmodem's TTL script (see above). `ondemand.txt` lists
-`dns2socks`, `dns2tcp` and `microsocks` (its only hard deps the image lacks) so
-Kconfig keeps the parent selectable, but they are not republished: the same
-`dns2tcp 1.1.2-r1` / `microsocks 1.0.5-r2` are in the ImmortalWrt 24.10.6
-packages feed that `/etc/opkg/distfeeds.conf` already carries. `dnsmasq-full`,
-`chinadns-ng`, `ip-full`, `unzip`, `ipset`, `nftables-json` (provides `nft`)
-and `kmod-nft-{socket,tproxy,nat}` are in the image, so v1's **Nftables
-Transparent Proxy** variant works as-is and its uci-defaults auto-detects
-`use_nft=1`.
+- `root/usr/share/passwall/0_default_config` has `option enabled '0'`, so the
+  script exits before it can take port 53 or the redirect hooks away from
+  passwall2.
+- The package itself ships no `rc.d` symlink, but that is not enough:
+  `include/rootfs.mk` (`prepare_rootfs`) **enables every** `/etc/init.d/*`
+  script while assembling the rootfs, so the image still gets
+  `S99passwall`/`K15passwall`. The gate therefore lives inside the vendored
+  `root/etc/init.d/passwall`: `boot()` exits unless
+  `uci -q get passwall.@global[0].enabled` is `1`. A gate is required, not
+  optional — without it, boot runs `app.sh` stop+start against passwall2.
+- `passwall_server` needs no gate of its own: its `start()` already returns
+  unless `@global[0].enable` is set (`luasrc/passwall/server_app.lua`), and
+  `98-passwall` hotplug checks `enabled='1'` plus the ready lock before it acts.
+- Enabling v1 is a deliberate switch: disable passwall2 first, `reboot`, then
+  enable v1. They cannot coexist — both install transparent-proxy rules on the
+  same nft hook and both want port 53, so whichever reloads last wins and the
+  other is torn down and reports "not running".
+- The package's `uci-defaults` script still runs on first boot, exactly as it
+  does when v1 is installed with `opkg`: it sets `dhcp.@dnsmasq[0].localuse=1`,
+  adds `ucitrack` entries and declares two `firewall` include sections pointing
+  at `/var/etc/passwall.include` and `/var/etc/passwall_server.include`. Those
+  files only exist while v1 runs, so fw4 logs
+  `specifies unreachable path ... ignoring section` once per boot
+  (`usr/share/ucode/fw4.uc`, `fs.access()` check) and carries on — warning, not
+  error, and the ruleset is unchanged. `localuse=1` is what every passwall
+  install sets (the router resolves through its own dnsmasq); it is inert for
+  the default configuration and is kept so enabling v1 later needs no extra
+  step.
+- Size cost, measured not estimated: the four packages stage 2,578,978 bytes,
+  which `mksquashfs -comp xz -b 262144` (the image's own compressor and block
+  size) turns into **905,216 bytes ≈ 0.86 MiB**. The sysupgrade image goes from
+  ~34.4 MB to ~35.3 MB.
+
+It stays **vendored, not a feed pin**, so the image compiles the exact copy
+reviewed here and no `opkg upgrade` can swap it for an upstream version — the
+failure mode that hit qmodem's TTL script (see above).
 
 Cores are pinned to **Xray only** (the Makefile's header comment says why).
-Upstream turns on nine `INCLUDE_*` options for aarch64, which would make every
-CI run compile v2ray-core (Go), shadowsocks-libev, shadowsocks-rust (Rust),
-shadowsocksr-libev, trojan-plus, simple-obfs and haproxy, then publish ~25 MB
-of cores nobody asked for. `xray-core` is already in the image for passwall2,
-so v1 has a working core at zero cost; any other core is one
-`opkg install shadowsocks-libev-ss-redir` (official feeds) away, and turning an
-`INCLUDE_*` default back to `y` is a one-line change.
+Upstream turns on nine `INCLUDE_*` options for aarch64, which would pull
+v2ray-core (Go), shadowsocks-libev, shadowsocks-rust (Rust), shadowsocksr-libev,
+trojan-plus, simple-obfs and haproxy into the image. `xray-core` is already
+there for passwall2, so v1 has a working core at zero extra size; any other core
+is one `opkg install shadowsocks-libev-ss-redir` (official feeds) away.
 
-Gates assert: the package is vendored with version `4.66-8`, every heavy
-`INCLUDE_*` default stays `n` while `INCLUDE_Xray` stays `y`, the four names are
-in `ondemand.txt`, `luci-app-passwall` stays out of the image `.config`, and no
-`src-git passwall1` line sneaks back into `aw1000_byte.sh`.
+**The nftables trap.** `PACKAGE_nftables` is the **nojson** variant, it is
+`DEFAULT_VARIANT`, and it carries `CONFLICTS:=nftables-json`. `firewall4` ships
+`nftables-json`, which installs the same `/usr/sbin/nft` with JSON support. v1's
+Nftables Transparent Proxy option selected `PACKAGE_nftables`, so enabling it
+would have installed two providers of one file and image assembly would have
+died on the collision. The vendored Makefile repoints that `select` to
+`PACKAGE_nftables-json` (which `PROVIDES nftables`), and gates assert both the
+repoint and the absence of the old symbol.
 
-Local smoke test: `make package/luci-app-passwall/compile
-package/feeds/packages/dns2tcp/compile package/feeds/packages/microsocks/compile`
-gives `luci-app-passwall_4.66-8_all.ipk` (77 files,
-`Depends: ... xray-core, luci-lua-runtime`), plus `dns2tcp_1.1.2-r1` and
-`microsocks_1.0.5-r2`.
+Gates assert: vendored version `4.66-8`; `CONFIG_PACKAGE_luci-app-passwall=y`
+while `CONFIG_PACKAGE_nftables` stays **out** of `.config` and
+`nftables-json` stays in; the package ships disabled (`enabled '0'`) and its
+`boot()` honours that switch (`passwall-v1-boot-gate`);
+every heavy `INCLUDE_*` default stays `n` while `INCLUDE_Xray` stays `y`; the
+four names are **absent** from `ondemand.txt` (in the image now, so publishing
+them again would just be filtered back out); and no `src-git passwall1` line
+sneaks back into `aw1000_byte.sh`.
 
-Two fixes to the vendored copy, both silent failures otherwise:
+Fixes to the vendored copy, each of which was silent before:
 
 - `root/etc/uci-defaults/luci-passwall` arrived as `0664`, so the ipk shipped
   it non-executable. That script is what creates `/etc/config/passwall` from
-  `0_default_config` and flips `use_nft` to `1`, so v1 would start with no
-  config and the iptables path this image does not have. Now `0755`, and a gate
-  asserts every script in the package is executable.
-- The `INCLUDE_*` sub-options lacked `depends on PACKAGE_$(PKG_NAME)`, so
-  `_INCLUDE_Xray=y` survived in the image `.config` with the parent `n`. Adding
-  the dependency keeps them out of the image and still defaults `Xray` on for
-  the on-demand build.
+  `0_default_config` and flips `use_nft` to `1`. Now `0755`, with a gate.
+- The `INCLUDE_*` sub-options used to carry
+  `depends on PACKAGE_$(PKG_NAME)`, added in 1.2.30 to stop `_INCLUDE_Xray=y`
+  surviving with the parent `n`. That is a Kconfig cycle and it only stayed
+  quiet because the parent was *off*: `LUCI_DEPENDS` already contains
+  `+PACKAGE_$(PKG_NAME)_INCLUDE_X:<core>` for every one of them, i.e. the
+  parent depends on each sub-option, so the reverse `depends on` closes the
+  loop. The first build with the package enabled died with
+  `tmp/.config-package.in: error: recursive dependency detected!`
+  (`PACKAGE_luci-app-passwall` ⇄ `_INCLUDE_Brook`). The reverse dependency is
+  removed; the options are pinned by their `default n` / `default y` and
+  asserted in `.config` instead, which is what the gate actually needs.
 
-### IPv6: autodetect, measure, demote, restore
+### IPv6: measure once at bring-up, demote, stop
+The problem this solves: on some carriers the modem negotiates an IPv6 bearer,
+dnsmasq hands LAN clients a global prefix, the kernel installs a default IPv6
+route — but no usable global address ever appears on the WAN device. Clients
+then prefer IPv6 (RFC 6724), send everything at a default route with no source,
+and it is silently dropped. The symptom is "internet is fine but I cannot
+browse".
 
-The first IPv6 implementation shipped a one-shot probe and could not do what
-the feature promised. Four separate defects, all silent:
+The policy is unchanged and deliberate: **IPv6 is on out of the box**, and it is
+demoted only after a real connection has failed twice. What 1.2.38 got wrong was
+the *cadence*, not the decision.
 
-1. `/etc/init.d/byte-v6` had no `USE_PROCD`, so its `service_triggers()` never
-   ran. `procd_add_reload_trigger "network"` was dead code and the only probe
-   was the one fired ~63 s after boot. A carrier that started serving IPv6 ten
-   minutes later was never noticed, and a carrier that broke later kept
-   advertising a dead prefix until the next reboot.
-2. Demotion wrote `dhcp.lan.ra=disabled` and `dhcpv6=disabled`, but *restore*
-   re-wrote `ra=server` / `dhcpv6=server` from constants. A unit whose owner had
-   deliberately disabled RA got IPv6 forced back on after a single failed
-   probe, and every demotion/restore cycle wrote a different config than the
-   user had.
-3. `has_global_v6()` matched `inet6 2[0-9a-f]`, so a `3fff::/20` address (valid
-   global unicast) counted as "no IPv6", and any PD-only carrier - delegated
-   prefix present, no global address on the WAN netdev - was demoted even when
-   the prefix routed perfectly.
-4. Demotion also flushed the br-lan global addresses and added a bogus
-   `default dev wwan0_1 metric 2048`. The route lost against netifd's own
-   `::/0` at metric 11, so IPv6 traffic still went into the black hole, while
-   the flush broke LAN-local IPv6 and made a restore depend on odhcpd
-   renumbering the LAN.
+#### Why 1.2.38 hung the box
+1.2.38 turned the probe into a procd service with a `network` reload trigger,
+`--watch`, and a `--kick` path from hotplug. That built a feedback loop on a SIM
+whose IPv6 never leaves the modem:
 
-The rewrite keeps one decision point (`/usr/libexec/byte-v6-check`) and gives
-it three modes: one-shot (manual/fallback), `--watch` (procd service), and
-`--kick` (hotplug and reload). Design points:
+1. `settle_wanv6()` called `ifup wanv6` on its retry rounds, and `ifup` emits
+   `interface.*` ubus events.
+2. `30-byte-v6` (hotplug) and `byte-affinity`'s raw 2 s interface trigger both
+   reacted to those events.
+3. `byte-affinity`'s reaction ran `apply()`, which at the time did
+   `tc qdisc replace` — so every event rebuilt the qdisc on **both** `wwan0` and
+   `wwan0_1`.
+4. `91-byte-selfcheck` dumped its report on the same events.
 
-- **Autodetect.** `ensure_wanv6()` recreates `network.wanv6` when qmodem has
-  deleted it, and `ifup wanv6` is retried while the interface settles. Every
-  round also re-asserts the MAC-derived link-local on the WAN netdevs, because
-  qmi_wwan_q hands every mux interface the base MAC and odhcp6c cannot send a
-  SOLICIT without a source.
-- **Real connectivity, three probes.** ICMPv6 to two anycast resolvers, then a
-  source-bound ICMPv6 for PD-only carriers, then an HTTP GET over IPv6
-  (`uclient-fetch -6`, numeric URL) for networks that drop ICMPv6. Busybox
-  `nc` is built without `NC_EXTRA`/`NC_110_COMPAT`, so it has no `-w` and no
-  family switch - "TCP handshake with a timeout" is not available there;
-  `uclient-fetch` is, and it is in the image.
-- **PD-only is not a failure.** A delegated prefix with no WAN address is
-  probed from a LAN address that belongs to that prefix. The carrier routes
-  the prefix to the CPE, so replies arrive; without this step every PD-only
-  carrier would look broken.
-- **Debounce.** Two consecutive agreeing rounds.
-- **Demotion is fail-fast, not fail-silent.** `unreachable default metric 1`
-  wins over netifd's `::/0` at metric 11, so both forwarded and
-  router-originated IPv6 get an immediate ICMPv6 unreachable and applications
-  fall back to IPv4 at once. The br-lan addresses are left in place: the ULA
-  is what keeps LAN-local IPv6 working, and a restore that re-adds a prefix
-  captured before the outage can re-add a prefix that no longer exists.
-- **Restore is a snapshot, not a guess.** `/etc/byte/v6.state` records the
-  previous `dhcp.lan.ra` / `dhcp.lan.dhcpv6` including "the key did not
-  exist", and restore puts exactly that back (`uci delete` for an absent key).
-  The state file lives in `/etc`, so a demotion that spans a reboot is still
-  restored correctly.
-- **Cadence.** 300 s while healthy, 30 s while demoted, plus `--kick` from
-  `/etc/hotplug.d/iface/30-byte-v6` and from a procd raw interface trigger.
-  The 95-byte-v6 hotplug runner that started a second one-shot check per ifup
-  is gone: two concurrent uci commits against `dhcp` are not safe, and the
-  watcher already owns the decision.
+Net effect: endless uplink reconfiguration on a bearer that was already
+marginal. Slow load, unreachable web UI, no single error in the log to point at.
 
-`odhcpd`'s `ra_lifetime=0` would be the neatest way to withdraw only the
-default route while keeping the LAN prefix advertised, but this odhcpd treats
-`0` as "unset" (`config.c`: `if (ra_lifetime != 0)`), so it cannot express it.
-`ra=disabled` is the honest signal: clients stop being told to use IPv6 at
-all, and the fail-fast route covers the window before their old RA expires.
+#### 1.2.39: back to one shot
+`/usr/libexec/byte-v6-check` is the 1.2.30 design again: start once at boot
+(`START=98`), wait for `wanv6` to settle (20 × 3 s), pick the WAN device with a
+global address, probe, and **exit**. `95-byte-v6` re-runs it once on `wan` or
+`wanv6` ifup, because a redial can change whether the carrier serves IPv6. That
+is the entire schedule. No `USE_PROCD`, no reload trigger, no watcher, no
+periodic daemon.
+
+It cannot re-trigger itself: everything it writes — `/etc/gai.conf`,
+`dhcp.lan.ra`/`dhcpv6`, the br-lan ULA flush, the metric-2048 route — raises no
+`interface.*` event. A `flock` on `/var/lock/byte-v6.lock` makes a boot run and
+a hotplug run that land in the same second safe (two concurrent `uci commit` on
+`dhcp` are not).
+
+Points that matter:
+
+- **The mux needs a link-local before anything else.** `qmi_wwan_q` gives every
+  mux interface the *base* MAC, so `wwan0_1`'s EUI-64 link-local collides with
+  `wwan0`'s and it ends up with none. Without one, odhcp6c cannot source a
+  SOLICIT or an RS (`Address not available` in the log), `wanv6` never comes up,
+  and a carrier that *does* serve IPv6 looks identical to one that does not.
+  `ensure_linklocal()` derives it from the raw MAC bytes (`1e:5d:db:b0:e8:b9` →
+  `fe80::1e5d:dbb0:e8b9`), deterministic and different from the base.
+- **A real connection, not "is there a route".** `wget -6` against three
+  numeric/HTTPS targets with a 6 s timeout. ICMPv6 probes alone were fooled by
+  carriers that drop ICMPv6. `EPERM` ("Operation not permitted") specifically
+  means the kernel refused to send for lack of a source address — that is the
+  broken case, and it is why `has_any_global_v6()` short-circuits to demotion:
+  a router with no global v6 address cannot route v6 for its clients either.
+- **`has_global_v6()` matches `inet6 2[0-9a-f]`** — 2000::/3, the actual global
+  unicast range. The old `2[0-9a-f]`-only test was fine for `2000::/3`; it is
+  written down here so nobody "simplifies" it into something that also matches
+  `fd…` (ULA) or `fe80…` (link-local).
+- **Demotion.** `/etc/gai.conf` sets `precedence ::ffff:0:0/96 100`, so
+  `getaddrinfo()` returns IPv4 first; `dhcp.lan.ra`/`dhcpv6` are set to
+  `disabled` and odhcpd restarts, so clients stop being told to use IPv6 at all;
+  the br-lan ULA is flushed so the kernel cannot pick it as a source for
+  internet traffic (that is the actual black hole — ULA-sourced packets can
+  never be routed back, so every connection hangs until it times out); and a
+  `default … metric 2048` route is added so the broken path fails fast instead
+  of hanging, without touching the user's own IPv6 config.
+- **Restore.** Demote is reversed by `restore_ipv6()` when a later run succeeds:
+  remove `gai.conf`, put `ra`/`dhcpv6` back to `server`, drop the metric-2048
+  route.
+- `odhcpd`'s `ra_lifetime=0` would be the neatest way to withdraw only the
+  default route while keeping the LAN prefix advertised, but this odhcpd treats
+  `0` as "unset" (`config.c`: `if (ra_lifetime != 0)`), so it cannot express it.
+  `ra=disabled` is the honest signal.
+
+#### What 1.2.38 left behind on an upgraded unit
+1.2.38 demoted with `ra=disabled` / `dhcpv6=disabled` in `/etc/config/dhcp`, and
+those live on the overlay. A `sysupgrade` **without** `-n` keeps them, so IPv6
+stays demoted until either the carrier passes traffic and a run restores it, or
+you undo it yourself:
+
+```
+uci set dhcp.lan.ra='server'
+uci set dhcp.lan.dhcpv6='server'
+uci commit dhcp
+/etc/init.d/odhcpd restart
+```
+
+A `sysupgrade -n` discards `/etc/config` and starts from the shipped defaults;
+see the flash section.
 
 Verified in a stub harness (fake `uci`/`ip`/`ifstatus`/`ping6`/`wget` driving
-the real script), not on hardware: demote writes the snapshot and the three
-changes; a repeat round does not churn; restore deletes the keys that were
-absent and keeps `ra=disabled` when that was the owner's choice; PD-only with a
-working source-bound probe never demotes; `--kick` starts the service when no
-watcher holds the pidfile. The watcher's first `trap` did not `exit`, so
-`SIGTERM` (procd stop) left it running - fixed to `trap 'exit 0' INT TERM`.
+the real script), not on hardware: demotion writes the three changes, a second
+run does not churn, and restore puts `ra`/`dhcpv6` back.
 
 ### Open items
 - **CI build time is within ~35 % of the 6 h job cap in the worst case.** The
@@ -1113,15 +1200,16 @@ watcher holds the pidfile. The watcher's first `trap` did not `exit`, so
   `make target/compile` and `make package/compile` into separate jobs sharing
   the same cache, not raising the cap.
 - **IPv6 policy is not verified against a live carrier.** What to check on the
-  unit: `logread | grep byte-v6` shows the watcher line at boot plus one
-  verdict; `ubus call network.interface.wanv6 status` has the same
-  `ipv6-prefix` before and after demotion; `ip -6 route | grep unreachable`
-  shows the metric-1 route only while demoted; `uci get dhcp.lan.ra` returns
-  `disabled` while demoted and the unit's original value after the carrier
-  starts passing traffic; `ping6 -c2 2001:4860:4860::8888` on the router fails
-  immediately (not after 30 s) while demoted. Delete `/etc/byte/v6.state` to
-  simulate a lost snapshot, and reboot while demoted to confirm restore still
-  works across a reboot.
+  unit: `logread | grep byte-v6` shows one verdict per boot, not a repeating
+  line — a repeating line means something is re-triggering the check, which is
+  exactly the 1.2.38 failure mode. `ubus call network.interface.wanv6 status`
+  keeps the same `ipv6-prefix` before and after demotion. `ip -6 route` shows
+  the `metric 2048` default only while demoted. `uci get dhcp.lan.ra` returns
+  `disabled` while demoted and `server` after a successful run. `ping6 -c2
+  2001:4860:4860::8888` on the router must fail *immediately* while demoted,
+  not hang for 30 s. Reboot while demoted and confirm the probe reaches the same
+  verdict; the demotion is in `/etc/config/dhcp` so it survives — that is
+  intended, `sysupgrade -n` is what resets it.
 - **Untested on hardware.** The changes are build-validated only. Needed on a
   spare unit: `logread | grep byte-selfcheck`, `nss-offload status`, and a
   tcpdump on the modem netdev confirming TTL 64 for both forwarded and
@@ -1130,23 +1218,32 @@ watcher holds the pidfile. The watcher's first `trap` did not `exit`, so
   hardware test still pending.
 - **ECM state device** availability at boot is assumed from source, not seen.
 - **CPU distribution and the WAN queue bound are build-verified only.** On the
-  unit: `logread | grep byte-affinity` must show exactly one `applied=N rps=0f
-  rfs=32768 napi=2/20000 xps=... fq=wwan0_1=1981/100` line at boot and nothing
-  afterwards while idle (a repeated line means an idempotent write regressed);
-  `/sys/class/net/wwan0_1/queues/rx-0/rps_cpus` reads `f`, `rps_flow_cnt`
-  `32768`, `napi_defer_hard_irqs` `2`, `gro_flush_timeout` `20000`, and
-  `tc qdisc show dev wwan0_1` says `fq ... limit 1981p flow_limit 100p
-  initial_quantum 65536`. Then compare `/proc/interrupts | grep xhci` and
-  `/proc/softirqs` before and after a 100 MB download: the IRQ count should grow
-  slower than the packet count and NET_RX should spread over four CPUs instead
-  of one. `byte-fq-measure` run idle and under a saturating upload is the
-  latency proof: `backlog` should stay in the low hundreds instead of thousands,
-  and p99 should not grow by more than `flow_limit` allows.
-- **`busy_poll`/`busy_read` and the neighbour tables are unmeasured.** They are
-  asserted by `byte-selfcheck` (`busy_poll`, `busy_read`, `neigh.gc_thresh3`,
-  `neigh6.gc_thresh3`), which proves the kernel accepted them, not that they
-  help. A before/after on LuCI response time and DNS lookups under load is the
-  only honest way to claim anything.
+  unit: `logread | grep byte-affinity` must show exactly one
+  `rps=0f rfs=32768 xps=<state> napi=none` line at boot and nothing afterwards
+  while idle (a repeated line means an idempotent write regressed;
+  `napi=none` is correct here — usbnet registers no NAPI, so the deferral knobs
+  are skipped on purpose). `/sys/class/net/wwan0_1/queues/rx-0/rps_cpus` reads
+  `f` and `rps_flow_cnt` `32768`. `byte-fq-learn --show` prints
+  `best_uplink_kbit=… limit=… dev=…` plus the live qdisc; before any upload it
+  should say `limit=0` and `tc qdisc show dev wwan0_1` should show the kernel
+  default `fq` untouched. After a saturating upload, `limit` must be 128..2000
+  and `tc qdisc show dev wwan0` must show `limit 64p`. Then compare
+  `/proc/interrupts | grep xhci` and `/proc/softirqs` before and after a 100 MB
+  download: the IRQ count should grow slower than the packet count and NET_RX
+  should spread over four CPUs instead of one.
+- **`busy_poll` is inert here and cannot be measured into life.** No driver in
+  the 6.12.94 tree implements `ndo_busy_poll` (`grep -rl` returns nothing) and
+  usbnet receives via `netif_rx()`, which never attaches a `napi_id`, so
+  `sk_busy_loop()` bails at its `sk_napi_id >= MIN_NAPI_ID` test.
+  `byte-selfcheck` asserts `busy_poll=50` and `busy_read=0` (the latter must
+  stay 0: the kernel copies it into `sk_ll_usec` for *every* socket at
+  creation). It is kept because it costs nothing, not because it does anything.
+- **The 1.2.38 regression evidence is code-derived, not log-derived.** No
+  serial session exists on the target unit, so the upload-reconfiguration loop
+  described above was reconstructed from the 1.2.38 sources. 1.2.39 removes the
+  loop by construction (one shot, no reload trigger, `byte-affinity` no longer
+  calls `tc`), but the "web UI unreachable" symptom itself was never captured
+  live.
 - **`kpti=off` is not shipped, on purpose.** The built kernel has
   `CONFIG_UNMAP_KERNEL_AT_EL0=y`, so every syscall and interrupt entry pays a
   page-table swap on this Cortex-A53, and the WAN path is deliberately not
@@ -1189,6 +1286,106 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-04
+- **1.2.39 — revert: the IPv6 watcher is a one-shot probe again.**
+  1.2.38 turned `/usr/libexec/byte-v6-check` into a procd service with a
+  `network` reload trigger, a `--watch` loop and a `--kick` path, and its
+  `settle_wanv6()` called `ifup wanv6` on every retry round. `ifup` emits
+  `interface.*` ubus events, `30-byte-v6` and `byte-affinity`'s raw 2 s
+  interface trigger both reacted, `byte-affinity`'s `apply()` then ran
+  `tc qdisc replace` on `wwan0` **and** `wwan0_1`, and `91-byte-selfcheck`
+  dumped its report on the same events. On a SIM whose IPv6 never leaves the
+  modem that is an endless reconfiguration loop: slow load, unreachable web UI,
+  no single line in the log to point at. 1.2.39 goes back to the 1.2.30 shape -
+  start at `S98`, wait for `wanv6`, probe, decide, **exit** - plus the one
+  `95-byte-v6` run on `wan`/`wanv6` ifup, because a redial can change the
+  answer. No `USE_PROCD`, no reload trigger, no periodic daemon. It also cannot
+  re-trigger itself: `gai.conf`, `dhcp.lan.ra`/`dhcpv6`, the br-lan ULA flush
+  and the metric-2048 route raise no `interface.*` event. A `flock` keeps a boot
+  run and a hotplug run from committing `dhcp` at the same time. `30-byte-v6`
+  and the `/etc/byte/v6.state` snapshot are deleted; restore is deterministic
+  again (`ra=server`, `dhcpv6=server`).
+- **Latency: the WAN queue is sized from measurement, and bounded in both
+  stages.** 1.2.37 applied `fq limit 1981` to `wwan0_1` from a hand-typed
+  `uplink_kbit=200000` in `/etc/config/byte`, from the hotplug path - so every
+  redial rebuilt the queue, and on a 20 Mbit SIM "3× BDP" was really 1.2 s of
+  standing queue in our own qdisc. New `byte-fq-learn` (`/etc/init.d/byte-fq`,
+  `S97`, one procd instance, no timer, no hotplug) samples `tx_bytes` over 5 s
+  every 300 s, keeps a raise-only best with a 15 % margin, converts it to 60 ms
+  of link at 1538 B/frame clamped to 128..2000 (`20 Mbit → 128`, `100 → 487`,
+  `200 → 975`, `300 → 1462`), and calls `tc` only when the limit live on the
+  device differs from the computed one - so a reboot or a mux recreate, which
+  drops the qdisc, restores the bound on the next round. No measurement ⇒ no
+  `tc` call and the kernel default stays.
+  The second stage was missing entirely: `qmimux_start_xmit` sets
+  `skb->dev = real_dev` and calls `dev_queue_xmit` again
+  (`drivers/net/usb/qmi_wwan.c:110`), so every packet is queued on `wwan0_1`
+  **and then** on `wwan0`. The parent now gets a fixed `limit 64` (USB URB feed
+  only) at most once per boot, so two BDPs cannot stack. `fq`, not `fq_codel`:
+  without `maxrate` fq does not shape (`sch_fq.c:307`), and `limit` is a
+  per-band cap (`sch_fq.c:547`). `/etc/config/byte` and `byte-fq-measure` are
+  gone; `byte-fq-learn --show` reports, `--set <kbit>` overrides after a speed
+  test, state is `/etc/byte/fq.state`. `byte-affinity` no longer touches `tc`.
+- **Honesty: `busy_read` removed, `busy_poll` documented as inert.**
+  `net.core.busy_read` is **not** opt-in per socket - the kernel copies it into
+  `sk->sk_ll_usec` for every socket at creation (`net/core/sock.c:3649`), which
+  is the opposite of what the 1.2.37 entry claimed. It is 0 again.
+  `busy_poll=50` stays, but it cannot do anything here: no driver in 6.12.94
+  implements `ndo_busy_poll` (`grep -rl` over `drivers/` returns nothing) and
+  usbnet receives through `netif_rx()` (`drivers/net/usb/usbnet.c:356`) with no
+  `napi_id`, so `sk_busy_loop()` bails at `sk_napi_id >= MIN_NAPI_ID`. Kept
+  because it costs nothing; the README no longer claims a benefit.
+- **Honesty: NAPI deferral is gated on the driver instead of faked.**
+  `dev->napi_defer_hard_irqs` and `dev->gro_flush_timeout` are only read on the
+  `napi_schedule` path (`net/core/dev.c`), and usbnet registers no NAPI, so
+  1.2.33's writes on `wwan*` were no-ops reported as applied. `byte-affinity`
+  now checks the driver and skips with `napi=none` in the log (plus
+  `napi_defer_hard_irqs=2` / `gro_flush_timeout=4000` on any driver that does
+  register one).
+- **PassWall v1 (4.66-8) is in the image, disabled.** Publishing it on demand
+  never worked: the release repo is filtered against the image manifest, so
+  `dns2socks`, `dns2tcp` and `microsocks` were not in it, `opkg` could not
+  resolve the dependency and refused the install - which is why 4.66-8 was
+  inaccessible. All four are in the image now; v1 ships with
+  `global.enabled=0` and its `boot()` gate rejects anything else, so it cannot
+  take port 53 or the redirect hooks from passwall2 at boot. **Size: +905,216
+  bytes (~0.86 MiB)** measured with the image's own
+  `mksquashfs -comp xz -b 262144` over the four staged packages (2,578,978
+  bytes raw).
+- **Fix: the buildroot enables every rc.common script, so a "disable it in
+  config" package still gets `S99`.** `include/rootfs.mk` (`prepare_rootfs`)
+  loops over `./etc/init.d/*` and calls `enable`; shipping no `rc.d` in the
+  package does not change that. The gate is in the vendored
+  `root/etc/init.d/passwall`: `boot()` exits unless
+  `passwall.@global[0].enabled=1`.
+- **Fix: `select PACKAGE_nftables` → `nftables-json` in the vendored v1
+  Makefile.** `nftables` is the nojson variant, is `DEFAULT_VARIANT` and
+  `CONFLICTS:=nftables-json`; `firewall4` already ships `nftables-json` (same
+  `/usr/sbin/nft`, JSON support, `PROVIDES nftables`). The upstream select
+  would have installed two providers of one file and image assembly would have
+  failed on the collision.
+- **Fix: the vendored v1 Makefile had a Kconfig cycle that only appeared once
+  the package was enabled.** Since 1.2.30 every `INCLUDE_*` option carried
+  `depends on PACKAGE_$(PKG_NAME)`, while `LUCI_DEPENDS` already lists
+  `+PACKAGE_$(PKG_NAME)_INCLUDE_<core>:<core>` for each of them - so the parent
+  depended on the sub-option and the sub-option on the parent. With the parent
+  off nothing evaluated it; the first build with
+  `CONFIG_PACKAGE_luci-app-passwall=y` died with `tmp/.config-package.in: error:
+  recursive dependency detected!` (`PACKAGE_luci-app-passwall` ⇄
+  `_INCLUDE_Brook`). The reverse dependency is gone; the defaults plus the
+  `.config` assertions pin the core set.
+- **Gates:** `ci_check_packages()` asserts v1 is in `.config`, `nftables` is
+  **not**, `nftables-json` is, all four names are **absent** from
+  `ondemand.txt`, the package ships disabled, `passwall-v1-boot-gate` is
+  present, the repointed nft select survives, and the heavy `INCLUDE_*` cores
+  stay off.
+  `byte-selfcheck` gained `check_queue()` (child limit vs `/etc/byte/fq.state`
+  ±25 %, parent `64`, NAPI inert logging) and asserts `busy_poll=50` /
+  `busy_read=0`.
+- **Not re-added, on purpose:** the 1.2.33 neighbour tables
+  (`gc_thresh1/2/3`) and the fast-fail TCP knobs. `sysctl.conf` is the 1.2.30
+  baseline plus `busy_poll`; both changes were bundled with tuning that has not
+  been measured on the unit and are not worth extra variables in the release
+  that has to prove itself first.
 - **Build safety: a stalled source fetch can no longer burn the 6 h CI budget.**
   Run `41746818664` (1.2.36) was not a code failure. It sat from `02:08:14`
   inside `make[3] -C package/kernel/mac80211 compile` with **zero log lines for

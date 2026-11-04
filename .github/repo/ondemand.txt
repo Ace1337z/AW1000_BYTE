@@ -2,8 +2,8 @@
 # image, so users can `opkg install` them on demand.
 #
 # Why they are not in the image:
-#   - size. OpenClash alone pulls ruby, haproxy and dnsmasq-full; the trimmed
-#     image is 43 MB and these would roughly double it.
+#   - size. OpenClash alone pulls ruby, haproxy and dnsmasq-full; the sysupgrade
+#     image is ~35 MB and these would roughly double it.
 #   - TTL. OpenClash installs its own redirect rules that can bypass the
 #     nftables chain luci-app-qmodem-ttlfw4 owns, and a correct TTL on the
 #     wire is the point of this firmware. Installing it is a user choice.
@@ -89,27 +89,14 @@ geoview
 v2ray-geoip
 v2ray-geosite
 chinadns-ng
-# --- PassWall v1 (Lua, fw4 capable) --------------------------------------
-# Vendored at packages/luci-app-passwall (4.66-8), not from a feed, and NOT in
-# the image: v1 and v2 install the same transparent-proxy rules and both want
-# port 53, so v1 replaces passwall2 - the one the TTL/nftables policy is tuned
-# for. Installing it is a deliberate choice; disable passwall2 first.
-#
-# luci-compat, lua (+luci-lua-runtime, libuci-lua, luci-lib-jsonc),
-# coreutils(+base64/nohup), curl, chinadns-ng, ip-full, unzip, resolveip,
-# tcping, ipset and nftables-json (provides nft) are already in the image, as
-# are kmod-nft-socket/tproxy/nat, so v1's nftables variant works as-is and the
-# repo serves those from the image manifest.
-# dns2socks, dns2tcp and microsocks are the only hard deps the image does not
-# carry. They are listed here because a Kconfig `depends on` would otherwise
-# switch the parent off, but they are NOT published: the identical
-# dns2tcp 1.1.2-r1 and microsocks 1.0.5-r2 sit in the ImmortalWrt 24.10.6
-# packages feed that /etc/opkg/distfeeds.conf already points at, and
-# republishing ours would shadow that feed with a copy we cannot keep current.
-luci-app-passwall
-dns2socks
-dns2tcp
-microsocks
+# --- PassWall v1 (Lua, fw4 capable) - IN THE IMAGE since 1.2.39 -----------
+# Vendored at packages/luci-app-passwall (4.66-8) and shipped disabled. It was
+# listed here until 1.2.38, which never worked: this repo is filtered against
+# the image manifest, so its three hard deps (dns2socks, dns2tcp, microsocks)
+# were not published, opkg could not resolve them, and the install failed -
+# the "4.66-8 is inaccessible" symptom. All four are in the image now, so they
+# are deliberately absent from this list; ci_check_packages rejects any of
+# them reappearing here.
 # --- OpenClash (clash) ---
 luci-app-openclash
 haproxy

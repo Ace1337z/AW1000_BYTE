@@ -3,20 +3,28 @@
 #
 # This is free software, licensed under the GNU General Public License v3.
 #
-# BYTE by ACE: vendored copy of PassWall v1 (4.66-8), published ON DEMAND in
-# the BYTE opkg repo and deliberately NOT part of the firmware image:
+# BYTE by ACE: vendored copy of PassWall v1 (4.66-8). IN THE IMAGE since
+# 1.2.39, SHIPPING DISABLED (0_default_config sets global.enabled=0 and the
+# package installs no rc.d symlink), so it cannot take port 53 or the redirect
+# hooks away from passwall2 at boot.
 #   - both v1 and v2 install transparent-proxy rules and both want port 53
-#     (dnsmasq), so running them together breaks whichever started last;
-#   - v1 ships Lua controllers, which the image avoids on purpose.
-# Installing it is a deliberate choice; passwall2 must be disabled first.
+#     (dnsmasq), so running them together breaks whichever started last.
+#     Enabling v1 means disabling passwall2 first; that is a user decision.
+#   - it was published on demand until 1.2.38. That never worked: the repo is
+#     filtered against the image manifest, so dns2socks/dns2tcp/microsocks
+#     were missing from it and opkg refused the install. All three are in the
+#     image now (see preset).
+#   - v1 ships Lua controllers; luci-lua-runtime, lua, libuci-lua and
+#     luci-lib-jsonc are already in the image, so the pages load.
+#   - the Nftables variant is the only one that can work here, and its
+#     upstream `select PACKAGE_nftables` is repointed to nftables-json below.
 #
 # Core defaults are pinned to Xray only (below). Upstream turns on nine
-# INCLUDE_* options for aarch64, which would make the on-demand build compile
-# v2ray-core, shadowsocks-libev, shadowsocks-rust, shadowsocksr-libev,
-# trojan-plus, simple-obfs and haproxy just to publish them. xray-core is
-# already in the image (passwall2 uses it), so v1 gets a working core with no
-# extra build and no repo bloat; any other core can be installed separately
-# from the ImmortalWrt feeds.
+# INCLUDE_* options for aarch64, which would pull v2ray-core,
+# shadowsocks-libev, shadowsocks-rust, shadowsocksr-libev, trojan-plus,
+# simple-obfs and haproxy into the image. xray-core is already there
+# (passwall2 uses it), so v1 gets a working core at zero extra size; any other
+# core can be installed separately from the ImmortalWrt feeds.
 
 include $(TOPDIR)/rules.mk
 
@@ -94,7 +102,13 @@ config PACKAGE_$(PKG_NAME)_Iptables_Transparent_Proxy
 config PACKAGE_$(PKG_NAME)_Nftables_Transparent_Proxy
 	bool "Nftables Transparent Proxy"
 	select PACKAGE_dnsmasq-full
-	select PACKAGE_nftables
+	# BYTE by ACE: upstream selects PACKAGE_nftables, which is the nojson
+	# variant and CONFLICTS nftables-json. firewall4 already ships
+	# nftables-json (same /usr/sbin/nft, JSON support), so the upstream
+	# select produced two providers of the same file and image assembly
+	# died with a collision. nftables-json PROVIDES nftables, so every
+	# `nft` call passwall makes resolves to the copy the image already has.
+	select PACKAGE_nftables-json
 	select PACKAGE_kmod-nft-socket
 	select PACKAGE_kmod-nft-tproxy
 	select PACKAGE_kmod-nft-nat
@@ -103,95 +117,77 @@ config PACKAGE_$(PKG_NAME)_Nftables_Transparent_Proxy
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_Brook
 	bool "Include Brook"
-	depends on PACKAGE_$(PKG_NAME)
 	default n
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_Haproxy
 	bool "Include Haproxy"
-	depends on PACKAGE_$(PKG_NAME)
 	default n	# BYTE: pinned
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_Hysteria
 	bool "Include Hysteria"
-	depends on PACKAGE_$(PKG_NAME)
 	default n
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_NaiveProxy
 	bool "Include NaiveProxy"
-	depends on PACKAGE_$(PKG_NAME)
 	depends on !(arc||(arm&&TARGET_gemini)||armeb||mips||mips64||powerpc)
 	default n
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_Shadowsocks_Libev_Client
 	bool "Include Shadowsocks Libev Client"
-	depends on PACKAGE_$(PKG_NAME)
 	default n	# BYTE: pinned
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_Shadowsocks_Libev_Server
 	bool "Include Shadowsocks Libev Server"
-	depends on PACKAGE_$(PKG_NAME)
 	default n	# BYTE: pinned
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_Shadowsocks_Rust_Client
 	bool "Include Shadowsocks Rust Client"
-	depends on PACKAGE_$(PKG_NAME)
 	depends on aarch64||arm||i386||mips||mipsel||x86_64
 	default n	# BYTE: pinned
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_Shadowsocks_Rust_Server
 	bool "Include Shadowsocks Rust Server"
-	depends on PACKAGE_$(PKG_NAME)
 	depends on aarch64||arm||i386||mips||mipsel||x86_64
 	default n
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_ShadowsocksR_Libev_Client
 	bool "Include ShadowsocksR Libev Client"
-	depends on PACKAGE_$(PKG_NAME)
 	default n	# BYTE: pinned
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_ShadowsocksR_Libev_Server
 	bool "Include ShadowsocksR Libev Server"
-	depends on PACKAGE_$(PKG_NAME)
 	default n
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_Simple_Obfs
 	bool "Include Simple-Obfs (Shadowsocks Plugin)"
-	depends on PACKAGE_$(PKG_NAME)
 	default n	# BYTE: pinned
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_Trojan_GO
 	bool "Include Trojan-GO"
-	depends on PACKAGE_$(PKG_NAME)
 	default n
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_Trojan_Plus
 	bool "Include Trojan-Plus"
-	depends on PACKAGE_$(PKG_NAME)
 	default n	# BYTE: pinned
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_V2ray
 	bool "Include V2ray"
-	depends on PACKAGE_$(PKG_NAME)
 	default n	# BYTE: pinned
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_V2ray_Geodata
 	bool "Include V2ray_Geodata"
-	depends on PACKAGE_$(PKG_NAME)
 	default n
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_V2ray_Plugin
 	bool "Include V2ray-Plugin (Shadowsocks Plugin)"
-	depends on PACKAGE_$(PKG_NAME)
 	default n	# BYTE: pinned
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_Xray
 	bool "Include Xray"
-	depends on PACKAGE_$(PKG_NAME)
 	default y	# BYTE: pinned
 
 config PACKAGE_$(PKG_NAME)_INCLUDE_Xray_Plugin
 	bool "Include Xray-Plugin (Shadowsocks Plugin)"
-	depends on PACKAGE_$(PKG_NAME)
 	default n
 
 endmenu

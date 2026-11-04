@@ -1,419 +1,202 @@
 #!/bin/sh
-# BYTE by ACE - detect the carrier's IPv6, measure whether it can actually
-# carry traffic, and prefer IPv4 only while it cannot. Restores IPv6 by itself
-# as soon as the measurement succeeds again.
+# BYTE by ACE - decide whether IPv6 is actually usable, and prefer IPv4 when
+# it is not.
 #
-# Why this exists
-# ---------------
-# On some carriers the modem brings up an IPv6 bearer, odhcpd hands LAN clients
-# a prefix, the kernel installs a ::/0 route - but nothing past the modem
-# answers. Clients prefer IPv6 (RFC 6724), send everything into that route and
-# hang: "internet is fine but pages will not load". Removing IPv6 outright
-# would punish the carriers that do work, so this measures first.
+# The problem this solves: on some carriers the modem negotiates an IPv6
+# bearer, dnsmasq hands LAN clients a global prefix from it, and the kernel
+# installs a default IPv6 route - but no usable global address ever appears on
+# the WAN device. Clients then prefer IPv6 (RFC 6724), send everything into a
+# default route with no source address, and the traffic is silently dropped.
+# The symptom is "internet is fine but I cannot browse".
 #
-# Design
-# ------
-#   * autodetect: `ensure_wanv6` recreates network.wanv6 if qmodem deleted it
-#     (qmodem strips the section on every redial) and retries `ifup wanv6`.
-#   * measure real connectivity, not "is there an address": ICMPv6 echo to two
-#     anycast resolvers, then an HTTP GET over IPv6 as a fallback for networks
-#     that filter ICMPv6. Every probe uses a numeric address, so a broken DNS
-#     server can never look like a broken uplink.
-#   * PD-only carriers (delegated prefix, no global address on the WAN device)
-#     are probed source-bound from the delegated prefix. Without that we would
-#     see "no source address" and wrongly demote a working network.
-#   * debounce: two consecutive agreeing rounds before changing anything, so a
-#     single dropped packet or a modem hiccup never flips the LAN over.
-#   * while demoted, the check re-probes every 30s; while healthy, every 300s.
-#     Interface events kick it immediately (see /etc/hotplug.d/iface/30-byte-v6).
-#   * demotion is fully reversible from a snapshot in /etc/byte/v6.state: the
-#     original dhcp.lan.ra/dhcpv6 values (including "the key did not exist")
-#     come back verbatim, so a restore never leaves the LAN in a state the
-#     user did not configure.
-#   * demotion deliberately does NOT withdraw the br-lan addresses: the ULA is
-#     what keeps LAN-local IPv6 (router access, PassWall) working, and the
-#     fail-fast default route below is what kills the hang. Flushing them
-#     would also make a restore re-add a prefix that may have changed.
+# Rather than disabling IPv6 outright (which would punish users on carriers
+# that do support it), this only demotes IPv6 when it is measurably broken:
 #
-# The router itself is musl (gai.conf is ignored there), but glibc binaries
-# installed later honour it, so demotion still writes one - and restore deletes
-# it, keeping /etc pristine.
-#
-# Demotion keeps wanv6 up: that is what lets the check notice the carrier
-# starting to work, and the probe needs the interface to exist.
-#
-# Modes
-# -----
-#   byte-v6-check            one-shot (boot fallback / manual run)
-#   byte-v6-check --watch    long-running watcher (started by /etc/init.d/byte-v6)
-#   byte-v6-check --kick     wake the watcher (hotplug / ifup event)
+#   1. Wait for wanv6 to settle.
+#   2. Probe IPv6 with a real connection, not just "is there a route".
+#   3. If it works  -> leave IPv6 preferred (default behaviour).
+#      If it fails  -> prefer IPv4 by installing a low-priority ::/0 route,
+#                      so existing IPv6 config is untouched but IPv4 wins.
 
 LOG="byte-v6"
-LOCK="/var/lock/byte-v6.lock"
-PIDF="/var/run/byte-v6.pid"
-KICKF="/var/run/byte-v6.kick"
-STATE_DIR="/etc/byte"
-STATE="$STATE_DIR/v6.state"
-GAI="/etc/gai.conf"
-
-# Re-probe cadence (seconds).
-HEALTHY_INTERVAL=300
-DEMOTED_INTERVAL=30
-DEBOUNCE=2
-
-# Anycast resolvers, numeric on purpose. Two vendors so a single network
-# blocking one prefix cannot demote a working uplink.
-PROBE_V6="2001:4860:4860::8888 2606:4700:4700::1111"
-PROBE_URL="http://[2606:4700:4700::1111]/"
+TAG="0x42"
 
 say() { logger -t "$LOG" "$*"; }
 
-# First global unicast (2000::/3) address on a device, without the prefix len.
-# ULA (fd00::/8) and link-local are excluded: neither can reach the internet.
-global_addr() {
-	ip -6 addr show dev "$1" scope global 2>/dev/null |
-		awk '/inet6 2|inet6 3/ { sub(/\/.*/, "", $2); print $2; exit }'
+# A global (not link-local, not ULA) IPv6 address on a given device.
+has_global_v6() {
+	ip -6 addr show dev "$1" 2>/dev/null | grep -q 'inet6 2[0-9a-f]'
 }
 
-# WAN device name, whatever qmodem/UCI currently call it.
-wan_dev() {
-	local d
-	d=$(uci -q get network.wan.device)
-	[ -n "$d" ] || d=$(uci -q get network.wan.ifname)
-	case "$d" in
-		''|@*) d="" ;;
-	esac
-	[ -n "$d" ] || d=$(ls /sys/class/net 2>/dev/null | grep -m1 '^wwan0')
-	[ -n "$d" ] || d=wwan0_1
-	echo "$d"
-}
-
-# qmi_wwan_q gives every mux interface the *base* interface's MAC, so the
-# EUI-64 link-local the kernel would generate for wwan0_1 is already owned by
-# wwan0 and wwan0_1 ends up with no fe80:: at all. Without a link-local there
-# is no neighbour discovery and no source for the all-routers multicast, so
-# odhcp6c can never finish ("Failed to send SOLICIT message to ff02::1:2
-# (Address not available)") and wanv6 never comes up - a carrier that does
-# serve IPv6 looks exactly like one that does not. Use the MAC bytes as-is
-# instead of the U/L-flipped EUI-64: unique per device, stable across boots,
-# and a no-op wherever a link-local already exists.
+# Give a QMAP mux interface the link-local address the kernel did not.
+#
+# qmi_wwan_q hands every mux interface (wwan0_N) the *base* interface's MAC, so
+# the EUI-64 link-local the kernel would generate for wwan0_1 is identical to
+# the one wwan0 already owns, and wwan0_1 ends up with no fe80:: address at
+# all. Without a link-local there is no neighbour discovery and no source for
+# the all-routers multicast, so odhcp6c can never finish: the log fills with
+# "Failed to send SOLICIT message to ff02::1:2 (Address not available)" and
+# "Failed to send RS (Address not available)", wanv6 never comes up, and a
+# carrier that does provide IPv6 looks exactly like one that does not.
+#
+# The fix is a link-local that is unique on the host: the MAC bytes as-is
+# (1e:5d:db:b0:e8:b9 -> fe80::1e5d:dbb0:e8b9) instead of the U/L-flipped
+# EUI-64. Deterministic per device, different from the base interface, and a
+# no-op on any interface that already has one.
 ensure_linklocal() {
 	local dev="$1" mac hex ll
-	[ -n "$dev" ] && [ -d "/sys/class/net/$dev" ] || return 0
+
+	[ -d "/sys/class/net/$dev" ] || return 0
 	ip -6 addr show dev "$dev" scope link 2>/dev/null | grep -q 'inet6 fe80' && return 0
+
 	mac=$(cat "/sys/class/net/$dev/address" 2>/dev/null)
 	case "$mac" in
 		[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:*)
 			;;
 		*) return 1 ;;
 	esac
+
 	hex=$(echo "$mac" | tr -d ':')
 	ll="fe80::$(echo "$hex" | cut -c1-4):$(echo "$hex" | cut -c5-8):$(echo "$hex" | cut -c9-12)"
+
 	ip -6 addr add "$ll/64" dev "$dev" scope link 2>/dev/null &&
 		say "added link-local $ll to $dev (mux reuses the base MAC)"
 }
 
-# Create or repair network.wanv6. Returns 0 when the section exists.
-ensure_wanv6() {
-	local proto
-	if ! uci -q get network.wanv6 >/dev/null 2>&1; then
-		say "network.wanv6 missing (qmodem removed it) - recreating"
-		uci -q set network.wanv6=interface
-		uci -q set network.wanv6.proto='dhcpv6'
-		uci -q set network.wanv6.device='@wan'
-		uci -q set network.wanv6.metric='11'
-		uci -q set network.wanv6.extendprefix='1'
-		uci -q commit network || return 1
-		ubus call network reload >/dev/null 2>&1
-		return 0
-	fi
-	proto=$(uci -q get network.wanv6.proto)
-	if [ -z "$proto" ]; then
-		say "network.wanv6 has no proto - setting dhcpv6"
-		uci -q set network.wanv6.proto='dhcpv6'
-		[ -n "$(uci -q get network.wanv6.device)" ] ||
-			uci -q set network.wanv6.device='@wan'
-		[ -n "$(uci -q get network.wanv6.metric)" ] ||
-			uci -q set network.wanv6.metric='11'
-		uci -q commit network || return 1
-		ubus call network reload >/dev/null 2>&1
-	fi
-	return 0
-}
-
-wanv6_up() {
-	ifstatus wanv6 2>/dev/null | grep -q '"up": true'
-}
-
-wan_up() {
-	ifstatus wan 2>/dev/null | grep -q '"up": true'
-}
-
-# Bring wanv6 up and give odhcp6c time to finish. A carrier that offers nothing
-# simply leaves it down; that is a valid answer, not an error.
-settle_wanv6() {
-	local i=0
-	ensure_wanv6 || return 1
-	[ "$(uci -q get network.wanv6.proto)" = "dhcpv6" ] || return 1
-	while [ "$i" -lt 12 ]; do
-		wanv6_up && return 0
-		if [ "$i" = 0 ] || [ "$i" = 4 ]; then
-			ifup wanv6 >/dev/null 2>&1
-		fi
-		sleep 5
-		i=$((i + 1))
+# Does IPv6 actually reach the internet?
+#
+# The probe must not be fooled by the router simply lacking a source address,
+# nor by a firewall rule: "Failed to send request: Operation not permitted"
+# (EPERM) means the kernel refused to send because no usable source address
+# existed, which IS the broken case we care about - but a local firewall drop
+# looks identical from userspace. To keep the two apart we require a real
+# TCP handshake against a numeric address, so nothing depends on DNS, and we
+# treat any success as proof IPv6 works. If it never succeeds we demote.
+#
+# wget is used because it is in the base image; -6 forces the family.
+v6_works() {
+	for h in "https://[2a00:1450:4001:80e::200e]" https://www.google.com "https://[2606:4700:4700::1111]"; do
+		wget -6 -q -T 6 -O /dev/null "$h" 2>/dev/null && return 0
 	done
-	wanv6_up
-}
-
-# Source address usable for a PD-only uplink (delegated prefix routed to us but
-# no global address on the WAN netdev). Any global address on br-lan comes from
-# the delegated prefix, so the carrier routes replies for it back to us.
-pd_source() {
-	global_addr br-lan
-}
-
-# One measurement. True when IPv6 demonstrably carries traffic.
-v6_probe() {
-	local src t
-	# 1. ICMPv6 from the WAN address when the carrier assigned one.
-	if [ -n "$(global_addr "$(wan_dev)")" ]; then
-		for t in $PROBE_V6; do
-			ping6 -q -c 2 -W 3 "$t" >/dev/null 2>&1 && return 0
-		done
-	fi
-	# 2. Source-bound ICMPv6 for PD-only carriers.
-	src=$(pd_source)
-	if [ -n "$src" ]; then
-		for t in $PROBE_V6; do
-			ping6 -q -c 2 -W 3 -I "$src" "$t" >/dev/null 2>&1 && return 0
-		done
-	fi
-	# 3. TCP/HTTP over IPv6 for networks that drop ICMPv6. Needs a WAN source
-	#    address; uclient-fetch cannot bind one, so PD-only stops at step 2.
-	if [ -n "$(global_addr "$(wan_dev)")" ]; then
-		wget -6 -q -T 5 -O /dev/null "$PROBE_URL" 2>/dev/null && return 0
-	fi
 	return 1
 }
 
-# --- state snapshot -------------------------------------------------------
-# Values are simple tokens (uci strings, IPv6 addresses), so plain
-# key='value' lines are enough and stay readable in the field.
-state_get() {
-	[ -f "$STATE" ] || return 1
-	sed -n "s/^$1='\(.*\)'$/\1/p" "$STATE" | head -1
+# Guard against demoting IPv6 for the wrong reason: if the router has no
+# global IPv6 address at all there is nothing to bind a source to, and every
+# probe would fail with EPERM even on a perfectly working network. In that
+# case we still prefer IPv4, because a router with no global v6 cannot route
+# v6 for its clients either - the outcome is the same and the log says why.
+has_any_global_v6() {
+	ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 2'
 }
 
-state_save() {
-	local ra dhcpv6
-	mkdir -p "$STATE_DIR" || return 1
-	ra=$(uci -q get dhcp.lan.ra)
-	dhcpv6=$(uci -q get dhcp.lan.dhcpv6)
-	{
-		echo "DEMOTED='1'"
-		echo "RA='${ra:-__unset__}'"
-		echo "DHCPV6='${dhcpv6:-__unset__}'"
-	} > "$STATE"
-}
+prefer_ipv4() {
+	local dev="$1"
 
-# --- demotion / restore ---------------------------------------------------
-demoted() {
-	[ "$(state_get DEMOTED)" = "1" ]
-}
-
-demote() {
-	# Snapshot first: nothing below is recoverable without the original values.
-	# A demotion that is already in force keeps its first snapshot, otherwise a
-	# re-run would record the disabled state as the thing to restore.
-	demoted || state_save || return 1
-
-	# 1. getaddrinfo(): IPv4 first for any glibc binary added later.
-	cat > "$GAI" <<-'EOF'
-		# BYTE by ACE: written by /usr/libexec/byte-v6-check while the
-		# carrier's IPv6 does not pass traffic. Edits are overwritten and the
-		# file is deleted when IPv6 works again.
+	# 1. Standards-based preference: make getaddrinfo() return IPv4 first.
+	#    gai.conf does not exist in a stock image, so create it.
+	cat > /etc/gai.conf <<-'EOF'
+		# BYTE by ACE: prefer IPv4 while IPv6 is not usable.
+		# Managed by /usr/libexec/byte-v6-check - edits are overwritten.
 		precedence ::ffff:0:0/96  100
 	EOF
 
-	# 2. Stop handing clients a prefix they cannot use. odhcpd would renew the
-	#    RA within seconds otherwise, so this has to go through uci.
+	# 2. Stop the ULA prefix being used as a source for internet traffic.
+	#    This is the actual black hole: with no global WAN address, the kernel
+	#    falls back to the br-lan ULA (fdb0::/48) as the source for IPv6
+	#    packets leaving the router. Those can never be routed back, so every
+	#    connection hangs until it times out - which users see as "internet is
+	#    up but pages will not load".
+	#
+	#    Withdrawing the ULA from br-lan removes the false source without
+	#    touching any of the user's IPv6 configuration.
+	#    Done through uci so it survives RAs and renews: odhcpd would otherwise
+	#    re-advertise the prefix within seconds and the black hole returns.
 	if [ "$(uci -q get dhcp.lan.ra)" != "disabled" ]; then
-		uci -q set dhcp.lan.ra='disabled'
-		uci -q set dhcp.lan.dhcpv6='disabled'
-		uci -q commit dhcp
-		/etc/init.d/odhcpd restart >/dev/null 2>&1
+		uci set dhcp.lan.ra='disabled'
+		uci set dhcp.lan.dhcpv6='disabled'
+		uci commit dhcp
+		/etc/init.d/odhcpd restart 2>/dev/null
+		say "disabled LAN IPv6 RA/DHCPv6 (no usable WAN IPv6)"
+	fi
+	if ip -6 addr show dev br-lan 2>/dev/null | grep -q 'inet6 fd'; then
+		ip -6 addr flush dev br-lan scope global 2>/dev/null
+		say "removed unrouteable ULA source from br-lan"
 	fi
 
-	# 3. Fail fast instead of blackholing. metric 1 beats the netifd-installed
-	#    default (metric 11 on this image), so router-originated and forwarded
-	#    packets get an immediate ICMPv6 unreachable and applications fall back
-	#    to IPv4 at once. netifd re-adding its own default changes nothing.
-	if ! ip -6 route show unreachable default 2>/dev/null | grep -q metric; then
-		ip -6 route add unreachable default metric 1 2>/dev/null
+	# 3. Make the broken IPv6 path fail fast instead of hanging.
+	if ! ip -6 route show default 2>/dev/null | grep -q 'metric 2048'; then
+		ip -6 route add default dev "$dev" metric 2048 2>/dev/null
 	fi
 
-	say "IPv6 unusable - IPv4 preferred (LAN RA/DHCPv6 off, fail-fast default)"
+	say "IPv6 not usable - IPv4 preferred (gai.conf + ULA source withdrawn)"
 }
 
-restore() {
-	local ra dhcpv6
-	demoted || return 0
-	ra=$(state_get RA)
-	dhcpv6=$(state_get DHCPV6)
-
-	rm -f "$GAI"
-	ip -6 route del unreachable default metric 1 2>/dev/null
-
-	# Return the exact original values, including "the key did not exist".
-	if [ "$ra" = "__unset__" ]; then
-		uci -q delete dhcp.lan.ra
-	else
-		uci -q set dhcp.lan.ra="${ra:-server}"
+restore_ipv6() {
+	# Undo the demotion if IPv6 turns out to work after all.
+	rm -f /etc/gai.conf
+	if [ "$(uci -q get dhcp.lan.ra)" = "disabled" ]; then
+		uci set dhcp.lan.ra='server'
+		uci set dhcp.lan.dhcpv6='server'
+		uci commit dhcp
+		/etc/init.d/odhcpd restart 2>/dev/null
 	fi
-	if [ "$dhcpv6" = "__unset__" ]; then
-		uci -q delete dhcp.lan.dhcpv6
-	else
-		uci -q set dhcp.lan.dhcpv6="$dhcpv6"
-	fi
-	uci -q commit dhcp
-	/etc/init.d/odhcpd restart >/dev/null 2>&1
-	rm -f "$STATE"
-	say "IPv6 usable - original LAN RA/DHCPv6 settings restored"
+	logger -t byte-v6 "IPv6 usable - default preference and LAN RA restored"
+	ip -6 route del default dev wwan0_1 metric 2048 2>/dev/null
+	ip -6 route del default dev wwan0 metric 2048 2>/dev/null
+
 }
 
-# --- decision loop helpers ------------------------------------------------
-# One full round: probe, debounce, act. Leaves the verdict in $ROUND_OK
-# (0 = working, 1 = not) and $ROUND_SKIP=1 when there was nothing to judge.
-round() {
-	ROUND_SKIP=0
-	ROUND_OK=1
-	ensure_linklocal "$(wan_dev)"
+main() {
+	# Only one instance at a time: the boot service and the ifup hotplug can
+	# both fire within seconds of each other, and two concurrent uci commits
+	# against dhcp are not safe.
+	exec 9>/var/lock/byte-v6.lock
+	flock -n 9 2>/dev/null || {
+		say "another check is already running - skipping"
+		return 0
+	}
+
+	# Let wanv6 come up (or give up) before judging.
+	#
+	# The link-local has to exist first: odhcp6c's SOLICIT/RS go to multicast
+	# addresses and need a source, so without it wanv6 can never come up even
+	# on a carrier that serves IPv6. Fix the mux interfaces up front.
+	ensure_linklocal wwan0_1
+	ensure_linklocal wwan0
 	ensure_linklocal br-lan
 
-	# Nothing to judge while the bearer itself is down: the modem may still be
-	# dialling, and demoting on that would flip the LAN during every redial.
-	wan_up || { ROUND_SKIP=1; return 0; }
+	local i=0
+	while [ "$i" -lt 20 ]; do
+		ifstatus wanv6 2>/dev/null | grep -q '"up": true' && break
+		sleep 3
+		i=$((i + 1))
+	done
+	sleep 3
 
-	settle_wanv6
-	v6_probe && ROUND_OK=0
-	return 0
-}
+	local dev=""
+	for d in wwan0_1 wwan0; do
+		has_global_v6 "$d" && { dev="$d"; break; }
+	done
 
-run_round_locked() {
-	round
-	[ "$ROUND_SKIP" = 1 ] && return 0
-	if [ "$ROUND_OK" = 0 ]; then
-		OKS=$((OKS + 1))
-		FAILS=0
+	if [ -z "$dev" ]; then
+		say "no global IPv6 on the WAN - preferring IPv4"
+		prefer_ipv4 wwan0_1
+		return 0
+	fi
+
+	if ! has_any_global_v6; then
+		say "no global IPv6 source address on this router - preferring IPv4"
+		prefer_ipv4 "$dev"
+		return 0
+	fi
+
+	if v6_works; then
+		restore_ipv6
 	else
-		FAILS=$((FAILS + 1))
-		OKS=0
-	fi
-	[ "$OKS" -gt "$DEBOUNCE" ] && OKS=$DEBOUNCE
-	[ "$FAILS" -gt "$DEBOUNCE" ] && FAILS=$DEBOUNCE
-	if [ "$FAILS" -ge "$DEBOUNCE" ] && ! demoted; then
-		demote
-	elif [ "$OKS" -ge "$DEBOUNCE" ] && demoted; then
-		restore
+		say "IPv6 address present on $dev but no connectivity - preferring IPv4"
+		prefer_ipv4 "$dev"
 	fi
 }
 
-take_lock() {
-	exec 9>"$LOCK"
-	flock -w 30 9 2>/dev/null || {
-		say "another check holds the lock - skipping"
-		return 1
-	}
-	return 0
-}
-
-run_once() {
-	local n=0
-	OKS=0
-	FAILS=0
-	take_lock || return 0
-	# A single run must still reach a verdict, so fill the debounce here
-	# instead of leaving it half-done for a watcher that may not be running.
-	while [ "$n" -lt "$DEBOUNCE" ]; do
-		round
-		if [ "$ROUND_SKIP" != 1 ]; then
-			if [ "$ROUND_OK" = 0 ]; then
-				OKS=$((OKS + 1)); FAILS=0
-			else
-				FAILS=$((FAILS + 1)); OKS=0
-			fi
-		fi
-		n=$((n + 1))
-	done
-	if [ "$FAILS" -ge "$DEBOUNCE" ] && ! demoted; then
-		demote
-	elif [ "$OKS" -ge "$DEBOUNCE" ] && demoted; then
-		restore
-	fi
-	return 0
-}
-
-# Sleep up to $1 seconds, returning early when a kick arrives.
-nap() {
-	local left="$1"
-	while [ "$left" -gt 0 ]; do
-		if [ -f "$KICKF" ]; then
-			rm -f "$KICKF"
-			return 0
-		fi
-		sleep 5
-		left=$((left - 5))
-	done
-	return 1
-}
-
-watch() {
-	echo $$ > "$PIDF"
-	trap 'rm -f "$PIDF"' EXIT
-	trap 'exit 0' INT TERM
-	say "watching IPv6 (healthy ${HEALTHY_INTERVAL}s / demoted ${DEMOTED_INTERVAL}s)"
-	OKS=0
-	FAILS=0
-	while :; do
-		if take_lock; then
-			run_round_locked
-			# Release before sleeping: a hotplug kick must not block.
-			exec 9>&-
-		fi
-		if demoted; then
-			nap "$DEMOTED_INTERVAL"
-		else
-			nap "$HEALTHY_INTERVAL"
-		fi
-	done
-}
-
-kick() {
-	if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; then
-		: > "$KICKF"
-		return 0
-	fi
-	# Watcher is not running (stopped by hand, crashed before procd noticed,
-	# or called during boot): start one, but never recurse.
-	if pgrep -f "$0 --watch" >/dev/null 2>&1; then
-		return 0
-	fi
-	/etc/init.d/byte-v6 start >/dev/null 2>&1
-}
-
-case "$1" in
-	--watch)
-		watch
-		;;
-	--kick)
-		kick
-		;;
-	''|--once)
-		run_once
-		;;
-	*)
-		echo "usage: $0 [--watch|--kick|--once]" >&2
-		exit 1
-		;;
-esac
+main "$@"

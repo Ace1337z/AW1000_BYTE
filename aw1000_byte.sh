@@ -190,13 +190,12 @@ update_feeds() {
     grep -q '^src-git passwall_luci ' feeds.conf.default 2>/dev/null || \
         echo 'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall2.git^4b4b84dc120bb37592ea51e7107ce4fe0083420f' >> feeds.conf.default
     # PassWall v1 has NO feed line on purpose: it is vendored at
-    # packages/luci-app-passwall (4.66-8) and only built on demand, because v1
-    # and v2 fight over the same transparent-proxy rules and port 53. Adding a
-    # src-git for it would put a second, differently-versioned luci-app-passwall
-    # into the feed metadata and invite `opkg upgrade` to swap the vendored
-    # copy for an upstream one (that is exactly what happened to qmodem's TTL
-    # script). packages/ is copied into ./package/, which wins over feeds for
-    # the in-tree name.
+    # packages/luci-app-passwall (4.66-8) and ships in the image (disabled).
+    # Adding a src-git for it would put a second, differently-versioned
+    # luci-app-passwall into the feed metadata and invite `opkg upgrade` to
+    # swap the vendored copy for an upstream one (that is exactly what
+    # happened to qmodem's TTL script). packages/ is copied into ./package/,
+    # which wins over feeds for the in-tree name.
     # vantage theme + dashboard: dropped. The image ships Footstrap only -
     # keeping a second JS theme costs space and its luci-app-vantage dashboard
     # duplicates pages the Vantage-derived widgets now provide.
@@ -943,13 +942,22 @@ ci_check_packages() {
     [ -n "$repo_root" ] || repo_root="$(realpath .)"
     # openclash / adguardhome are intentionally not shipped (size); the
     # proxy stack is passwall + passwall2 with the Xray core only.
-    # passwall v1 is deliberately absent: it and passwall2 both install redirect
-    # rules on the same nft table and hijack port 53, so they cannot coexist -
-    # v1 gets torn down and looks "not running". Only passwall2 ships; require
-    # that v1 stays out.
-    if grep -q '^CONFIG_PACKAGE_luci-app-passwall=y$' .config; then
-        forbidden="$forbidden passwall-v1(ships alongside passwall2, cannot coexist)"
-    fi
+    # passwall v1 SHIPS since 1.2.39, disabled, with its three previously
+    # unresolvable runtime deps (dns2socks/dns2tcp/microsocks) in the image.
+    # v1 and passwall2 both install redirect rules on the same nft table and
+    # both want port 53, so only one may be enabled - that is enforced by
+    # shipping v1 disabled (global.enabled=0, no rc.d symlink), asserted
+    # further down.
+    grep -q '^CONFIG_PACKAGE_luci-app-passwall=y$' .config || \
+        missing="$missing passwall-v1(not in image)"
+    # nftables (nojson) CONFLICTS nftables-json and firewall4 ships
+    # nftables-json; both selected means two /usr/sbin/nft and image assembly
+    # fails on the collision. The vendored Makefile repoints the select to
+    # nftables-json - assert the outcome, not the intent.
+    grep -q '^CONFIG_PACKAGE_nftables=y$' .config && \
+        forbidden="$forbidden nftables(nojson collides with nftables-json)"
+    grep -q '^CONFIG_PACKAGE_nftables-json=y$' .config || \
+        missing="$missing nftables-json(passwall v1 nft path)"
     # preset can drift from the feeds. A CONFIG_PACKAGE_x=y whose symbol no
     # longer exists is dropped by defconfig with at most a warning, so a
     # requested app can vanish from the image without failing anything (found:
@@ -964,7 +972,8 @@ ci_check_packages() {
                 missing="$missing preset-no-such-package:$rp"
         done
     fi
-    for p in luci-app-passwall2 \
+    for p in luci-app-passwall luci-app-passwall2 \
+             dns2socks dns2tcp microsocks \
              luci-theme-footstrap \
              luci-app-qmodem qmodem modem_scan tom_modem \
              luci-app-netstat vnstat2 \
@@ -1247,19 +1256,47 @@ ci_check_packages() {
         missing="$missing repo-publishes-luci-app-adguardhome"
     grep -q 'adguardhome|luci-app-adguardhome' "$repo_root/.github/build-package-repo.sh" 2>/dev/null || \
         missing="$missing repo-publishes-adguardhome-binary"
-    # PassWall v1 (Lua) is published on demand, never installed. It is vendored
-    # at packages/luci-app-passwall (4.66-8) rather than pulled from a feed, so
-    # the on-demand build compiles the exact copy that was reviewed here and no
+    # PassWall v1 (Lua) is IN THE IMAGE as of 1.2.39 and ships disabled. It is
+    # vendored at packages/luci-app-passwall (4.66-8) rather than pulled from a
+    # feed, so the image compiles the exact copy that was reviewed here and no
     # `opkg upgrade` can swap it for an upstream version - same failure mode as
     # qmodem's TTL script.
     local pwall="$repo_root/packages/luci-app-passwall" inc
     [ -f "$pwall/Makefile" ] || missing="$missing passwall-v1-vendored"
     grep -q '^PKG_VERSION:=4\.66-8$' "$pwall/Makefile" 2>/dev/null || \
         missing="$missing passwall-v1-version(must be 4.66-8)"
+    # It must ship disabled. 0_default_config is what the uci-defaults script
+    # copies to /etc/config/passwall on first boot; if global.enabled ever
+    # flips to 1 there, v1 starts against passwall2's nft hook and port 53 and
+    # the proxy silently stops working - no error, "not running" in LuCI.
+    grep -qE "^[[:space:]]*option enabled '0'" \
+        "$pwall/root/usr/share/passwall/0_default_config" 2>/dev/null || \
+        missing="$missing passwall-v1-ships-enabled(global.enabled must be 0)"
+    [ -z "$(find "$pwall/root" -path '*rc.d*' -print -quit 2>/dev/null)" ] || \
+        missing="$missing passwall-v1-autostart(no rc.d symlink may be shipped)"
+    # ...and since the buildroot *does* enable every rc.common script while
+    # assembling the rootfs (include/rootfs.mk: prepare_rootfs loops over
+    # ./etc/init.d/* and calls `enable` unless the name is excluded), the
+    # shipped init script must gate boot() on the config itself. Without this
+    # the image boots with S99passwall and runs app.sh against passwall2.
+    grep -q '@global\[0\]\.enabled' "$pwall/root/etc/init.d/passwall" 2>/dev/null || \
+        missing="$missing passwall-v1-boot-gate(boot() must honour global.enabled)"
+    # The nft path only works on nftables-json here: nftables (nojson)
+    # CONFLICTS nftables-json and firewall4 ships the json variant, so
+    # upstream's select would install two /usr/sbin/nft and break image
+    # assembly. Assert the repointed select survives. (sed range, not awk: the
+    # start line also matches a /^config / end pattern, which closes the range
+    # on the first record and reads nothing.)
+    sed -n '/Nftables_Transparent_Proxy/,/_INCLUDE_Brook/p' \
+        "$pwall/Makefile" 2>/dev/null | grep -q 'select PACKAGE_nftables-json' || \
+        missing="$missing passwall-v1-nft-select(nftables-json)"
+    sed -n '/Nftables_Transparent_Proxy/,/_INCLUDE_Brook/p' \
+        "$pwall/Makefile" 2>/dev/null | grep -qx '[[:space:]]*select PACKAGE_nftables' && \
+        forbidden="$forbidden passwall-v1-nft-select(nojson conflict)"
     # Cores pinned to Xray only: xray-core is already in the image, while the
-    # other eight INCLUDE_* options would add ~25 MB of repo assets and a Go +
-    # Rust build to every CI run. A `default y` creeping back in is silent -
-    # the package still builds, just three times slower.
+    # other INCLUDE_* options would pull Go and Rust builds and tens of MB into
+    # the image. A `default y` creeping back in is silent - the package still
+    # builds, the image just grows.
     for inc in Haproxy Shadowsocks_Libev_Client Shadowsocks_Libev_Server \
                Shadowsocks_Rust_Client ShadowsocksR_Libev_Client Simple_Obfs \
                Trojan_Plus V2ray V2ray_Plugin Xray_Plugin; do
@@ -1288,12 +1325,13 @@ ci_check_packages() {
                root/usr/share/passwall/app.sh root/usr/share/passwall/monitor.sh; do
         [ -x "$pwall/$pwf" ] || missing="$missing passwall-v1-not-executable($pwf)"
     done
-    # v1 must be published (it is not in the image manifest, so a typo in the
-    # on-demand list would silently leave it out of the repo), and its three
-    # non-image runtime deps with it.
+    # ...and it must NOT be listed as on-demand any more. The repo is filtered
+    # against the image manifest, so leaving it there publishes a copy the
+    # filter then drops again - and the old failure (deps unresolvable, opkg
+    # refusing the install) looks like a repo outage, not a config mistake.
     for inc in luci-app-passwall dns2socks dns2tcp microsocks; do
-        grep -qx "$inc" "$repo_root/.github/repo/ondemand.txt" 2>/dev/null || \
-            missing="$missing ondemand-missing:$inc"
+        grep -qx "$inc" "$repo_root/.github/repo/ondemand.txt" 2>/dev/null && \
+            forbidden="$forbidden ondemand-still-lists:$inc(in image since 1.2.39)"
     done
     # ...and it must have no feed line: a src-git pin would reintroduce a
     # second luci-app-passwall into the feed metadata. Checked on the generated
@@ -1514,49 +1552,60 @@ ci_check_packages() {
         missing="$missing byte-voip-order(must precede qmodem_init=80)"
     [ -L "$repo_root/files/etc/rc.d/S19byte-voip" ] || \
         missing="$missing byte-voip-symlink(not enabled at boot)"
-    # IPv6 policy: the check must autodetect wanv6, measure real connectivity,
-    # and be reversible. The regressions that matter are all silent on a built
-    # image, so they are asserted here.
+    # IPv6 policy: one shot at bring-up, measurable, reversible. 1.2.38 turned
+    # this into a procd watcher whose settle loop called `ifup wanv6`; every
+    # ifup emits interface.* events, which the hotplug handler and
+    # byte-affinity's raw trigger answered by re-running tc and a selfcheck
+    # dump - an endless uplink reconfiguration on a SIM whose IPv6 never
+    # leaves the modem (slow load, unreachable web UI). The gates below assert
+    # the one-shot shape, because every part of that loop is silent in a build.
     local bv6="$repo_root/files/usr/libexec/byte-v6-check"
     [ -x "$bv6" ] || missing="$missing byte-v6-check"
-    grep -q -- '--watch' "$bv6" 2>/dev/null || missing="$missing byte-v6-watch-mode"
-    grep -q -- '--kick' "$bv6" 2>/dev/null || missing="$missing byte-v6-kick-mode"
-    # Autodetect: qmodem deletes network.wanv6 on every redial, so the check has
-    # to be able to recreate it, not just read it.
-    grep -q 'ensure_wanv6()' "$bv6" 2>/dev/null || missing="$missing byte-v6-autodetect"
-    grep -q 'ifup wanv6' "$bv6" 2>/dev/null || missing="$missing byte-v6-ifup-retry"
-    # Real connectivity, not "an address exists": ICMPv6 plus a TCP fallback.
-    grep -q 'ping6 ' "$bv6" 2>/dev/null || missing="$missing byte-v6-probe-icmp"
+    # A watcher/loop is the regression, not the feature. No mode switch, no
+    # reload trigger, no periodic re-check.
+    grep -q -- '--watch' "$bv6" 2>/dev/null && \
+        forbidden="$forbidden byte-v6-watcher-loop(ships a periodic re-check)"
+    grep -q -- '--kick' "$bv6" 2>/dev/null && \
+        forbidden="$forbidden byte-v6-kick-mode(extra trigger path)"
+    # `ifup wanv6` inside the probe emits interface.* events and is what fed
+    # the 1.2.38 loop. wanv6 must be brought up by netifd/qmodem, not probed
+    # into existence.
+    grep -q 'ifup wanv6' "$bv6" 2>/dev/null && \
+        forbidden="$forbidden byte-v6-ifup-in-probe(re-triggers interface.*)"
+    # Real connectivity, not "an address exists": an HTTP GET over IPv6 that
+    # does not need DNS to work.
     grep -q 'wget -6' "$bv6" 2>/dev/null || missing="$missing byte-v6-probe-tcp"
-    # PD-only carriers must be probed source-bound from the delegated prefix or
-    # a working network gets demoted for lacking a WAN address.
-    grep -qE 'ping6 .*-I ' "$bv6" 2>/dev/null || missing="$missing byte-v6-probe-source-bound"
-    # Fail fast rather than blackhole, and only while demoted.
-    grep -q 'unreachable default metric' "$bv6" 2>/dev/null || \
-        missing="$missing byte-v6-fail-fast-route"
-    # Demotion must be reversible from the snapshot. A hardcoded restore is the
-    # regression: it turned a user's `ra=disabled` into `ra=server`.
-    grep -q 'state_get RA' "$bv6" 2>/dev/null || missing="$missing byte-v6-state-snapshot"
-    if grep -q "uci -q set dhcp.lan.ra='server'" "$bv6" 2>/dev/null; then
-        forbidden="$forbidden byte-v6-hardcoded-restore(RA must come from the snapshot)"
-    fi
-    if grep -q "boot()" "$repo_root/files/etc/init.d/byte-v6" 2>/dev/null; then
-        forbidden="$forbidden byte-v6-init-legacy(non-procd start: triggers never register)"
-    fi
-    grep -q '^USE_PROCD=1$' "$repo_root/files/etc/init.d/byte-v6" 2>/dev/null || \
-        missing="$missing byte-v6-init-procd"
-    grep -q -- '--watch' "$repo_root/files/etc/init.d/byte-v6" 2>/dev/null || \
-        missing="$missing byte-v6-init-watcher"
+    grep -q 'has_global_v6()' "$bv6" 2>/dev/null || missing="$missing byte-v6-global-detect"
+    grep -q 'has_any_global_v6()' "$bv6" 2>/dev/null || \
+        missing="$missing byte-v6-no-source-guard"
+    # Demotion must actually cut the black hole: IPv4 preference in
+    # getaddrinfo, no RA/DHCPv6 for clients, ULA withdrawn as a source, and a
+    # fail-fast default that loses to netifd's own ::/0 (metric 11) instead of
+    # fighting it.
+    grep -q 'precedence ::ffff:0:0/96' "$bv6" 2>/dev/null || \
+        missing="$missing byte-v6-gai-preference"
+    grep -q "uci set dhcp.lan.ra='disabled'" "$bv6" 2>/dev/null || \
+        missing="$missing byte-v6-demote-ra"
+    grep -q 'ip -6 addr flush dev br-lan scope global' "$bv6" 2>/dev/null || \
+        missing="$missing byte-v6-ula-withdraw"
+    grep -q 'metric 2048' "$bv6" 2>/dev/null || missing="$missing byte-v6-fail-fast-route"
+    grep -q 'restore_ipv6()' "$bv6" 2>/dev/null || missing="$missing byte-v6-restore"
+    # Two runs can land in the same second (boot + ifup hotplug); concurrent
+    # `uci commit dhcp` is not safe.
+    grep -q 'flock -n' "$bv6" 2>/dev/null || missing="$missing byte-v6-lock"
+    # The init script must stay a plain rc.common one-shot. USE_PROCD without
+    # service_triggers does nothing, and with them it becomes the loop above.
+    grep -q '^USE_PROCD=1$' "$repo_root/files/etc/init.d/byte-v6" 2>/dev/null && \
+        forbidden="$forbidden byte-v6-init-procd(became a triggered service)"
     grep -q "^START=98$" "$repo_root/files/etc/init.d/byte-v6" 2>/dev/null || \
         missing="$missing byte-v6-order(after odhcpd)"
     [ -L "$repo_root/files/etc/rc.d/S98byte-v6" ] || \
         missing="$missing byte-v6-symlink(not enabled at boot)"
-    [ -x "$repo_root/files/etc/hotplug.d/iface/30-byte-v6" ] || \
-        missing="$missing byte-v6-hotplug"
-    # The old hotplug handler started a second one-shot check per ifup; with a
-    # watcher in place that races two uci commits.
-    [ -e "$repo_root/files/etc/hotplug.d/iface/95-byte-v6" ] && \
-        forbidden="$forbidden byte-v6-duplicate-hotplug(one-shot runner left behind)"
+    # Exactly one extra run, on a WAN ifup - a redial can change the answer.
+    [ -x "$repo_root/files/etc/hotplug.d/iface/95-byte-v6" ] || \
+        missing="$missing byte-v6-hotplug(one re-check on wan/wanv6 ifup)"
+    [ -e "$repo_root/files/etc/hotplug.d/iface/30-byte-v6" ] && \
+        forbidden="$forbidden byte-v6-duplicate-hotplug(30-byte-v6 must not exist)"
     # qmodem 3.4.0 moved the dial/driver menu options from luci-app-qmodem to
     # the qmodem package. A leftover PACKAGE_luci-app-qmodem_* line in the
     # preset is dropped by defconfig without a warning, which would silently
@@ -1607,16 +1656,23 @@ ci_check_packages() {
     # The self-check reads these files as the source of truth; a missing key
     # would make it assert the wrong thing.
     for k in net.ipv4.tcp_congestion_control net.core.default_qdisc \
-             net.ipv4.tcp_mtu_probing net.ipv4.tcp_slow_start_after_idle; do
+             net.ipv4.tcp_mtu_probing net.ipv4.tcp_slow_start_after_idle \
+             net.core.netdev_budget net.core.busy_poll; do
         grep -q "^${k} = " "$repo_root/files/etc/sysctl.conf" 2>/dev/null || \
             missing="$missing sysctl($k)"
     done
-    # Lossy-uplink latency: fail fast instead of blackholing for minutes. The
-    # self-check asserts these values, so both sides are pinned here.
+    # busy_read is NOT opt-in: the kernel copies it into sk_ll_usec for every
+    # socket at creation (net/core/sock.c), which is the opposite of what
+    # 1.2.37 shipped and documented. It must never come back.
+    grep -q '^net\.core\.busy_read' "$repo_root/files/etc/sysctl.conf" 2>/dev/null && \
+        forbidden="$forbidden busy_read(not opt-in per socket; copied into sk_ll_usec)"
+    # The 1.2.33 tuning bundle is deliberately not in this release. If it is
+    # re-added it has to come with a measurement, not as a silent extra
+    # variable in the release that has to prove stability first.
     for k in net.ipv4.tcp_no_metrics_save net.ipv4.tcp_syn_retries \
              net.ipv4.tcp_synack_retries net.ipv4.tcp_retries2; do
-        grep -q "^${k} = " "$repo_root/files/etc/sysctl.conf" 2>/dev/null || \
-            missing="$missing sysctl($k)"
+        grep -q "^${k} = " "$repo_root/files/etc/sysctl.conf" 2>/dev/null && \
+            forbidden="$forbidden sysctl-unmeasured($k)"
     done
     # Per-CPU packet distribution. These are the only levers that work on this
     # box: the modem xhci IRQ cannot be spread (the kernel collapses
@@ -1625,26 +1681,55 @@ ci_check_packages() {
     # invisible in the build - throughput just drops to one core's share.
     local baff="$repo_root/files/etc/init.d/byte-affinity"
     [ -x "$baff" ] || missing="$missing affinity-init"
-    grep -q '^RPS_MASK=0f$' "$baff" 2>/dev/null || missing="$missing affinity-rps-mask"
+    grep -q '^RPS_MASK=0f' "$baff" 2>/dev/null || missing="$missing affinity-rps-mask"
     grep -q '^RPS_FLOW=32768$' "$baff" 2>/dev/null || missing="$missing affinity-rfs-flows"
     grep -q '^START=96$' "$baff" 2>/dev/null || missing="$missing affinity-order"
+    # NAPI deferral is written only on drivers that register a NAPI instance.
+    # usbnet (qmi_wwan, cdc_*) registers none, so an ungated write is a no-op
+    # reported as applied - the 1.2.33 mistake.
+    grep -q '^napi_capable() {' "$baff" 2>/dev/null || \
+        missing="$missing affinity-napi-gate(only NAPI drivers may be tuned)"
     grep -q 'napi_defer_hard_irqs' "$baff" 2>/dev/null || missing="$missing affinity-napi-defer"
-    grep -q '^GRO_FLUSH_NS=20000$' "$baff" 2>/dev/null || missing="$missing affinity-gro-flush"
+    grep -q '^NAPI_DEFER=2$' "$baff" 2>/dev/null || missing="$missing affinity-napi-defer-value"
+    grep -q '^GRO_FLUSH_NS=4000$' "$baff" 2>/dev/null || missing="$missing affinity-gro-flush"
     # Idempotent writes: rewriting rps_cpus with an unchanged mask still
     # allocates a new steering map and schedules call_rcu on every reload.
-    grep -q '^set_sysfs() {' "$baff" 2>/dev/null || missing="$missing affinity-idempotent-write"
-    # BBR pacing needs sch_fq on the wwan netdev, which is registered after
-    # dial - default_qdisc=fq alone does not reliably cover it.
-    grep -q 'qdisc replace dev' "$baff" 2>/dev/null || missing="$missing affinity-fq-qdisc"
-    # A 15s self-reload was pure churn; hotplug + the netifd raw trigger cover
-    # redial, so the timer is a 60s safety net.
-    if grep -q 'sleep 15$' "$baff" 2>/dev/null; then
-        forbidden="$forbidden affinity-15s-reload(use 60s; hotplug covers redial)"
-    fi
+    grep -q '^w() {' "$baff" 2>/dev/null || missing="$missing affinity-idempotent-write"
+    grep -q 'if \[ "\$CHANGED" = 1 \]' "$baff" 2>/dev/null || \
+        missing="$missing affinity-log-on-change(timer must not spam logread)"
+    # `tc` belongs to byte-fq, which is the only thing that measures the link.
+    # 1.2.37 had `tc qdisc replace` in a function that ran on every interface
+    # event, so every ifup rebuilt the WAN queue - one half of the 1.2.38
+    # reconfiguration loop.
+    grep -q 'tc qdisc' "$baff" 2>/dev/null && \
+        forbidden="$forbidden affinity-tc(byte-fq owns the qdisc)"
     # XPS must be probed per device and cached, never hardcoded as supported:
     # a single-tx-queue netdev rejects the mask and the write is the only
     # signal available.
     grep -q 'byte-affinity.xps.' "$baff" 2>/dev/null || missing="$missing affinity-xps-probe"
+    # The measured WAN queue: one procd instance, no timer, no hotplug, and a
+    # learner that must not guess a rate.
+    local bfq="$repo_root/files/usr/libexec/byte-fq-learn"
+    [ -x "$bfq" ] || missing="$missing fq-learner"
+    [ -x "$repo_root/files/etc/init.d/byte-fq" ] || missing="$missing fq-init"
+    [ -L "$repo_root/files/etc/rc.d/S97byte-fq" ] || missing="$missing fq-symlink"
+    grep -q '^START=97$' "$repo_root/files/etc/init.d/byte-fq" 2>/dev/null || \
+        missing="$missing fq-order"
+    grep -q '^PARENT_LIMIT=64$' "$bfq" 2>/dev/null || \
+        missing="$missing fq-parent-bound(driver re-enqueues on wwan0)"
+    grep -q 'statistics/tx_bytes' "$bfq" 2>/dev/null || missing="$missing fq-measurement"
+    grep -q 'limit_for() {' "$bfq" 2>/dev/null || missing="$missing fq-sizing"
+    # The init script only supervises: the helper owns the loop and the tc
+    # calls (stop_service restoring the default qdisc is the one exception).
+    grep -q 'procd_set_param command /usr/libexec/byte-fq-learn' \
+        "$repo_root/files/etc/init.d/byte-fq" 2>/dev/null || \
+        missing="$missing fq-supervise"
+    grep -q 'sleep ' "$repo_root/files/etc/init.d/byte-fq" 2>/dev/null && \
+        forbidden="$forbidden fq-init-timer(the helper owns the cadence)"
+    # A hand-typed rate is what 1.2.37 shipped; the config file is gone and
+    # must not come back.
+    [ -e "$repo_root/files/etc/config/byte" ] && \
+        forbidden="$forbidden byte-config-back(guessed uplink_kbit)"
     grep -q "option governor0 'performance'" "$repo_root/files/etc/config/cpufreq" 2>/dev/null || \
         missing="$missing cpufreq(performance)"
     # The hourly drop_caches/swapoff crontab was removed on purpose (it stalls

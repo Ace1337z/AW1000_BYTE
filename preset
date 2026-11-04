@@ -5293,16 +5293,47 @@ CONFIG_PACKAGE_luci-app-netstat=y
 # CONFIG_PACKAGE_luci-app-p910nd is not set
 CONFIG_PACKAGE_luci-app-package-manager=y
 # CONFIG_PACKAGE_luci-app-pagekitec is not set
-# passwall (v1) is NOT in the image: it cannot coexist with passwall2 - both
-# install redirect rules on the same nft hook and hijack port 53, so whichever
-# restarts last wins and the other is torn down. Only passwall2 ships.
-# v1 is vendored at packages/luci-app-passwall (4.66-8) and built on demand, so
-# it is installable from the BYTE opkg repo. Its Configuration block is left
-# out here on purpose: those symbols are live now, and an explicit
-# "INCLUDE_Xray is not set" would also apply to the on-demand build and leave
-# the published ipk without its only core. The vendored Makefile pins the core
-# defaults instead (Xray y, the rest n).
-# CONFIG_PACKAGE_luci-app-passwall is not set
+# passwall (v1, 4.66-8) SHIPS IN THE IMAGE as of 1.2.39. It was published
+# on demand before, and on-demand was unreachable in practice: the repo is
+# filtered against the image manifest, so its three missing runtime deps
+# (dns2socks, dns2tcp, microsocks) were not resolvable and opkg refused the
+# install. They are in the image now, so v1 is present and offline-installable
+# without a repo round trip.
+# It ships DISABLED (0_default_config sets global.enabled=0 and the package
+# carries no rc.d symlink), so it cannot fight passwall2 for port 53 or the
+# redirect hooks at boot. Enabling v1 means disabling passwall2 first - both
+# install transparent-proxy rules on the same nft hook, so whichever restarts
+# last wins and the other is torn down.
+# Core set is Xray only, same as v2 (xray-core is already in the image). The
+# other nine INCLUDE_* cores are pinned off here as well as in the vendored
+# Makefile, so a feed-side `default y` cannot silently add a Go/Rust build.
+# Nftables variant only: the iptables variant selects iptables-zz-legacy and
+# ipt2socks, which this image does not carry. Its `select PACKAGE_nftables`
+# was repointed to nftables-json in the vendored Makefile because nftables
+# CONFLICTS nftables-json and firewall4 already ships nftables-json (same
+# /usr/sbin/nft with JSON support), so the upstream select would break image
+# assembly with a file collision.
+CONFIG_PACKAGE_luci-app-passwall=y
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Brook is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Hysteria is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_NaiveProxy is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Libev_Client is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Libev_Server is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Server is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Server is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Trojan_GO is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Trojan_Plus is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Geodata is not set
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin is not set
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
+# CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray_Plugin is not set
+# CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy is not set
+CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y
 CONFIG_PACKAGE_luci-app-passwall2=y
 
 #
@@ -5978,8 +6009,8 @@ CONFIG_PACKAGE_nftables-json=y
 # CONFIG_PACKAGE_dhtd is not set
 # CONFIG_PACKAGE_dns-forwarder is not set
 # CONFIG_PACKAGE_dns-over-https is not set
-# CONFIG_PACKAGE_dns2socks is not set
-# CONFIG_PACKAGE_dns2tcp is not set
+CONFIG_PACKAGE_dns2socks=y
+CONFIG_PACKAGE_dns2tcp=y
 # CONFIG_PACKAGE_dnscrypt-proxy is not set
 # CONFIG_PACKAGE_dnscrypt-proxy-resolvers is not set
 # CONFIG_PACKAGE_dnscrypt-proxy2 is not set
@@ -6479,7 +6510,7 @@ CONFIG_PACKAGE_cgi-io=y
 # CONFIG_PACKAGE_kcptun-server is not set
 # CONFIG_PACKAGE_librespeed-go is not set
 # CONFIG_PACKAGE_lighttpd is not set
-# CONFIG_PACKAGE_microsocks is not set
+CONFIG_PACKAGE_microsocks=y
 # CONFIG_PACKAGE_naiveproxy is not set
 # CONFIG_PACKAGE_nginx-full is not set
 # CONFIG_PACKAGE_nginx-mod-brotli is not set
