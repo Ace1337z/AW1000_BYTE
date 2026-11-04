@@ -35,6 +35,27 @@ RPS_FLOW=32768
 # invisible latency, measurably fewer interrupts.
 NAPI_DEFER=2
 GRO_FLUSH_NS=20000
+
+# WAN queue bound (see /etc/config/byte). fq is what paces BBR; its default
+# queue is 10000 packets, i.e. ~15 MB, which on a 100-200 Mbit cellular uplink
+# is 0.6-1.2 s of standing queue. Sizing the aggregate queue to ~3x the bearer's
+# bandwidth-delay product keeps the link full while capping how much delay a
+# burst can build up, and that is done without shaping: no rate ceiling, no
+# classification - the qdisc only refuses to grow past a bound.
+#
+# The per-flow cap is the latency-critical one: 100 packets of 1500 B = 150 KB,
+# under 15 ms at 100 Mbit/s and under 7 ms at 200 Mbit/s. A single upload
+# cannot build a longer queue than that regardless of how many flows run.
+FQ_UPLINK_KBIT=200000
+FQ_RTT_MS=40
+FQ_FLOW_LIMIT=100
+FQ_INITIAL_QUANTUM=65536
+# Clamp the computed aggregate limit. The floor keeps a mis-set uplink_kbit
+# from starving TCP on a real bearer; the ceiling keeps an unset one from
+# restoring the 10000-packet default this exists to avoid.
+FQ_LIMIT_MIN=1000
+FQ_LIMIT_MAX=10000
+
 RUNDIR=/var/run
 CHANGED=0
 
@@ -65,12 +86,111 @@ set_sysfs() {
 # default) queues and bursts. default_qdisc=fq covers devices that exist at boot
 # - the wwan mux interface is registered after qmodem dials, so it is set here
 # instead of relying on the sysctl alone.
+#
+# fq is also the only queue control this image has: SQM is not installed. Its
+# aggregate limit is therefore sized from the bearer (fq_limit_for) instead of
+# being left at 10000 packets.
+#
+# Everything is read back from the kernel before writing, same as set_sysfs:
+# tc qdisc replace resets the qdisc, which zeroes its backlog accounting and its
+# drop counters, and this runs from a 60 s timer.
+
+# uci_uint <option> <default>: read an unsigned integer from /etc/config/byte.
+uci_uint() {
+	local v
+	v=$(uci -q get "byte.fq.$1" 2>/dev/null)
+	case "$v" in
+		'' | *[!0-9]*) printf '%s\n' "$2" ;;
+		*) printf '%s\n' "$v" ;;
+	esac
+}
+
+# fq_limit_for <dev>: aggregate queue limit in packets, or empty when the queue
+# is deliberately left at the kernel default (byte.fq.enabled=0).
+#
+# Sizing is 3x the bandwidth-delay product:
+#   BDP_bytes   = uplink_kbit * 1000 / 8 * rtt_ms / 1000 = uplink_kbit * rtt_ms / 8
+#   BDP_packets = BDP_bytes / 1514
+# so 3 * uplink_kbit * rtt_ms / (8 * 1514) = 3 * uplink_kbit * rtt_ms / 12112.
+# At 200000 kbit and 40 ms that is 1981 packets (~3 MB, ~120 ms of queue at the
+# bearer rate) - enough to keep the link full, far below the 10000 default.
+fq_limit_for() {
+	local name="$1" up rt limit
+	[ "$(uci -q get byte.fq.enabled 2>/dev/null)" = "0" ] && return 0
+	up=$(uci_uint uplink_kbit "$FQ_UPLINK_KBIT")
+	if [ "$up" -eq 0 ] 2>/dev/null; then
+		# No configured rate: ask the driver. wwan devices report 0 or a
+		# link-layer number that is not the bearer rate, so only trust it
+		# when it lands inside the range a cellular bearer can have.
+		up=$(cat "/sys/class/net/$name/speed" 2>/dev/null)
+		case "$up" in
+			'' | *[!0-9]*) up=0 ;;
+		esac
+		if [ "$up" -ge 1 ] 2>/dev/null && [ "$up" -le 40000 ] 2>/dev/null; then
+			up=$((up * 1000))
+		else
+			up=$FQ_UPLINK_KBIT
+		fi
+	fi
+	[ "$up" -ge 1000 ] 2>/dev/null || up=$FQ_UPLINK_KBIT
+	rt=$(uci_uint rtt_ms "$FQ_RTT_MS")
+	[ "$rt" -ge 1 ] 2>/dev/null || rt=$FQ_RTT_MS
+	limit=$((3 * up * rt / 12112))
+	[ "$limit" -lt "$FQ_LIMIT_MIN" ] && limit=$FQ_LIMIT_MIN
+	[ "$limit" -gt "$FQ_LIMIT_MAX" ] && limit=$FQ_LIMIT_MAX
+	printf '%s\n' "$limit"
+}
+
+# fq_params <dev>: print "<limit> <flow_limit>" of the live qdisc, empty fields
+# when it is not fq. Field-name based on purpose: "flow_limit" contains the
+# substring "limit", so a pattern match would read the wrong number.
+fq_params() {
+	tc qdisc show dev "$1" 2>/dev/null | awk '
+		$2 == "fq" {
+			for (i = 1; i < NF; i++) {
+				if ($i == "limit") { l = $(i + 1) }
+				if ($i == "flow_limit") { f = $(i + 1) }
+			}
+			gsub(/p/, "", l); gsub(/p/, "", f)
+			print l, f
+			exit
+		}'
+}
+
 apply_fq() {
-	local name="$1" cur
+	local name="$1" limit flow cur_limit cur_flow cur
 	command -v tc >/dev/null 2>&1 || return 0
-	cur=$(tc qdisc show dev "$name" 2>/dev/null | awk '{print $2; exit}')
-	[ "$cur" = fq ] && return 0
-	if tc qdisc replace dev "$name" root fq 2>/dev/null; then
+
+	limit=$(fq_limit_for "$name")
+	if [ -z "$limit" ]; then
+		# Tuning disabled: still guarantee the qdisc BBR is designed for.
+		case "$(tc qdisc show dev "$name" 2>/dev/null | awk '{print $2; exit}')" in
+			fq) return 0 ;;
+		esac
+		if tc qdisc replace dev "$name" root fq 2>/dev/null; then
+			CHANGED=$((CHANGED + 1))
+		fi
+		return 0
+	fi
+
+	flow=$(uci_uint flow_limit "$FQ_FLOW_LIMIT")
+	[ "$flow" -ge 1 ] 2>/dev/null || flow=$FQ_FLOW_LIMIT
+	# fq rejects a per-flow cap at or above the aggregate one.
+	[ "$flow" -ge $((limit / 2)) ] && flow=$((limit / 2))
+
+	# Read back before writing: tc qdisc replace tears the qdisc down and
+	# zeroes its backlog and drop counters, and this runs from a 60 s timer.
+	# Word splitting on purpose - fq_params prints "<limit> <flow_limit>".
+	cur=$(fq_params "$name")
+	cur_limit=${cur%% *}
+	cur_flow=${cur##* }
+	[ "$cur_limit" = "$limit" ] && [ "$cur_flow" = "$flow" ] && return 0
+
+	if tc qdisc replace dev "$name" root fq \
+		limit "$limit" \
+		flow_limit "$flow" \
+		initial_quantum "$(uci_uint initial_quantum "$FQ_INITIAL_QUANTUM")" \
+		2>/dev/null; then
 		CHANGED=$((CHANGED + 1))
 	fi
 }
@@ -113,6 +233,22 @@ xps_state() {
 	echo "${out# }"
 }
 
+# fq_state: "wwan0_1=1981/100" per modem interface, or "none" before the modem
+# dials. Logged so the queue bound is visible in logread next to the RPS masks,
+# instead of requiring an SSH session with tc.
+fq_state() {
+	local dev name p out=
+	for dev in /sys/class/net/wwan*; do
+		[ -e "$dev" ] || continue
+		name=${dev##*/}
+		p=$(fq_params "$name")
+		[ -n "$p" ] || continue
+		out="$out $name=$(echo "$p" | tr ' ' '/')"
+	done
+	[ -n "$out" ] || out=" none"
+	echo "${out# }"
+}
+
 apply() {
 	CHANGED=0
 	# Global RFS table. Without this rps_flow_cnt is inert.
@@ -150,7 +286,7 @@ apply() {
 	# but the interrupt itself is not spread. NAPI deferral above reduces how
 	# often it fires; it does not move it.
 	if [ "$CHANGED" -gt 0 ]; then
-		logger -t byte-affinity "applied=$CHANGED rps=$RPS_MASK rfs=$RPS_FLOW napi=$NAPI_DEFER/$GRO_FLUSH_NS xps=$(xps_state)"
+		logger -t byte-affinity "applied=$CHANGED rps=$RPS_MASK rfs=$RPS_FLOW napi=$NAPI_DEFER/$GRO_FLUSH_NS xps=$(xps_state) fq=$(fq_state)"
 	fi
 }
 

@@ -106,7 +106,10 @@ opkg install luci-app-passwall   # PassWall v1 (Lua); disable passwall2 first
 | Socket buffers | `tcp_rmem`/`tcp_wmem` capped at 4 MB, `tcp_moderate_rcvbuf=1`, `tcp_notsent_lowat=131072` |
 | TCP Fast Open | `tcp_fastopen=3` (client + server), blackhole timeout 60 s |
 | NAPI / backlog | `netdev_budget=2400`, `netdev_max_backlog=16384`, `dev_weight=64`, `napi_defer_hard_irqs=2` + `gro_flush_timeout=20000` ns on `wwan*` |
-| Packet steering | `packet_steering=1`, `steering_flows=32768`, RPS/RFS `0f` on `wwan*`, `fq` on the modem netdev, XPS probed per device |
+| WAN egress queue | `fq` sized from the bearer instead of the 10000-packet default: `limit` ≈ 3× BDP (1981 packets at 200 Mbit/40 ms), `flow_limit=100`, `initial_quantum=64 KB`; knobs in `/etc/config/byte` |
+| Busy polling | `busy_poll=50`, `busy_read=50` — opt-in per socket (`SO_BUSY_POLL`), so it only affects the router's own services |
+| Neighbour tables | `gc_thresh1/2/3 = 512/2048/4096` for IPv4 **and** IPv6 |
+| Packet steering | `packet_steering=1`, `steering_flows=32768`, RPS/RFS `0f` on `wwan*`, bounded `fq` on the modem netdev, XPS probed per device |
 | Fail-fast | `tcp_no_metrics_save=1`, `tcp_syn_retries=3`, `tcp_synack_retries=3`, `tcp_retries2=8` |
 | CPU / memory | `performance` governor, zram, modem IRQs spread across cores |
 | Conntrack | 32768 max, 7440 established, keepalive 120/15/4 |
@@ -671,10 +674,12 @@ stays on that core regardless. Everything below works *around* that, not on it.
   `/var/run/byte-affinity.xps.<dev>`; the boot log line reports
   `xps=wwan0=unsupported wwan0_1=unsupported` instead of pretending otherwise.
   Retrying a write the kernel will never accept just burns forks every minute.
-- **fq on the modem netdev.** BBR computes a rate but only `sch_fq` paces it.
-  `default_qdisc=fq` covers devices present at boot; the wwan mux interface is
-  registered after qmodem dials, so `byte-affinity` checks the live qdisc and
-  runs `tc qdisc replace dev wwan0 root fq` when it is not already `fq`.
+- **fq on the modem netdev, with a bound.** BBR computes a rate but only
+  `sch_fq` paces it. `default_qdisc=fq` covers devices present at boot; the wwan
+  mux interface is registered after qmodem dials, so `byte-affinity` checks the
+  live qdisc and runs `tc qdisc replace dev wwan0 root fq` when it is not
+  already `fq`. It no longer stops at "the qdisc is fq": the parameters are read
+  back and re-applied when they differ from the sized ones (see below).
 - **The reload no longer churns.** Every sysfs write goes through `set_sysfs`,
   which compares first - numerically for hex masks, because the kernel prints
   `f`, not `0f`, and a string compare would rewrite every time. Rewriting
@@ -683,13 +688,71 @@ stays on that core regardless. Everything below works *around* that, not on it.
   the life of the boot. The timer is now 60 s (hotplug + the netifd raw trigger
   already cover redial) and steady state does zero writes, zero `tc` forks and
   logs nothing.
-No SQM is involved: latency under load stays the job of `fq` + BBR, and the
-added TCP keys only change *time to notice* a dead path
-(`tcp_no_metrics_save=1`, `tcp_syn_retries=3`, `tcp_synack_retries=3`,
-`tcp_retries2=8`) - none of them touches throughput.
+No SQM is involved: latency under load stays the job of a bounded `fq` plus BBR
+(see the next section), and the added TCP keys only change *time to notice* a
+dead path (`tcp_no_metrics_save=1`, `tcp_syn_retries=3`,
+`tcp_synack_retries=3`, `tcp_retries2=8`) - none of them touches throughput.
 Gates: `RPS_MASK=0f`, `RPS_FLOW=32768`, `START=96`, the NAPI/GRO constants, the
-`set_sysfs` helper, the `tc qdisc replace` path and the per-device XPS probe
-must all be present; a `sleep 15` reload is a build failure.
+`set_sysfs` helper, the `tc qdisc replace` path, the fq sizing helpers and the
+per-device XPS probe must all be present; a `sleep 15` reload is a build
+failure.
+
+### The WAN queue is bounded, not shaped
+The image ships no SQM, so the only thing standing between a saturated upload
+and a 1-second latency spike is the size of the modem's egress queue. It was
+the kernel default: `fq` with `limit 10000` packets, i.e. ~15 MB, which is
+0.6 s of queue at 200 Mbit/s and 1.2 s at 100 Mbit/s. `flow_limit` (100) already
+bounded a *single* flow, but a client running parallel uploads multiplies that
+by the number of flows.
+
+The queue is now sized from the bearer instead of left at the default:
+
+```
+limit         = 3 * uplink_kbit * rtt_ms / 12112      (packets)
+              = 1981 at 200 Mbit/s and 40 ms           (~3 MB, ~120 ms)
+flow_limit    = 100                                   (150 KB, <7 ms at 200 Mbit/s)
+initial_quantum = 65536                               (slow-start burst, was 15140)
+```
+
+`12112` is `8 * 1514`: the divisor that turns kbit/s x ms into 1500-byte
+packets. Three times the bandwidth-delay product is the usual compromise -
+enough in flight to keep the bearer full, small enough that the queue cannot
+hide a second of delay. Nothing is shaped: there is no rate ceiling and no
+classification, the qdisc simply refuses to grow past the bound, so a flow that
+is not saturating the link never sees it.
+
+Knobs live in `/etc/config/byte` (`byte.fq.uplink_kbit`, `rtt_ms`, `flow_limit`,
+`initial_quantum`, `enabled`). Defaults are what this image was tuned with;
+`enabled=0` restores the kernel default but keeps `fq` installed, because BBR
+still needs pacing. Nothing here needs a reflash to change - hence a config file
+rather than constants baked into the init script - and `byte-affinity` logs
+`fq=wwan0_1=1981/100` next to the RPS masks so the applied bound is visible in
+`logread` without an SSH session.
+
+`byte-fq-measure` reports what the queue is doing: qdisc parameters, backlog and
+drops, the live sysctl values, and p50/p95/p99 for the gateway and `1.1.1.1`.
+Run it idle and again during a saturating upload; the p99 delta is the number
+that matters.
+
+Two things deliberately **not** changed here:
+
+- **`net.core.netdev_budget_usecs`.** The old comment in `sysctl.conf` claimed
+  the kernel made it read-only. It does not: `net/core/sysctl_net_core.c`
+  registers it `0644`. Its minimum is `2 * USEC_PER_SEC / HZ`
+  (`sysctl_net_core.c:37`), which at `CONFIG_HZ=100` is 20000 us - so writing
+  the 2000 us the RX budget was designed for returns `EINVAL`, and `sysctl -p`
+  aborts the rest of the file on the first invalid key (that is how
+  `tcp_slow_start_after_idle` never applied despite being written down). The
+  floor is a function of HZ, not of the kernel version.
+- **`CONFIG_HZ`.** Raising it to 250 would lower that floor to 8 ms, and it is
+  the only remaining knob in the tick. It would change nothing measurable here:
+  `net_rx_action`'s time limit is `jiffies + usecs_to_jiffies(budget_usecs)`
+  (20 ms), but a pass ends when `netdev_budget` (2400 packets, ~3-5 ms) runs
+  out, so the time limit never binds. The cost would be a full kernel rebuild,
+  150 extra ticks per second per busy core, and re-verification of every patch,
+  for a change below the noise floor of a cellular bearer that is already
+  20-40 ms of RTT.
+
 ### QModem voice on the phone port: why the feed pin is `main`, not a tag
 SIP needs three packages that only exist in QModem 3.4: `qmodem-voip` (modem
 audio), `qmodem-sipd` (SIP transport) and `luci-app-qmodem-voip`. The 3.4 line
@@ -1056,17 +1119,39 @@ watcher holds the pidfile. The watcher's first `trap` did not `exit`, so
 - **ECM 12.5 on 6.12.94 with bonding off**: compiled locally (ipk produced);
   hardware test still pending.
 - **ECM state device** availability at boot is assumed from source, not seen.
-- **CPU distribution is build-verified only.** On the unit: `logread | grep
-  byte-affinity` must show exactly one `applied=N rps=0f rfs=32768
-  napi=2/20000 xps=...` line at boot and nothing afterwards while idle (a
-  repeated line means an idempotent write regressed);
+- **CPU distribution and the WAN queue bound are build-verified only.** On the
+  unit: `logread | grep byte-affinity` must show exactly one `applied=N rps=0f
+  rfs=32768 napi=2/20000 xps=... fq=wwan0_1=1981/100` line at boot and nothing
+  afterwards while idle (a repeated line means an idempotent write regressed);
   `/sys/class/net/wwan0_1/queues/rx-0/rps_cpus` reads `f`, `rps_flow_cnt`
   `32768`, `napi_defer_hard_irqs` `2`, `gro_flush_timeout` `20000`, and
-  `tc qdisc show dev wwan0_1` says `fq`. Then compare `/proc/interrupts |
-  grep xhci` and `/proc/softirqs` before and after a 100 MB download: the IRQ
-  count should grow slower than the packet count and NET_RX should spread over
-  four CPUs instead of one. `byte-selfcheck` logs the `napi.*` and
-  `no_metrics_save`/`syn_retries`/`retries2` lines on the next ifup.
+  `tc qdisc show dev wwan0_1` says `fq ... limit 1981p flow_limit 100p
+  initial_quantum 65536`. Then compare `/proc/interrupts | grep xhci` and
+  `/proc/softirqs` before and after a 100 MB download: the IRQ count should grow
+  slower than the packet count and NET_RX should spread over four CPUs instead
+  of one. `byte-fq-measure` run idle and under a saturating upload is the
+  latency proof: `backlog` should stay in the low hundreds instead of thousands,
+  and p99 should not grow by more than `flow_limit` allows.
+- **`busy_poll`/`busy_read` and the neighbour tables are unmeasured.** They are
+  asserted by `byte-selfcheck` (`busy_poll`, `busy_read`, `neigh.gc_thresh3`,
+  `neigh6.gc_thresh3`), which proves the kernel accepted them, not that they
+  help. A before/after on LuCI response time and DNS lookups under load is the
+  only honest way to claim anything.
+- **`kpti=off` is not shipped, on purpose.** The built kernel has
+  `CONFIG_UNMAP_KERNEL_AT_EL0=y`, so every syscall and interrupt entry pays a
+  page-table swap on this Cortex-A53, and the WAN path is deliberately not
+  offloaded - CPU there is throughput. Disabling it would be the last
+  measurable CPU win, but it needs a kernel command line change (a reflash, not
+  a sysctl) and it is a security downgrade on a box facing the internet. Decide
+  with numbers: `mitigations=off` A/B on a spare unit, sysbench or a plain
+  `iperf3` through the WAN path, before/after. If it is ever taken, it belongs
+  in this section with the measured delta, not in a silent config line.
+- **`multicast_to_unicast` on the WiFi interfaces is not enabled.** It would stop
+  multicast being sent at the lowest basic rate to every client, which is a real
+  airtime win, but it changes how IPTV multicast reaches WiFi clients - the
+  exact path the bridge snooping work above fixed. Ship it only with an IPTV
+  regression test on the unit (zap through 5-10 channels, confirm no freeze and
+  no `multicast hash table full`), and only on 5 GHz first.
 - **Recovery path unconfirmed** on the target unit (no serial session yet), so
   no image has been flashed from this branch.
 - **SIP ringing and audio not yet verified on hardware.** Build-level evidence
@@ -1094,6 +1179,58 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-04
+- **Latency: the WAN egress queue is bounded instead of left at 15 MB.**
+  `byte-affinity` used to stop at "the qdisc is `fq`", which meant the kernel
+  default `limit 10000` packets - ~15 MB of queue, 0.6 s of delay at 200 Mbit/s
+  once a client runs parallel uploads (the per-flow cap only bounds one flow).
+  It now sizes the queue from the bearer:
+  `limit = 3 * uplink_kbit * rtt_ms / 12112` = 1981 packets at 200 Mbit/s and
+  40 ms, `flow_limit=100`, `initial_quantum=65536`, and re-applies it whenever
+  the live parameters differ. No shaping: no rate ceiling, no classification.
+  Knobs are in the new `/etc/config/byte` (`byte.fq.*`), so re-sizing for a
+  different SIM needs no reflash; `enabled=0` restores the old behaviour. The
+  boot log line now carries `fq=wwan0_1=1981/100` next to the RPS masks.
+  **Verified:** a host harness (`/tmp/opencode/fqtest.sh`, 21 cases) covers the
+  sizing maths, the clamp at both ends, the non-numeric and missing values, the
+  `enabled=0` path, the "already correct, do not rewrite" path - a rewrite
+  resets the qdisc and zeroes its counters, and this runs from a 60 s timer -
+  and the parsing of real `tc qdisc show` output, where a pattern match would
+  read `flow_limit` as `limit`.
+- **Latency: `busy_poll=50` / `busy_read=50`.** Opt-in per socket
+  (`SO_BUSY_POLL`/`SO_BUSY_READ`), so forwarded traffic never spins; the point
+  is the router's own userspace networking - dnsmasq, AdGuard Home, Xray in
+  PassWall, qmodem's AT readers - where a wakeup costs more than the packet.
+- **Robustness: neighbour tables sized 512/2048/4096 for IPv4 and IPv6.** The
+  default 1024-entry ceiling is reachable with a dozen WiFi clients plus their
+  ND entries, IPTV groups and QModem's virtual interfaces; when it is reached
+  the kernel collects live entries and the first packet to a known host briefly
+  goes nowhere. ~256 KB of table on 884 MB.
+- **Doc fix: the `netdev_budget_usecs` comment was wrong.** `sysctl.conf` claimed
+  the key is read-only on 6.12. It is `0644`; its *minimum* is
+  `2 * USEC_PER_SEC / HZ`, which is 20000 us at `CONFIG_HZ=100`, so the
+  `EINVAL` was a floor, not a lock. The behavioural conclusion stands (`sysctl
+  -p` still aborts the rest of the file on that error) but the reason matters:
+  the old comment would have anyone conclude the knob is dead upstream instead
+  of floor-bound by this image's HZ. `CONFIG_HZ` itself is left alone - the RX
+  budget (2400 packets) is exhausted in ~3-5 ms, long before the 20 ms time
+  limit, so a rebuild would buy nothing measurable; the reasoning is in "The
+  WAN queue is bounded, not shaped".
+- **New `byte-fq-measure`.** Read-only: prints qdisc parameters, backlog, drops,
+  the live sysctls, and p50/p95/p99 to the gateway and `1.1.1.1`, to be run
+  idle and during a saturating upload. It changes nothing.
+- **Self-check extended:** `busy_poll`, `busy_read`, `neigh.gc_thresh3`,
+  `neigh6.gc_thresh3` and the live `flow_limit` on each `fq` modem interface are
+  asserted now, with the aggregate `limit` logged beside it.
+- **Deliberately not done:** `kpti=off` (security downgrade plus a command line
+  change) and `multicast_to_unicast` (needs an IPTV regression test). Both are
+  in open items with what it would take to decide them.
+- **Size:** sysupgrade `35,318,569` → `35,328,809` bytes (+10,240); rootfs
+  squashfs `30,054,525` → `30,059,409` (+4,884). The two new files are 1.4 KB
+  (`/etc/config/byte`) and 3.2 KB (`/usr/sbin/byte-fq-measure`); squashfs
+  compression absorbs the rest. `make` exit 0 through `scripts/preflight.sh`
+  (apply_preset, defconfig 1051 `=y`, `ALL REQUIRED PACKAGES PRESENT IN .config`,
+  image assembled), no `*.rej` in the tree, manifest still
+  `ndisc6 - 1.0.8-r1`, `kmod-qmi_wwan_q - 6.12.94.1.5-r2`.
 - **Build fix: `rmdir` aborted `apply_preset()` under `set -e`, and local
   verification now runs `apply_preset()` itself.** Run `41739864877` died eight
   minutes in, one line after `ndisc6: 1.0.2 -> 1.0.8 ...`, with no message:

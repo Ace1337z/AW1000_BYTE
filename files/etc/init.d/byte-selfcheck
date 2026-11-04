@@ -82,6 +82,16 @@ check_sysctl() {
 	report synack_retries 3 "$(cat /proc/sys/net/ipv4/tcp_synack_retries 2>/dev/null)"
 	report retries2 8 "$(cat /proc/sys/net/ipv4/tcp_retries2 2>/dev/null)"
 	report rmem_max 4194304 "$(cat /proc/sys/net/core/rmem_max 2>/dev/null)"
+	# Busy polling is opt-in per socket (SO_BUSY_POLL/SO_BUSY_READ), so it only
+	# touches the router's own userspace networking. Verified here because a
+	# sysctl -p that aborted early would leave it at 0 with no other symptom.
+	report busy_poll 50 "$(cat /proc/sys/net/core/busy_poll 2>/dev/null)"
+	report busy_read 50 "$(cat /proc/sys/net/core/busy_read 2>/dev/null)"
+	# Neighbour table ceilings, both families. Reported via thresh3 because that
+	# is the one whose exhaustion causes the visible symptom (live entries
+	# collected, first packet to a known host vanishes).
+	report neigh.gc_thresh3 4096 "$(cat /proc/sys/net/ipv4/neigh/default/gc_thresh3 2>/dev/null)"
+	report neigh6.gc_thresh3 4096 "$(cat /proc/sys/net/ipv6/neigh/default/gc_thresh3 2>/dev/null)"
 	# BBR only exists if CONFIG_TCP_CONG_BBR was compiled in; fq likewise.
 	[ "$(cat /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null | grep -cw bbr)" -eq 1 ] \
 		|| { logger -t "$TAG" "bbr.module: SKIP (not compiled in)"; }
@@ -99,6 +109,23 @@ check_iface() {
 			fq) ;;
 			*) logger -t "$TAG" "iface.$dev.qdisc: note - BBR pacing wants fq, got ${qq:-none}" ;;
 		esac
+
+		# The bounded queue is the latency control this image ships instead of
+		# SQM: the per-flow cap decides how much queueing delay one upload can
+		# build up, so assert it and log the aggregate limit beside it.
+		# Parsed by field name - "flow_limit" contains the substring "limit",
+		# so a pattern match reads the wrong number.
+		if [ "$qq" = fq ]; then
+			local want_fl fl dump
+			want_fl=$(uci -q get byte.fq.flow_limit 2>/dev/null)
+			case "$want_fl" in '' | *[!0-9]*) want_fl=100 ;; esac
+			dump=$(tc qdisc show dev "$dev" 2>/dev/null)
+			fl=$(printf '%s\n' "$dump" | awk '
+				{ for (i = 1; i < NF; i++) if ($i == "flow_limit") { v = $(i + 1); gsub(/p/, "", v); print v; exit } }')
+			report "iface.$dev.fq_flow_limit" "$want_fl" "$fl"
+			logger -t "$TAG" "iface.$dev.fq_limit: $(printf '%s\n' "$dump" | awk '
+				{ for (i = 1; i < NF; i++) if ($i == "limit") { v = $(i + 1); gsub(/p/, "", v); print v; exit } }') (byte.fq.uplink_kbit=$(uci -q get byte.fq.uplink_kbit 2>/dev/null))"
+		fi
 
 		# RPS must cover every core; one core is the single-core ceiling
 		# that byte-affinity exists to remove. The kernel prints the mask
