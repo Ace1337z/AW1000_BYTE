@@ -1,0 +1,58 @@
+Package: adguardhome
+Version: 0.107.76-r1
+Depends: libc, ca-bundle
+Provides: adguardhome-any
+Source: feeds/packages/feeds/packages/net/adguardhome
+SourceName: adguardhome
+License: GPL-3.0-only
+LicenseFiles: LICENSE.txt
+Section: net
+Require-User: adguardhome=853:adguardhome=853
+SourceDateEpoch: 1779386714
+URL: https://github.com/AdguardTeam/AdGuardHome
+CPE-ID: cpe:/a:adguard:adguardhome
+Maintainer: Dobroslaw Kijowski <dobo90@gmail.com>, George Sapkin <george@sapk.in>
+Architecture: aarch64_cortex-a53
+Installed-Size: 32440320
+Description:  Free and open source, powerful network-wide ads and trackers blocking DNS server.
+Filename: adguardhome_0.107.76-r1_aarch64_cortex-a53.ipk
+Size: 10878859
+
+Package: geoview
+Version: 0.2.6-r1
+Depends: libc
+Provides: geoview-any
+Source: feeds/packages/feeds/packages/net/geoview
+SourceName: geoview
+License: Apache-2.0
+LicenseFiles: LICENSE
+Section: net
+SourceDateEpoch: 1778205725
+URL: https://github.com/snowie2000/geoview
+Maintainer: snowie2000
+Architecture: aarch64_cortex-a53
+Installed-Size: 7157760
+Description:  geoview is a handy tool to extract useful information from geo* files.
+Filename: geoview_0.2.6-r1_aarch64_cortex-a53.ipk
+Size: 2741618
+
+Package: tailscale
+Version: 1.98.3-r1
+Depends: libc, ca-bundle, kmod-tun
+Provides: tailscale-any, tailscaled
+Source: feeds/packages/feeds/packages/net/tailscale
+SourceName: tailscale
+License: BSD-3-Clause
+LicenseFiles: LICENSE
+Section: net
+SourceDateEpoch: 1779388039
+URL: https://tailscale.com
+CPE-ID: cpe:/a:tailscale:tailscale
+Maintainer: Zephyr Lykos <self@mochaa.ws>, Sandro Jäckel <sandro.jaeckel@gmail.com>
+Architecture: aarch64_cortex-a53
+Installed-Size: 26388480
+Description:  It creates a secure network between your servers, computers,
+ and cloud instances. Even when separated by firewalls or subnets.
+Filename: tailscale_1.98.3-r1_aarch64_cortex-a53.ipk
+Size: 9945682
+

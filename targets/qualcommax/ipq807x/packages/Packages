@@ -1,0 +1,59 @@
+Package: kmod-qmi_wwan_f
+Version: 6.12.94.1.0-r5
+Depends: kernel (=6.12.94~95df4ccd0c64d12e429770c41984a3aa-r1), kmod-usb-net, kmod-usb-wdm
+Provides: kmod-qmi_wwan_f-any
+Source: feeds/qmodem/feeds/qmodem/driver/fibocom_QMI_WWAN
+SourceName: qmi_wwan_f
+Section: kernel
+SourceDateEpoch: 1793593048
+Architecture: aarch64_cortex-a53
+Installed-Size: 51200
+Description:  Fibocom Linux USB QMI WWAN Driver
+Filename: kmod-qmi_wwan_f_6.12.94.1.0-r5_aarch64_cortex-a53.ipk
+Size: 14291
+
+Package: kmod-qmi_wwan_q
+Version: 6.12.94.1.5-r2
+Depends: kernel (=6.12.94~95df4ccd0c64d12e429770c41984a3aa-r1), kmod-usb-net, kmod-usb-wdm
+Provides: kmod-qmi_wwan_q-any
+Source: feeds/qmodem/feeds/qmodem/driver/quectel_QMI_WWAN
+SourceName: qmi_wwan_q
+Section: kernel
+SourceDateEpoch: 1793593048
+Architecture: aarch64_cortex-a53
+Installed-Size: 51200
+Description:  Quectel Linux USB QMI WWAN Driver
+Filename: kmod-qmi_wwan_q_6.12.94.1.5-r2_aarch64_cortex-a53.ipk
+Size: 14797
+
+Package: kmod-qmi_wwan_s
+Version: 6.12.94.1.0-r2
+Depends: kernel (=6.12.94~95df4ccd0c64d12e429770c41984a3aa-r1), kmod-usb-net, kmod-usb-wdm
+Provides: kmod-qmi_wwan_s-any
+Source: feeds/qmodem/feeds/qmodem/driver/simcom_QMI_WWAN
+SourceName: qmi_wwan_s
+Section: kernel
+SourceDateEpoch: 1793593048
+Architecture: aarch64_cortex-a53
+Installed-Size: 20480
+Description:  Simcom Linux USB QMI WWAN Driver
+Filename: kmod-qmi_wwan_s_6.12.94.1.0-r2_aarch64_cortex-a53.ipk
+Size: 4333
+
+Package: kmod-tun
+Version: 6.12.94-r1
+Depends: kernel (=6.12.94~95df4ccd0c64d12e429770c41984a3aa-r1)
+Provides: kmod-tun-any
+Source: feeds/base/kernel/linux
+SourceName: kernel
+License: GPL-2.0-only
+LicenseFiles: COPYING
+Section: kernel
+SourceDateEpoch: 1782723804
+CPE-ID: cpe:/o:linux:linux_kernel
+Architecture: aarch64_cortex-a53
+Installed-Size: 10240
+Description:  Kernel support for the TUN/TAP tunneling device
+Filename: kmod-tun_6.12.94-r1_aarch64_cortex-a53.ipk
+Size: 888
+

@@ -1,0 +1,33 @@
+Package: luci-app-adguardhome
+Version: 26.283.50138~350fc91
+Depends: adguardhome (>=0.107.73-r3), libc, adguardhome, luci-base
+Provides: luci-app-adguardhome-any
+Source: feeds/luci/feeds/luci/applications/luci-app-adguardhome
+SourceName: luci-app-adguardhome
+License: GPL-2.0-only
+Section: luci
+SourceDateEpoch: 1793822080
+URL: https://github.com/openwrt/luci
+Maintainer: George Sapkin <george@sapk.in>
+Architecture: all
+Installed-Size: 20480
+Description:  LuCI support for AdGuard Home
+Filename: luci-app-adguardhome_26.283.50138~350fc91_all.ipk
+Size: 3886
+
+Package: luci-app-tailscale-community
+Version: 26.283.50138~350fc91
+Depends: libc, tailscale, ip, luci-base
+Provides: luci-app-tailscale-community-any
+Source: feeds/luci/feeds/luci/applications/luci-app-tailscale-community
+SourceName: luci-app-tailscale-community
+Section: luci
+SourceDateEpoch: 1793822080
+URL: https://github.com/tokisaki-galaxy/luci-app-tailscale-community
+Maintainer: OpenWrt LuCI community
+Architecture: all
+Installed-Size: 51200
+Description:  LuCI support for Tailscale
+Filename: luci-app-tailscale-community_26.283.50138~350fc91_all.ipk
+Size: 11173
+
