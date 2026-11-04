@@ -1102,6 +1102,16 @@ watcher holds the pidfile. The watcher's first `trap` did not `exit`, so
 `SIGTERM` (procd stop) left it running - fixed to `trap 'exit 0' INT TERM`.
 
 ### Open items
+- **CI build time is within ~35 % of the 6 h job cap in the worst case.** The
+  measured green run was `2:07:41` end to end with a warm `dl/`+ccache and
+  `1:42:20` inside `Build firmware`; a completely cold run has never been
+  measured to completion (the only cancelled run died on the stalled fetch
+  documented in the changelog, not on compile time). The caps and the
+  save-on-failure cache now bound the damage to one slow run instead of an
+  endless sequence of cold ones, but if a cold run is ever seen passing
+  `5 h` inside the build step, the next lever is splitting the job by
+  `make target/compile` and `make package/compile` into separate jobs sharing
+  the same cache, not raising the cap.
 - **IPv6 policy is not verified against a live carrier.** What to check on the
   unit: `logread | grep byte-v6` shows the watcher line at boot plus one
   verdict; `ubus call network.interface.wanv6 status` has the same
@@ -1179,6 +1189,58 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-04
+- **Build safety: a stalled source fetch can no longer burn the 6 h CI budget.**
+  Run `41746818664` (1.2.36) was not a code failure. It sat from `02:08:14`
+  inside `make[3] -C package/kernel/mac80211 compile` with **zero log lines for
+  4 h 18 m** and was killed by GitHub's job cap at `06:26:48`. The process tree
+  at the kill was `bash → perl → make → flock → sh → perl → curl` with no
+  compiler in it: OpenWrt's `scripts/download.pl` waiting on a fetch. Root
+  cause is in that script, line 127:
+  `curl -f --connect-timeout 5 --retry 3 --location` — `--connect-timeout`
+  bounds only the TCP handshake, so a mirror that accepts the connection and
+  then stops sending waits forever. The mac80211 source is
+  `https://github.com/openwrt/backports/releases/download/backports-v6.18.26`
+  (12 MB), a github release asset, which is exactly what stalls on Actions
+  runners. `download.pl`'s stdout is block-buffered through make, so nothing
+  reaches the log while it hangs. The same step took under 2 minutes in the last
+  green run (`41628472908`, mac80211 was a ccache hit), which is why this looked
+  like a hang and not a slow compile.
+  Fixed without patching the tree, using the hook `download.pl` already has:
+  `CURL_OPTIONS="--max-time 1800 --speed-limit 1024 --speed-time 60"`, exported
+  by `aw1000_byte.sh` and set in the job env (so the on-demand package build
+  inherits it). A transfer that drops under 1 KB/s for 60 s now aborts with
+  `curl: (28) Operation too slow` and retries, so a dead mirror costs ~4 minutes
+  and names itself in the log instead of hours of silence.
+  **Verified with a stalling HTTP server** (`/tmp/opencode/stall_server.py`:
+  accepts, sends headers, then stops): without `CURL_OPTIONS` `download.pl`
+  hangs indefinitely (killed at an outer 20 s timeout, `rc=124`); with the
+  shipped string it aborts at exactly 60 s per attempt and gives up with
+  `No more mirrors to try`. `make download` in the real tree: `rc=0` in 94 s,
+  no failures, no leftover `*.tmp`.
+- **Build safety: fetching is its own named, bounded phase.**
+  `start_build()` now runs `prefetch_sources()` first: `timeout 2400 make -jN
+  download`, non-fatal (some configured packages legitimately have dead
+  upstreams that `make world` never needs), banner-lined, and it deletes
+  `dl/*.tmp` afterwards because an interrupted transfer leaves a partial file
+  that surfaces much later as an unrelated hash mismatch.
+- **Build safety: a failed run keeps its cache.** `actions/cache@v4` saves in a
+  post-job step, which is skipped on failure *or* cancellation — the last two
+  runs both ended that way ("Post Cache downloads and ccache completed
+  skipped"), so every attempt discarded its `dl/` and ccache and the next one
+  started colder. Split into `actions/cache/restore@v4` + `actions/cache/save@v4`
+  with `if: always()` and `continue-on-error`, saved under
+  `cache-primary-key`.
+- **Build safety: step caps below the job cap.** `Build firmware` is
+  `timeout-minutes: 310` and `Build on-demand packages` is `60`, so a stall ends
+  as an ordinary step failure (which still runs the cache save) instead of a
+  job cancellation (which skips it). 310 + 60 leaves ~50 min of the 360 min job
+  budget for the cache save and artifact upload.
+- **Gates:** `ci_check_packages()` now fails the build if `CURL_OPTIONS` is
+  missing from either `aw1000_byte.sh` or the workflow env, if
+  `prefetch_sources()`/`timeout 2400 make` disappear, or if the explicit
+  `actions/cache/save@v4` / `if: always()` pair is removed.
+- **Size:** unchanged - no firmware file was touched; the previous image
+  (`35,328,809` bytes) is what the preflight for this commit rebuilds.
 - **Latency: the WAN egress queue is bounded instead of left at 15 MB.**
   `byte-affinity` used to stop at "the qdisc is `fq`", which meant the kernel
   default `limit 10000` packets - ~15 MB of queue, 0.6 s of delay at 200 Mbit/s

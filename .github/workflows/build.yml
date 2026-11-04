@@ -32,6 +32,13 @@ jobs:
       CI: "1"
       TARGET_BRANCH: ${{ github.event.inputs.branch || 'v25.12.1' }}
       SKIP_MENUCONFIG: "1"
+      # Abort a transfer that stalls instead of waiting forever. download.pl's
+      # curl args are `--connect-timeout 5 --retry 3` with no stall timeout, so a
+      # mirror that accepts the connection then stops sending hangs the build
+      # silently (download.pl's output is block-buffered through make). Run
+      # 41746818664 sat in package/kernel/mac80211 for 4 h 18 m - 0 bytes/s from
+      # a github release asset - until GitHub's 6 h job cap killed it.
+      CURL_OPTIONS: "--max-time 1800 --speed-limit 1024 --speed-time 60"
 
     steps:
       - name: Checkout builder
@@ -61,8 +68,15 @@ jobs:
             python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c rsync scons \
             squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
 
-      - name: Cache downloads and ccache
-        uses: actions/cache@v4
+      # Restore and save are separate steps because actions/cache@v4 saves in a
+      # post-job step, which is skipped when the job is cancelled or fails -
+      # exactly how the last two runs ended, so every attempt threw its
+      # downloads and ccache away and the next one started colder than the last.
+      # save runs with `if: always()` so a build that fails or times out still
+      # donates its ccache, and a re-run is warm instead of starting over.
+      - name: Restore downloads and ccache
+        id: cache-aw1000
+        uses: actions/cache/restore@v4
         with:
           path: |
             builder/immortalwrt/dl
@@ -79,9 +93,15 @@ jobs:
 
       - name: Build firmware
         working-directory: builder
+        # Hard cap below the job's own 360 min so the job ends as a normal step
+        # failure instead of a cancellation: a cancelled job skips the rest of
+        # its steps, a failed one still runs the cache save below, and the next
+        # attempt then starts from this attempt's ccache instead of cold.
+        # 5 h 10 m leaves ~40 min for the cache save and artifact upload.
+        timeout-minutes: 310
         run: |
           # The script clones immortalwrt/, appends feeds, applies preset + files,
-          # runs defconfig, and builds. Non-interactive because CI=1 and
+          # runs defconfig, builds. Non-interactive because CI=1 and
           # SKIP_MENUCONFIG=1 are exported at job level.
           bash aw1000_byte.sh
 
@@ -96,6 +116,9 @@ jobs:
             echo "No firmware images produced"; exit 1; }
 
       - name: Build on-demand packages
+        # Same reason as the firmware step: a stalled fetch here must not eat the
+        # budget silently. 40 min is ~2x the measured 20 min for this step.
+        timeout-minutes: 60
         run: |
           # OpenClash, AdGuard Home, Nikki, SQM and friends are published in the
           # opkg repo but kept out of the image: they would roughly double the
@@ -228,3 +251,15 @@ jobs:
           test "$count" -ge 1 || { echo "::error::release $TAG has no sysupgrade image"; exit 1; }
           gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets \
             --jq '.assets[] | "  \(.name)  \(.size) bytes"'
+      # Last step on purpose: it must run no matter how the build ended, so the
+      # next attempt inherits this one's downloads and ccache. continue-on-error
+      # because a failed cache upload must never turn a good build red.
+      - name: Save downloads and ccache
+        if: always() && steps.cache-aw1000.outputs.cache-primary-key != ''
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            builder/immortalwrt/dl
+            builder/immortalwrt/.ccache
+          key: ${{ steps.cache-aw1000.outputs.cache-primary-key }}

@@ -20,6 +20,31 @@ BOLD_YELLOW="${BOLD}${YELLOW}"
 BOLD_BLUE="${BOLD}${BLUE}"
 BOLD_MAGENTA="${BOLD}${MAGENTA}"
 
+# Bound every source fetch.
+#
+# scripts/download.pl builds its curl command as
+#     curl -f --connect-timeout 5 --retry 3 --location ...
+# --connect-timeout only bounds the TCP handshake. A mirror that accepts the
+# connection and then stops sending (github release assets do this on Actions
+# runners - the mac80211 backports tarball is a github release asset) leaves
+# curl waiting forever, and download.pl's stdout is block-buffered through make,
+# so the build sits silent instead of failing. That is what run 41746818664 did:
+# `make[3] -C package/kernel/mac80211 compile` logged at 02:08, zero further log
+# lines, killed by GitHub's 6 h job cap at 06:26 with curl/flock/perl still
+# alive and no compiler in the process tree.
+#
+# download.pl already honours $CURL_OPTIONS for exactly this, so no tree patch
+# is needed: --speed-limit/--speed-time abort a transfer that drops under 1 KB/s
+# for 60 s (four attempts with --retry, ~5 min worst case per URL, then the next
+# mirror), and --max-time is the backstop for a huge file on a slow-but-alive
+# link. The wget fallback already carries --timeout=5.
+# Idempotent: the workflow sets CURL_OPTIONS at job level too, so the on-demand
+# package build inherits it; do not append a second copy here.
+case "$CURL_OPTIONS" in
+    *--speed-time*) : ;;
+    *) export CURL_OPTIONS="${CURL_OPTIONS:-} --max-time 1800 --speed-limit 1024 --speed-time 60" ;;
+esac
+
 # Stable opkg repo signing key, copied into the build tree immediately after
 # the ImmortalWrt clone.
 #
@@ -1082,6 +1107,28 @@ ci_check_packages() {
     else
         missing="$missing ndisc6-feed-Makefile"
     fi
+    # A source fetch must never again be able to eat the CI budget silently.
+    # scripts/download.pl builds `curl -f --connect-timeout 5 --retry 3
+    # --location` with no stall timeout, and its output is block-buffered through
+    # make, so a mirror that stops sending is invisible until the job cap kills
+    # the run (41746818664: 4 h 18 m inside package/kernel/mac80211). All four
+    # pieces below are load-bearing and each covers a different path:
+    #   CURL_OPTIONS in the job env   - also covers the on-demand build
+    #   the same export in this script - manual and local builds
+    #   a bounded make download phase  - the fetch is named and time-boxed
+    #   cache restore/save split       - a failed run still donates its ccache
+    grep -q 'CURL_OPTIONS.*--speed-time' "$repo_root/aw1000_byte.sh" || \
+        missing="$missing curl-options(stalled fetch must abort)"
+    grep -q 'CURL_OPTIONS:.*--speed-time' "$repo_root/.github/workflows/build.yml" || \
+        missing="$missing ci-curl-options(job env)"
+    if ! grep -q '^prefetch_sources() {' "$repo_root/aw1000_byte.sh" || \
+            ! grep -q 'timeout 2400 make' "$repo_root/aw1000_byte.sh"; then
+        missing="$missing source-prefetch(bounded make download)"
+    fi
+    grep -q 'actions/cache/save@v4' "$repo_root/.github/workflows/build.yml" || \
+        missing="$missing cache-save(cancelled runs must not lose ccache)"
+    grep -qE '^ +if: always\(\)' "$repo_root/.github/workflows/build.yml" || \
+        missing="$missing cache-save-always(save on failure)"
     # qmi_wwan_q used to #define CONFIG_QCA_NSS_DRV itself on IPQ807x and then
     # reference rmnet_nss_callbacks from rmnet_nss.ko, which cannot be selected
     # here (its DEPENDS include +@NSS_DRV_C2C_ENABLE, a chip-to-chip path an
@@ -1832,8 +1879,36 @@ ci_check_packages() {
     echo -e "${BOLD_GREEN}ALL REQUIRED PACKAGES PRESENT IN .config${RESET}"
 }
 
+# Fetch every source the configuration needs, as its own named, bounded phase.
+#
+# Non-fatal on purpose: `make download` reports failure for packages whose
+# upstream is gone but which the build may never need, and a slow mirror should
+# not stop a build that can still finish from cache. The point is that fetching
+# is a visible, time-boxed block instead of a silent gap inside whichever
+# compile happened to need a tarball first - the 6 h cap in run 41746818664 was
+# spent that way, hidden behind package/kernel/mac80211.
+prefetch_sources() {
+    local start dur
+    echo -e "${BOLD_YELLOW}FETCHING SOURCES (bounded, non-fatal)${RESET}"
+    start=$(date +%s)
+    if timeout 2400 make -j"$(nproc)" download; then
+        dur=$(( $(date +%s) - start ))
+        printf "${BOLD_GREEN}SOURCES OK IN %02dm %02ds${RESET}\n" $((dur / 60)) $((dur % 60))
+    else
+        dur=$(( $(date +%s) - start ))
+        printf "${BOLD_YELLOW}SOURCE FETCH INCOMPLETE AFTER %02dm %02ds - PACKAGES WILL RETRY THEIR OWN${RESET}\n" \
+            $((dur / 60)) $((dur % 60))
+    fi
+    # An interrupted transfer leaves "<name>.tmp" beside the tarball. The next
+    # attempt then works from a partial file, which surfaces much later as a
+    # hash mismatch in an unrelated package. Drop them while it is cheap.
+    find dl -name '*.tmp' -type f -delete 2>/dev/null || :
+    return 0
+}
+
 start_build() {
     get_version
+    prefetch_sources
     while true; do
         echo -e "${BOLD_YELLOW}STARTING BUILD WITH $(nproc) CORES${RESET}"
         start=$(date +%s)
