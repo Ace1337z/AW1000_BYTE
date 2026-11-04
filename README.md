@@ -874,6 +874,28 @@ it goes green, so the loop after a fix is minutes instead of hours:
 | `image` | squashfs, sysupgrade tar and manifest assemble | 10-20 min |
 | `ondemand`, `repo` | the on-demand package set and the signed opkg repo build | 20-40 min |
 
+### Preflight: run the tree CI runs, not the tree you have
+`scripts/local-verify.sh` covers the gates **after** the preset is applied. It
+does not run the preset. Three CI failures in a row (`41704830850`,
+`41721902711`, `41739864877`) were all defects in `apply_preset()` itself —
+`sed`/`awk` matching nothing, a patch applied to rewritten source, a bare
+`rmdir` returning 1 under `set -e` — and every local `make -j4` around them
+passed, because it ran against a tree whose feeds had drifted from what
+`apply_preset()` produces (local ndisc6 stayed `1.0.2` while CI rewrites it to
+`1.0.8`). Compiling proved nothing about the step that fails.
+`scripts/preflight.sh` closes that hole; it is the pre-push gate now:
+```
+bash scripts/preflight.sh              # apply_preset -> defconfig -> gates -> make
+bash scripts/preflight.sh --no-build   # the three cheap steps, ~2 min
+```
+It extracts `apply_preset()` and `ci_check_packages()` from
+`aw1000_byte.sh` (self-contained; the extraction takes the last `^}$` before the
+next top-level function, because the function body contains a heredoc whose
+terminator is a bare `}`), runs them with the same globals the script sets,
+then `make defconfig` and `make -j$(nproc)`. Log: `/tmp/opencode/preflight.log`.
+A push without a green preflight is how this batch burned three CI runs and
+about five hours of runner time.
+
 `config` is the gate that catches the quiet failure mode: `make defconfig`
 discards a `CONFIG_PACKAGE_x=y` whose package or dependency does not exist and
 prints at most a warning, so a missing LuCI app can reach the image without ever
@@ -1072,6 +1094,27 @@ Review both before republishing an image built here.
 ## Changelog
 
 ### 1.2.x — 2026-11-04
+- **Build fix: `rmdir` aborted `apply_preset()` under `set -e`, and local
+  verification now runs `apply_preset()` itself.** Run `41739864877` died eight
+  minutes in, one line after `ndisc6: 1.0.2 -> 1.0.8 ...`, with no message:
+  the new cleanup did `rmdir "$(dirname "$qms")/../patches" 2>/dev/null`, and a
+  bare `rmdir` returns 1 when the directory is already gone. The script runs
+  under `set -e`, so the function aborted silently; `2>/dev/null` hid the
+  reason. Both calls carry `|| :` now (also `rm -f`), and only the obsolete
+  `0001-disable-qca-nss-hook.patch` is removed, so a future feed pin may still
+  ship patches of its own.
+  The deeper problem was the verification, not the bug: local `make` had been
+  run on a tree whose feeds had **drifted** from what `apply_preset()` produces
+  (local `feeds/qmodem/application/ndisc6/Makefile` was still `1.0.2` while CI
+  rewrites it to `1.0.8`), and it never executed `apply_preset()` at all — so
+  all three CI failures of this batch were in steps local compiles never
+  touched. New `scripts/preflight.sh` runs the real sequence against the real
+  tree: extract `apply_preset()` + its helpers from `aw1000_byte.sh`, run it,
+  `make defconfig`, run the extracted `ci_check_packages()`, then `make -jN`.
+  It is now the pre-push gate. **Verified:** all four steps green locally
+  (1051 `=y` lines, `ALL REQUIRED PACKAGES PRESENT IN .config`), image
+  `35,318,569` bytes, rootfs squashfs `30,054,525`, manifest
+  `ndisc6 - 1.0.8-r1`, `kmod-qmi_wwan_q - 6.12.94.1.5-r2`, no `*.rej`/`*.orig`.
 - **Build fix: the `qmi_wwan_q` patch is retired, the driver guards the NSS hook
   itself.** The qmodem pin `b4effcd` rewrote `qmi_wwan_q.c`: it no longer
   `#define CONFIG_QCA_NSS_DRV` on IPQ807x, every NSS use now sits behind
@@ -1089,8 +1132,10 @@ Review both before republishing an image built here.
   seconds instead of at modpost an hour in. Verified locally with a from-scratch
   rebuild of the package: `nm -u qmi_wwan_q.ko` reports zero `nss` symbols and
   the packaged source is byte-identical to the feed (`cmp`). **Size:** unchanged
-  - sysupgrade `35,318,569`, rootfs squashfs `30,054,513`; the patch never
-  reached the image (it removed lines, and it was never applied on this tree).
+  - sysupgrade `35,318,569`, rootfs squashfs `30,054,513` on the first build,
+  `30,054,525` after re-running the whole pre-build chain (12 bytes of rebuild
+  jitter, no code change); the patch never reached the image (it removed lines,
+  and it was never applied on this tree).
 - **Build fix: ndisc6 is pinned by `PKG_HASH` now.** OpenWrt renamed
   `PKG_MD5SUM` to `PKG_HASH` and the qmodem feed copy followed, so the
   `sed`-based pin in `apply_preset()` matched no line and run `41704830850`

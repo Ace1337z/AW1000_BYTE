@@ -653,8 +653,11 @@ PY
         fi
         # Only the obsolete file goes: a future feed pin could legitimately ship
         # patches of its own, and Build/Prepare never ran $(Build/Patch) here.
-        rm -f "$(dirname "$qms")/../patches/0001-disable-qca-nss-hook.patch"
-        rmdir "$(dirname "$qms")/../patches" 2>/dev/null
+        # `|| :` on both: this function runs under `set -e`, and `rmdir` fails
+        # whenever the directory is absent or not empty, which killed run
+        # 41739864877 silently right after the ndisc6 line.
+        rm -f "$(dirname "$qms")/../patches/0001-disable-qca-nss-hook.patch" || :
+        rmdir "$(dirname "$qms")/../patches" 2>/dev/null || :
         echo -e "${BOLD_GREEN}qmi_wwan_q: NSS hook guarded upstream, obsolete patch retired${RESET}"
     fi
     # qmodem reports the wrong connection state on this modem. The Quectel
