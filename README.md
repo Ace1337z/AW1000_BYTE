@@ -1004,12 +1004,14 @@ and publishes the artifacts; it no longer discovers problems.
 `luci-app-passwall` (PassWall **v1**, Lua, `PKG_VERSION:=4.66-8`) is vendored at
 `packages/luci-app-passwall`. It was published **on demand** (release opkg repo,
 not the image) through 1.2.38, and in practice that was unreachable: the repo is
-filtered against the image manifest, so its three hard runtime deps —
-`dns2socks`, `dns2tcp`, `microsocks` — were never published, `opkg` could not
-resolve them, and the install simply failed. The package looked available and
-never installed.
+filtered against the image manifest, so its three runtime deps — `dns2socks`,
+`dns2tcp`, `microsocks` — were never published, `opkg` could not resolve them,
+and the install simply failed. The package looked available and never installed.
 
-Since 1.2.39 all four are **in the image**, and v1 **ships disabled**:
+Since 1.2.39 the package is **in the image** with `dns2tcp` — v1's default
+`dns_mode`, so it works out of the box. 1.2.40 removed the other two from the
+image (see *Dependencies trimmed to what the defaults actually run* below). v1
+**ships disabled**:
 
 - `root/usr/share/passwall/0_default_config` has `option enabled '0'`, so the
   script exits before it can take port 53 or the redirect hooks away from
@@ -1039,10 +1041,35 @@ Since 1.2.39 all four are **in the image**, and v1 **ships disabled**:
   install sets (the router resolves through its own dnsmasq); it is inert for
   the default configuration and is kept so enabling v1 later needs no extra
   step.
-- Size cost, measured not estimated: the four packages stage 2,578,978 bytes,
+- Size cost, measured not estimated: the four packages staged 2,579,403 bytes,
   which `mksquashfs -comp xz -b 262144` (the image's own compressor and block
-  size) turns into **905,216 bytes ≈ 0.86 MiB**. The sysupgrade image goes from
-  ~34.4 MB to ~35.3 MB.
+  size) turned into **905,216 bytes ≈ 0.86 MiB** in 1.2.39. After the 1.2.40
+  trim (`dns2socks` + `microsocks` out) the same measurement over
+  `luci-app-passwall` + `dns2tcp` gives **884,736 bytes ≈ 0.84 MiB** from
+  2,536,058 bytes raw — **20,480 bytes** smaller, and the sysupgrade image goes
+  from ~34.4 MB to ~35.3 MB instead of ~35.32 MB.
+
+#### Dependencies trimmed to what the defaults actually run
+1.2.39 put `dns2socks`, `dns2tcp` and `microsocks` in the image because the
+on-demand repo could not resolve them. Only `dns2tcp` is needed for the shipped
+configuration: `0_default_config` sets `dns_mode 'dns2tcp'` and `socks_enabled
+'0'`, and `LUCI_DEPENDS` is what pulls a binary in, not an `INCLUDE_*` option.
+`dns2socks` backs only the optional `dns_mode=dns2socks` filter and
+`microsocks` only the optional socks server / `luci-app-microsocks`; both are
+off by default and v1's LuCI hides a mode whose binary is missing
+(`api.is_finded`). They are **published on demand** again
+(`.github/repo/ondemand.txt`), so enabling those modes is one `opkg install`
+away. Everything else in `LUCI_DEPENDS` stays: `coreutils-base64`,
+`coreutils-nohup`, `curl`, `chinadns-ng`, `ip-full`, `libuci-lua`, `lua`,
+`luci-compat`, `luci-lib-jsonc`, `resolveip`, `tcping` and `unzip` are all
+referenced by v1's own scripts or shared with passwall2, so they cost nothing
+extra.
+
+`0_default_config` now ships `use_nft '1'`. This image carries no iptables, so
+the old `'0'` started v1 on a redirect path whose binaries do not exist and the
+proxy stayed down; the first-boot `luci-passwall` script did flip it, but only
+after an `opkg`/`iptables` probe. The shipped default is now the nftables path
+directly, and a gate asserts it.
 
 It stays **vendored, not a feed pin**, so the image compiles the exact copy
 reviewed here and no `opkg upgrade` can swap it for an upstream version — the
@@ -1068,10 +1095,14 @@ Gates assert: vendored version `4.66-8`; `CONFIG_PACKAGE_luci-app-passwall=y`
 while `CONFIG_PACKAGE_nftables` stays **out** of `.config` and
 `nftables-json` stays in; the package ships disabled (`enabled '0'`) and its
 `boot()` honours that switch (`passwall-v1-boot-gate`);
-every heavy `INCLUDE_*` default stays `n` while `INCLUDE_Xray` stays `y`; the
-four names are **absent** from `ondemand.txt` (in the image now, so publishing
-them again would just be filtered back out); and no `src-git passwall1` line
-sneaks back into `aw1000_byte.sh`.
+every heavy `INCLUDE_*` default stays `n` while `INCLUDE_Xray` stays `y`;
+`luci-app-passwall` and `dns2tcp` are **absent** from `ondemand.txt` (they are
+in the image, so publishing them again would just be filtered back out), while
+`dns2socks` and `microsocks` must stay **listed there**, **out** of `.config`
+and **out** of `LUCI_DEPENDS` — both directions are silent on the device, so
+`ondemand-missing:*`, `*-in-image` and `passwall-v1-dep:*` cover them; the
+shipped default is `use_nft '1'`; and no `src-git passwall1` line sneaks back
+into `aw1000_byte.sh`.
 
 Fixes to the vendored copy, each of which was silent before:
 
@@ -1285,6 +1316,34 @@ Review both before republishing an image built here.
 
 ## Changelog
 
+### 1.2.x — 2026-11-05
+- **1.2.40 — PassWall v1 carries only the dependencies its defaults actually
+  run.** 1.2.39 put `dns2socks`, `dns2tcp` and `microsocks` in the image
+  because the on-demand repo could not resolve them. Only `dns2tcp` is used by
+  the shipped configuration (`dns_mode 'dns2tcp'`, `socks_enabled '0'`):
+  `dns2socks` backs just the optional `dns_mode=dns2socks` filter,
+  `microsocks` just the optional socks server, and v1's LuCI hides a mode whose
+  binary is missing (`api.is_finded`). Both left `LUCI_DEPENDS`, `preset` and
+  the image, and are published **on demand** again in
+  `.github/repo/ondemand.txt`, so the opt-in modes are one `opkg install` away.
+  Everything else in `LUCI_DEPENDS` is referenced by v1's own scripts or shared
+  with passwall2 and stays. **Size:** `mksquashfs -comp xz -b 262144` over
+  `luci-app-passwall` + `dns2tcp` is 884,736 bytes (2,536,058 raw) against
+  905,216 (2,579,403) for the 1.2.39 set - a measured **20,480-byte** drop; the
+  two dropped `.ipk` files are 12,813 B + 8,057 B.
+- **1.2.40 — the shipped v1 default is `use_nft '1'`.** This image has no
+  iptables, so `use_nft '0'` started v1 on a redirect path whose binaries do
+  not exist and the proxy stayed down; the `luci-passwall` uci-defaults script
+  did flip it, but only after an `opkg`/`iptables` probe at first boot. The
+  shipped `0_default_config` now asks for the nftables path directly (both the
+  v1 and v2 stacks run on fw4/nft here), and a gate asserts the value survives.
+- **1.2.40 — gates for the trim, both directions.** `luci-app-passwall` and
+  `dns2tcp` must stay **absent** from `ondemand.txt` and in `.config`;
+  `dns2socks`/`microsocks` must stay **listed** there and **out** of both
+  `.config` and `LUCI_DEPENDS`. Each failure is silent on the device - a
+  re-added dep quietly re-inflates the image, a missing on-demand entry makes
+  the opt-in mode uninstallable - so all four are machine-checked as
+  `ondemand-missing:*`, `*-in-image` and `passwall-v1-dep:*`.
 ### 1.2.x — 2026-11-04
 - **1.2.39 — revert: the IPv6 watcher is a one-shot probe again.**
   1.2.38 turned `/usr/libexec/byte-v6-check` into a procd service with a
@@ -1639,7 +1698,9 @@ Review both before republishing an image built here.
   `build-ondemand-packages.sh`, so the ipk ships in the opkg repo while the
   image keeps passwall2 only - the two install the same transparent-proxy
   rules and both want port 53, so running both tears one down and its page
-  reports "not running". Vendored rather than feed-pinned, so `opkg upgrade`
+  reports "not running". (**Superseded in 1.2.39:** the package is now in the
+  image, disabled. **Changed again in 1.2.40:** `dns2socks`/`microsocks` are
+  on demand, `dns2tcp` is in the image.) Vendored rather than feed-pinned, so `opkg upgrade`
   cannot swap it for an upstream copy (the failure mode that hit qmodem's TTL
   script). `ondemand.txt` lists only `dns2socks`, `dns2tcp`, `microsocks`
   (kept selectable in Kconfig, not republished - the same versions are in the

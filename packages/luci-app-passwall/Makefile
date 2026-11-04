@@ -12,8 +12,9 @@
 #     Enabling v1 means disabling passwall2 first; that is a user decision.
 #   - it was published on demand until 1.2.38. That never worked: the repo is
 #     filtered against the image manifest, so dns2socks/dns2tcp/microsocks
-#     were missing from it and opkg refused the install. All three are in the
-#     image now (see preset).
+#     were missing from it and opkg refused the install. dns2tcp is in the
+#     image (it is v1's default dns_mode); dns2socks and microsocks are
+#     published on demand again since 1.2.40, they back optional modes only.
 #   - v1 ships Lua controllers; luci-lua-runtime, lua, libuci-lua and
 #     luci-lib-jsonc are already in the image, so the pages load.
 #   - the Nftables variant is the only one that can work here, and its
@@ -56,9 +57,15 @@ PKG_CONFIG_DEPENDS:= \
 
 LUCI_TITLE:=LuCI support for PassWall
 LUCI_PKGARCH:=all
+# Dependencies are the set this package actually executes with its pinned
+# core (Xray) and its shipped default config. dns2socks and microsocks were
+# dropped in 1.2.40: dns2socks only backs the optional dns_mode=dns2socks
+# filter and microsocks only backs socks_enabled / the socks server, both off
+# by default. They stay published in the BYTE opkg repo (ondemand.txt), and
+# the LuCI page hides a mode whose binary is missing (api.is_finded).
 LUCI_DEPENDS:=+coreutils +coreutils-base64 +coreutils-nohup +curl \
-	+chinadns-ng +dns2socks +dns2tcp +ip-full +libuci-lua +lua +luci-compat +luci-lib-jsonc \
-	+microsocks +resolveip +tcping +unzip \
+	+chinadns-ng +dns2tcp +ip-full +libuci-lua +lua +luci-compat +luci-lib-jsonc \
+	+resolveip +tcping +unzip \
 	+PACKAGE_$(PKG_NAME)_INCLUDE_Brook:brook \
 	+PACKAGE_$(PKG_NAME)_INCLUDE_Haproxy:haproxy \
 	+PACKAGE_$(PKG_NAME)_INCLUDE_Hysteria:hysteria \

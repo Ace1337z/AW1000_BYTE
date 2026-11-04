@@ -5295,10 +5295,13 @@ CONFIG_PACKAGE_luci-app-package-manager=y
 # CONFIG_PACKAGE_luci-app-pagekitec is not set
 # passwall (v1, 4.66-8) SHIPS IN THE IMAGE as of 1.2.39. It was published
 # on demand before, and on-demand was unreachable in practice: the repo is
-# filtered against the image manifest, so its three missing runtime deps
-# (dns2socks, dns2tcp, microsocks) were not resolvable and opkg refused the
-# install. They are in the image now, so v1 is present and offline-installable
-# without a repo round trip.
+# filtered against the image manifest, so dns2socks, dns2tcp and microsocks
+# were missing from it, opkg could not resolve them and refused the install.
+# Since 1.2.40 only dns2tcp is in the image: it is v1's default dns_mode, so
+# v1 works out of the box. dns2socks (optional filter mode) and microsocks
+# (optional socks server) are back on demand in the BYTE repo - they are not
+# needed for the default configuration and v1's LuCI hides a mode whose
+# binary is absent (api.is_finded).
 # It ships DISABLED (0_default_config sets global.enabled=0 and the package
 # carries no rc.d symlink), so it cannot fight passwall2 for port 53 or the
 # redirect hooks at boot. Enabling v1 means disabling passwall2 first - both
@@ -6009,7 +6012,7 @@ CONFIG_PACKAGE_nftables-json=y
 # CONFIG_PACKAGE_dhtd is not set
 # CONFIG_PACKAGE_dns-forwarder is not set
 # CONFIG_PACKAGE_dns-over-https is not set
-CONFIG_PACKAGE_dns2socks=y
+# CONFIG_PACKAGE_dns2socks is not set
 CONFIG_PACKAGE_dns2tcp=y
 # CONFIG_PACKAGE_dnscrypt-proxy is not set
 # CONFIG_PACKAGE_dnscrypt-proxy-resolvers is not set
@@ -6510,7 +6513,7 @@ CONFIG_PACKAGE_cgi-io=y
 # CONFIG_PACKAGE_kcptun-server is not set
 # CONFIG_PACKAGE_librespeed-go is not set
 # CONFIG_PACKAGE_lighttpd is not set
-CONFIG_PACKAGE_microsocks=y
+# CONFIG_PACKAGE_microsocks is not set
 # CONFIG_PACKAGE_naiveproxy is not set
 # CONFIG_PACKAGE_nginx-full is not set
 # CONFIG_PACKAGE_nginx-mod-brotli is not set

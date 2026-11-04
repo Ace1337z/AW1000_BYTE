@@ -942,11 +942,12 @@ ci_check_packages() {
     [ -n "$repo_root" ] || repo_root="$(realpath .)"
     # openclash / adguardhome are intentionally not shipped (size); the
     # proxy stack is passwall + passwall2 with the Xray core only.
-    # passwall v1 SHIPS since 1.2.39, disabled, with its three previously
-    # unresolvable runtime deps (dns2socks/dns2tcp/microsocks) in the image.
+    # passwall v1 SHIPS since 1.2.39, disabled, with dns2tcp (its default
+    # dns_mode) in the image; dns2socks and microsocks are optional backends
+    # and stay on demand since 1.2.40.
     # v1 and passwall2 both install redirect rules on the same nft table and
     # both want port 53, so only one may be enabled - that is enforced by
-    # shipping v1 disabled (global.enabled=0, no rc.d symlink), asserted
+    # shipping v1 disabled (global.enabled=0 and the boot() gate), asserted
     # further down.
     grep -q '^CONFIG_PACKAGE_luci-app-passwall=y$' .config || \
         missing="$missing passwall-v1(not in image)"
@@ -973,7 +974,7 @@ ci_check_packages() {
         done
     fi
     for p in luci-app-passwall luci-app-passwall2 \
-             dns2socks dns2tcp microsocks \
+             dns2tcp \
              luci-theme-footstrap \
              luci-app-qmodem qmodem modem_scan tom_modem \
              luci-app-netstat vnstat2 \
@@ -1329,10 +1330,35 @@ ci_check_packages() {
     # against the image manifest, so leaving it there publishes a copy the
     # filter then drops again - and the old failure (deps unresolvable, opkg
     # refusing the install) looks like a repo outage, not a config mistake.
-    for inc in luci-app-passwall dns2socks dns2tcp microsocks; do
+    for inc in luci-app-passwall dns2tcp; do
         grep -qx "$inc" "$repo_root/.github/repo/ondemand.txt" 2>/dev/null && \
             forbidden="$forbidden ondemand-still-lists:$inc(in image since 1.2.39)"
     done
+    # dns2socks and microsocks are the opposite case since 1.2.40: v1 does not
+    # need them for its default configuration (dns_mode=dns2tcp, socks off), so
+    # they left the image and must be *published on demand* instead. If the
+    # image still pulls them, a dep crept back into the vendored Makefile or
+    # into preset; if they vanish from the list, the opt-in modes cannot be
+    # installed at all. Both conditions are silent on the device, so assert
+    # both directions here.
+    for opt in dns2socks microsocks; do
+        grep -qx "$opt" "$repo_root/.github/repo/ondemand.txt" 2>/dev/null || \
+            missing="$missing ondemand-missing:$opt(optional passwall v1 backend)"
+        grep -qx "CONFIG_PACKAGE_${opt}=y" .config 2>/dev/null && \
+            forbidden="$forbidden ${opt}-in-image(optional, must stay on demand)"
+        sed -n '/^LUCI_DEPENDS/,/^define Package/p' "$pwall/Makefile" 2>/dev/null | \
+            grep -qF "+${opt}" && \
+            forbidden="$forbidden passwall-v1-dep:${opt}(optional, must stay on demand)"
+    done
+    sed -n '/^LUCI_DEPENDS/,/^define Package/p' "$pwall/Makefile" 2>/dev/null | \
+        grep -q '+dns2tcp' || missing="$missing passwall-v1-dep:dns2tcp(default dns_mode)"
+    # The shipped default config must ask for the nftables path: this image
+    # carries no iptables, so use_nft=0 starts v1 on a binary that does not
+    # exist and the proxy silently stays down. (The uci-defaults script also
+    # flips it on first boot, but only after a live opkg/iptables probe.)
+    grep -qE "^[[:space:]]*option use_nft '1'" \
+        "$pwall/root/usr/share/passwall/0_default_config" 2>/dev/null || \
+        missing="$missing passwall-v1-use-nft(default must be nft)"
     # ...and it must have no feed line: a src-git pin would reintroduce a
     # second luci-app-passwall into the feed metadata. Checked on the generated
     # feeds.conf.default (the source only mentions it in a comment).
