@@ -200,7 +200,7 @@ opkg install luci-app-nikki
 ```
 
 Available feed content includes AdGuard Home, nikki/mihomo, qmodem QMI drivers,
-LXDE/LuCI dependencies and the AW1000 phone packages. The feed is static: it
+LuCI dependencies and the AW1000 phone packages. The feed is static: it
 will not receive new package versions.
 
 ---
