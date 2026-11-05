@@ -12,8 +12,14 @@ cellular, WiFi, RJ11 telephony, SMS, TTL normalisation, transparent proxy and
 remote-access defaults.
 
 This repository is **final and retired**. The `main` branch now contains this
-document only. The `repo` branch remains online as the signed opkg feed used by
-the firmware. No further firmware, package or source updates will be published.
+document and the dashboard screenshots only. The `repo` branch remains online
+as the signed opkg feed used by the firmware. No further firmware, package or
+source updates will be published.
+
+![BYTE by ACE — Vantage dashboard](docs/screenshots/dashboard-dark.png)
+
+<sub>LuCI dashboard with the Vantage theme: system, memory, mobile, storage, CPU,
+temperature and WAN status at a glance.</sub>
 
 ---
 
@@ -334,7 +340,7 @@ logread -e byte-v6
 
 | Branch | Contents |
 |---|---|
-| `main` | This README only |
+| `main` | This README and the dashboard screenshots |
 | `repo` | Signed opkg feed used by the firmware |
 
 The source tree, build scripts, CI workflows, kernel patches and package
@@ -362,3 +368,10 @@ stable firmware; no pull requests, builds or updates are planned.
 
 Review both before republishing an image built from this repository's former
 source tree.
+
+<details>
+<summary>Dashboard — light theme</summary>
+
+![BYTE by ACE — Vantage dashboard, light theme](docs/screenshots/dashboard-light.png)
+
+</details>
