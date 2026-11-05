@@ -1,5 +1,0 @@
-#!/bin/sh
-# rpcd scans /usr/libexec/rpcd once at start; restart it so the modeminfo
-# plugin and its ACL exist on a freshly flashed image.
-[ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd restart 2>/dev/null
-exit 0

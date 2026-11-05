@@ -1,5 +1,0 @@
-#!/bin/sh
-# rpcd only scans /usr/libexec/rpcd at start, so a freshly flashed image needs
-# one restart before the BYTE page can call its own backend. Runs once.
-[ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd restart 2>/dev/null
-exit 0

@@ -1,5 +1,0 @@
-
-config config
-	option show_status '1'
-	option backend 'normal'
-
